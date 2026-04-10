@@ -2,11 +2,6 @@
 #![feature(trait_alias)]
 #![feature(generic_atomic)]
 
-use argon2::password_hash::PasswordHashString;
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
-};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
@@ -22,24 +17,27 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use headers::{ContentType, HeaderMapExt};
 use percent_encoding::{percent_decode, percent_decode_str};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha512};
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
+
+mod backend;
+
+use backend::auth::{SessionInfo, SessionManager, UserManager, extract_token_from_cookie};
+use backend::tasks::{Task, TaskBase, TaskManager, TaskStatus};
 
 macro_rules! if_or {
     // 基本用法: if_or!(condition, then_value, else_value)
@@ -127,194 +125,12 @@ where
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(u8)]
-enum TaskStatus {
-    Pending,
-    Running,
-    Paused,
-    Finished,
-    Cancelled,
-    Failed,
-}
-
-struct TaskBase {
-    uuid: Uuid,
-    name: String,
-    owner: String,
-    status: Mutex<TaskStatus>,
-    current_task: Mutex<String>,
-    total_count: AtomicUsize,
-    processed_count: AtomicUsize,
-    total_cost: AtomicU64,
-    processed_cost: AtomicU64,
-    error_msg: Mutex<Option<String>>,
-}
-impl TaskBase {
-    fn new(name: String, owner: String) -> Self {
-        Self {
-            uuid: Uuid::new_v4(),
-            name,
-            owner,
-            status: Mutex::new(TaskStatus::Pending),
-            current_task: Default::default(),
-            total_count: 0.into(),
-            processed_count: 0.into(),
-            total_cost: 0.into(),
-            processed_cost: 0.into(),
-            error_msg: Mutex::new(None),
-        }
-    }
-    async fn set_status(&self, status: TaskStatus) {
-        *self.status.lock().await = status
-    }
-    async fn set_cur_task(&self, msg: String) {
-        *self.current_task.lock().await = msg;
-    }
-
-    fn set_total_count(&self, count: usize) {
-        self.total_count.store(count, Ordering::Relaxed);
-    }
-    fn add_processed_count(&self, count: usize) {
-        self.processed_count.fetch_add(count, Ordering::Relaxed);
-    }
-    fn set_total_cost(&self, cost: u64) {
-        self.total_cost.store(cost, Ordering::Relaxed);
-    }
-    fn add_processed_cost(&self, cost: u64) {
-        self.processed_cost.fetch_add(cost, Ordering::Relaxed);
-    }
-    async fn set_error_msg(&self, msg: String) {
-        *self.error_msg.lock().await = Some(msg);
-    }
-}
-
-#[async_trait]
-trait Task: Send + Sync + Any {
-    fn base(&self) -> &TaskBase;
-    fn uuid(&self) -> Uuid {
-        self.base().uuid
-    }
-    fn name(&self) -> &str {
-        self.base().name.as_str()
-    }
-    fn owner(&self) -> &str {
-        self.base().owner.as_str()
-    }
-    async fn execute(&self);
-    async fn cancel(&self);
-    async fn do_continue(&self, extraInfo: Value) {}
-    async fn status(&self) -> Value {
-        let base = self.base();
-        let ret = json!({
-            "name": base.name,
-            "status": (*base.status.lock().await) as u8,
-            "current_task": &*base.current_task.lock().await,
-            "total_count": base.total_count.load(Ordering::Relaxed),
-            "processed_count": base.processed_count.load(Ordering::Relaxed),
-            "total_cost": base.total_cost.load(Ordering::Relaxed),
-            "processed_cost": base.processed_cost.load(Ordering::Relaxed),
-            "error_msg": base.error_msg.lock().await.as_deref(),
-        })
-        .into();
-        println!("{}", ret);
-        ret
-    }
-}
-
-#[derive(Debug, Clone)]
-struct UserInfo {
-    passphrase_hash: PasswordHashString,
-}
-
-#[derive(Default)]
-struct UserManager {
-    users: Mutex<HashMap<String, UserInfo>>,
-}
-
-impl UserManager {
-    async fn new_user(&self, username: &str, passphrase: &str) -> Result<(), AppError> {
-        let mut users_locked = self.users.lock().await;
-        if users_locked.contains_key(username) {
-            return Err(AppError::UserAlreadyExists(username.to_string()));
-        }
-        if !username
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            || username.len() > 16
-        {
-            return Err(AppError::UserNameInvalid(username.to_string()));
-        }
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let Ok(pass_hash) = argon2.hash_password(passphrase.as_bytes(), &salt) else {
-            return Err(AppError::BadRequest("Argon2 failed".to_owned()));
-        };
-        users_locked.insert(
-            username.to_owned(),
-            UserInfo {
-                passphrase_hash: pass_hash.into(),
-            },
-        );
-        Ok(())
-    }
-
-    async fn login(&self, username: &str, passphrase: &str) -> bool {
-        let locked = self.users.lock().await;
-        let Some(info) = locked.get(username) else {
-            return false;
-        };
-        let argon2 = Argon2::default();
-        argon2
-            .verify_password(passphrase.as_bytes(), &info.passphrase_hash.password_hash())
-            .is_ok()
-    }
-
-    async fn get_user(&self, username: &str) -> Option<UserInfo> {
-        self.users.lock().await.get(username).cloned()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SessionInfo {
-    username: String,
-}
-#[derive(Default)]
-struct SessionManager {
-    sessions: Mutex<HashMap<String, SessionInfo>>,
-}
-
-impl SessionManager {
-    async fn get_session_info(&self, token: &str) -> Option<SessionInfo> {
-        self.sessions.lock().await.get(token).cloned()
-    }
-
-    async fn add_session(&self, info: SessionInfo) -> String {
-        let token = generate_secure_token();
-        self.sessions.lock().await.insert(token.clone(), info);
-        token
-    }
-}
-
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CopyProgress {
     pub current_file: usize,
     pub total_files: usize,
     pub total_bytes: u64,
     pub processed_bytes: u64,
-}
-
-fn extract_token_from_cookie(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("Cookie")
-        .and_then(|header| header.to_str().ok())
-        .and_then(|cookie_header| {
-            cookie_header
-                .split(';')
-                .find(|part| part.trim().starts_with("auth_token="))
-                .and_then(|part| part.split('=').nth(1))
-                .map(|token| token.trim().to_string())
-        })
 }
 
 #[async_recursion]
@@ -460,6 +276,89 @@ impl Task for CopyFiles {
     }
 }
 
+struct MoveFiles {
+    base: TaskBase,
+    src: Vec<PathBuf>,
+    dst: Vec<PathBuf>,
+    failures: Mutex<Vec<PathBuf>>,
+    cancel: AtomicBool,
+}
+
+impl MoveFiles {
+    fn new(name: String, owner: String, src: Vec<PathBuf>, dst: Vec<PathBuf>) -> Self {
+        Self {
+            base: TaskBase::new(name, owner),
+            src,
+            dst,
+            failures: Default::default(),
+            cancel: Default::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl Task for MoveFiles {
+    fn base(&self) -> &TaskBase {
+        &self.base
+    }
+
+    async fn execute(&self) {
+        self.base.set_status(TaskStatus::Pending).await;
+        self.base.set_total_count(self.src.len());
+        self.base.set_total_cost(0);
+        self.base.set_status(TaskStatus::Running).await;
+
+        for (src, dst) in self.src.iter().zip(self.dst.iter()) {
+            if self.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            self.base
+                .set_cur_task(src.file_name().unwrap_or_default().to_string_lossy().into())
+                .await;
+
+            if src == dst {
+                self.base.add_processed_count(1);
+                continue;
+            }
+
+            if dst.exists() {
+                self.failures.lock().await.push(src.clone());
+                continue;
+            }
+
+            if move_file_or_dir(src.as_path(), dst.as_path())
+                .await
+                .is_err()
+            {
+                self.failures.lock().await.push(src.clone());
+                continue;
+            }
+
+            self.base.add_processed_count(1);
+        }
+
+        if self.cancel.load(Ordering::Relaxed) {
+            self.base.set_status(TaskStatus::Cancelled).await;
+            return;
+        }
+
+        let failure_count = self.failures.lock().await.len();
+        if failure_count > 0 {
+            self.base
+                .set_error_msg(format!("{} 项移动失败", failure_count))
+                .await;
+            self.base.set_status(TaskStatus::Failed).await;
+            return;
+        }
+
+        self.base.set_status(TaskStatus::Finished).await;
+    }
+
+    async fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 struct UploadFileMeta {
     bytes: u64,
@@ -590,88 +489,6 @@ impl Task for UploadFiles {
     async fn cancel(&self) {}
 }
 
-#[derive(Default)]
-struct TaskManager {
-    task_set: Mutex<HashMap<Uuid, Arc<dyn Task>>>,
-}
-
-impl TaskManager {
-    async fn tasks(&self) -> &Mutex<HashMap<Uuid, Arc<dyn Task>>> {
-        &self.task_set
-    }
-    async fn add_task(&self, task: Arc<dyn Task>) {
-        self.task_set.lock().await.insert(task.uuid(), task.clone());
-        tokio::spawn(async move {
-            task.execute().await;
-        });
-    }
-
-    async fn get_task(&self, id: &Uuid) -> Option<Arc<dyn Task>> {
-        self.task_set.lock().await.get(id).cloned()
-    }
-
-    async fn get_task_for_user(&self, id: &Uuid, username: &str) -> Option<Arc<dyn Task>> {
-        self.task_set
-            .lock()
-            .await
-            .get(id)
-            .filter(|task| task.owner() == username)
-            .cloned()
-    }
-
-    async fn get_task_status_map_for_user(&self, username: &str) -> serde_json::Map<String, Value> {
-        let tasks = self.task_set.lock().await;
-        let mut status_map = serde_json::Map::new();
-        for (uuid, value) in tasks.iter() {
-            if value.owner() != username {
-                continue;
-            }
-            let status = value.status().await;
-            status_map.insert(uuid.to_string(), status);
-        }
-        status_map
-    }
-
-    async fn clear_finished(&self) -> usize {
-        let mut tasks = self.task_set.lock().await;
-        let mut to_remove = Vec::new();
-        for (k, v) in &*tasks {
-            let status = *v.base().status.lock().await;
-            if status == TaskStatus::Finished
-                || status == TaskStatus::Failed
-                || status == TaskStatus::Cancelled
-            {
-                to_remove.push(k.clone());
-            }
-        }
-        for k in &to_remove {
-            tasks.remove(k);
-        }
-        to_remove.len()
-    }
-
-    async fn clear_finished_for_user(&self, username: &str) -> usize {
-        let mut tasks = self.task_set.lock().await;
-        let mut to_remove = Vec::new();
-        for (k, v) in &*tasks {
-            if v.owner() != username {
-                continue;
-            }
-            let status = *v.base().status.lock().await;
-            if status == TaskStatus::Finished
-                || status == TaskStatus::Failed
-                || status == TaskStatus::Cancelled
-            {
-                to_remove.push(*k);
-            }
-        }
-        for k in &to_remove {
-            tasks.remove(k);
-        }
-        to_remove.len()
-    }
-}
-
 struct AppState {
     data_path: PathBuf,
     resources_path: PathBuf,
@@ -784,18 +601,6 @@ fn into_host_path_safely(base_path: &std::path::Path, path: &String) -> Result<P
     }
 
     Ok(full_path)
-}
-
-fn generate_secure_token() -> String {
-    let mut rng = rand::rng();
-    let mut random_bytes = [0u8; 32];
-    rng.fill(&mut random_bytes);
-
-    let timestamp = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    base64::engine::general_purpose::STANDARD_NO_PAD.encode(random_bytes.as_ref())
 }
 
 fn should_use_secure_cookie(headers: &HeaderMap) -> bool {
@@ -1275,6 +1080,49 @@ async fn api_copy_files(
 }
 
 #[named]
+async fn api_move_files(
+    token: Token,
+    cfg: Extension<Arc<AppState>>,
+    payload: Json<CopyFilesParam>,
+) -> Result<Json<Value>, AppError> {
+    println!("{} called: {:?}", function_name!(), payload);
+    let Some(root_path) = cfg.get_root_path(&token).await else {
+        return Err(AppError::Unauthorized);
+    };
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::Unauthorized);
+    };
+    let param = payload.0;
+    if param.sources.len() != param.destinations.len() {
+        return Err(AppError::BadRequest("源路径和目标路径个数不同".to_owned()));
+    }
+
+    let (mut src_vec, mut dst_vec) = (Vec::new(), Vec::new());
+    let task_name = format!(
+        "移动到 {}",
+        param.destinations.first().cloned().unwrap_or_default()
+    );
+
+    for (src, dst) in param.sources.iter().zip(param.destinations) {
+        let src = into_host_path_safely(root_path.as_path(), src)?;
+        let dst = into_host_path_safely(root_path.as_path(), &dst)?;
+        src_vec.push(src);
+        dst_vec.push(dst);
+    }
+
+    let task = Arc::new(MoveFiles::new(task_name, username, src_vec, dst_vec));
+    cfg.task_mgr.add_task(task.clone()).await;
+    Ok(create_response(
+        true,
+        "成功创建任务",
+        0,
+        Some(json!({
+            "task_id": task.uuid().to_string(),
+        })),
+    ))
+}
+
+#[named]
 async fn api_new_folder(
     token: Token,
     Path(path): Path<String>,
@@ -1523,6 +1371,7 @@ async fn main() {
         .route("/api/rename/{*path}", get(api_rename_file))
         .route("/api/new_folder/{*path}", get(api_new_folder))
         .route("/api/copy_files", post(api_copy_files))
+        .route("/api/move_files", post(api_move_files))
         .route("/api/get_task_status/{*path}", get(api_get_task_status))
         .route("/api/clear_finished_tasks", post(api_clear_finished_tasks))
         .route("/api/get_task_list/", get(api_get_task_list))
