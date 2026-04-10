@@ -129,6 +129,11 @@ function onGlobalKeyDown(event) {
       event.preventDefault();
       app.copySelected();
     }
+  } else if (key === "x") {
+    if (app.selectedEntries.length > 0) {
+      event.preventDefault();
+      app.cutSelected();
+    }
   }
 }
 
@@ -365,6 +370,7 @@ watch(
               :busy-upload="app.busy.upload"
               :can-go-up="app.canGoUp"
               :clipboard-count="app.clipboard.length"
+              :clipboard-mode="app.clipboardMode"
               :current-path="app.currentPath"
               :entries="app.entries"
               :format-size="app.formatSize"
@@ -376,6 +382,7 @@ watch(
               @cancel-clipboard="app.cancelClipboard"
               @clear-selection="app.clearSelection"
               @copy-selected="app.copySelected"
+              @cut-selected="app.cutSelected"
               @delete-entry="app.deleteEntry"
               @delete-selected="app.deleteSelected"
               @download-entry="app.downloadEntry"

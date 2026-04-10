@@ -4,7 +4,7 @@ import { prettyPath } from "../utils/path";
 import {
   IconArrowLeft, IconClipboardCopy, IconClipboardPaste,
   IconClose, IconDownload, IconFile, IconFolder, IconFolderAdd,
-  IconHome, IconPencil, IconRefresh, IconTrash, IconUpload, IconList, IconGrid,
+  IconHome, IconPencil, IconRefresh, IconTrash, IconUpload, IconList, IconGrid, IconScissors,
 } from "../utils/icons";
 import UploadModal from "./UploadModal.vue";
 
@@ -16,6 +16,7 @@ const props = defineProps({
   busyUpload: { type: Boolean, required: true },
   canGoUp: { type: Boolean, required: true },
   clipboardCount: { type: Number, default: 0 },
+  clipboardMode: { type: String, default: "copy" },
   currentPath: { type: String, required: true },
   entries: { type: Array, required: true },
   isSelected: { type: Function, required: true },
@@ -27,7 +28,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits([
-  "cancel-clipboard", "clear-selection", "copy-selected", "delete-entry",
+  "cancel-clipboard", "clear-selection", "copy-selected", "cut-selected", "delete-entry",
   "delete-selected", "download-entry", "go-up", "navigate", "new-folder",
   "open-entry", "paste-here", "refresh", "rename-entry", "set-view-mode",
   "set-selection", "toggle-select-all", "toggle-selection", "upload-directory", "upload-files",
@@ -55,6 +56,7 @@ const suppressOpen = ref(false);
 
 const currentPathLabel = computed(() => prettyPath(props.currentPath));
 const showMobileCheckboxes = computed(() => isMobile.value && props.selectedEntriesCount > 0);
+const clipboardActionLabel = computed(() => (props.clipboardMode === "cut" ? "剪切" : "复制"));
 
 function updateViewportMode() {
   isMobile.value = window.innerWidth < 768;
@@ -66,6 +68,18 @@ function entryTooltip(entry) {
   const size = props.formatSize(entry.size);
   const modified = props.formatTime(entry.modified);
   return `名称: ${entry.name}\n完整路径: ${fullPath}\n类型: ${type}\n大小: ${size}\n修改时间: ${modified}`;
+}
+
+function isImageEntry(entry) {
+  if (!entry || entry.is_dir) {
+    return false;
+  }
+  return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/i.test(entry.name || "");
+}
+
+function thumbnailUrl(entry, size = 256) {
+  const encodedPath = encodeURIComponent(entry.fullPath || "");
+  return `/api/thumbnail/${encodedPath}?size=${size}`;
 }
 
 function setEntryRef(path, el) {
@@ -127,6 +141,9 @@ function openMobileAction(action) {
   }
   if (action === "select") {
     emit("set-selection", [entry.fullPath]);
+  } else if (action === "cut") {
+    emit("set-selection", [entry.fullPath]);
+    emit("cut-selected");
   } else if (action === "rename") {
     emit("rename-entry", entry);
   } else if (action === "download") {
@@ -323,6 +340,9 @@ watchEffect(() => {
           <button class="inline-flex items-center gap-1.5 rounded-2xl bg-amber-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-amber-700" @click="emit('copy-selected')">
             <IconClipboardCopy class="h-4 w-4" /> <span class="hidden md:inline">复制</span>
           </button>
+          <button class="inline-flex items-center gap-1.5 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-sky-700" @click="emit('cut-selected')">
+            <IconScissors class="h-4 w-4" /> <span class="hidden md:inline">剪切</span>
+          </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-4 py-2.5 text-sm font-medium transition" :class="props.isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" @click="emit('clear-selection')">
             <IconClose class="h-4 w-4" /> <span class="hidden md:inline">取消</span>
           </button>
@@ -337,8 +357,9 @@ watchEffect(() => {
       :class="props.isDark ? 'border-amber-700 bg-amber-950/30' : 'border-amber-300 bg-amber-50'"
     >
       <div class="flex items-center gap-2 text-sm" :class="props.isDark ? 'text-amber-200' : 'text-amber-800'">
-        <IconClipboardCopy class="h-5 w-5 shrink-0" />
-        <span>已复制 <strong>{{ clipboardCount }}</strong> 项，浏览到目标目录后点击粘贴</span>
+        <IconScissors v-if="clipboardMode === 'cut'" class="h-5 w-5 shrink-0" />
+        <IconClipboardCopy v-else class="h-5 w-5 shrink-0" />
+        <span>已{{ clipboardActionLabel }} <strong>{{ clipboardCount }}</strong> 项，浏览到目标目录后点击粘贴</span>
       </div>
       <div class="flex w-full gap-2 sm:w-auto">
         <button class="inline-flex items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-amber-700" @click="emit('paste-here')">
@@ -425,9 +446,17 @@ watchEffect(() => {
             </label>
 
             <div class="flex min-w-0 items-center gap-3">
-              <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+              <span class="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+                <img
+                  v-if="isImageEntry(entry)"
+                  class="absolute inset-0 h-full w-full object-cover"
+                  :src="thumbnailUrl(entry, 96)"
+                  loading="lazy"
+                  decoding="async"
+                  alt=""
+                />
                 <IconFolder v-if="entry.is_dir" class="h-5 w-5" />
-                <IconFile v-else class="h-5 w-5" />
+                <IconFile v-else-if="!isImageEntry(entry)" class="h-5 w-5" />
               </span>
               <span class="min-w-0 truncate text-sm font-medium" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'" :title="entry.name">{{ entry.name }}</span>
             </div>
@@ -460,9 +489,17 @@ watchEffect(() => {
                     @change="emit('toggle-selection', { path: entry.fullPath, index: entries.indexOf(entry), additiveKey: true })"
                   />
                 </label>
-                <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+                <span class="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+                  <img
+                    v-if="isImageEntry(entry)"
+                    class="absolute inset-0 h-full w-full object-cover"
+                    :src="thumbnailUrl(entry, 96)"
+                    loading="lazy"
+                    decoding="async"
+                    alt=""
+                  />
                   <IconFolder v-if="entry.is_dir" class="h-5 w-5" />
-                  <IconFile v-else class="h-5 w-5" />
+                  <IconFile v-else-if="!isImageEntry(entry)" class="h-5 w-5" />
                 </span>
                 <span class="min-w-0 truncate text-sm font-medium" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'">{{ entry.name }}</span>
               </div>
@@ -500,9 +537,17 @@ watchEffect(() => {
             />
           </label>
 
-          <div class="flex h-24 items-center justify-center rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+          <div class="relative flex h-24 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+            <img
+              v-if="isImageEntry(entry)"
+              class="absolute inset-0 h-full w-full object-cover"
+              :src="thumbnailUrl(entry, 256)"
+              loading="lazy"
+              decoding="async"
+              alt=""
+            />
             <IconFolder v-if="entry.is_dir" class="h-10 w-10" />
-            <IconFile v-else class="h-10 w-10" />
+            <IconFile v-else-if="!isImageEntry(entry)" class="h-10 w-10" />
           </div>
 
           <div class="mt-3">
@@ -547,6 +592,7 @@ watchEffect(() => {
         </div>
         <div class="grid gap-2">
           <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('select')">多选</button>
+          <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-sky-900/70 text-sky-100' : 'bg-sky-100 text-sky-700'" @click="openMobileAction('cut')">剪切</button>
           <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('rename')">重命名</button>
           <button v-if="!actionMenuEntry.is_dir" class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('download')">下载</button>
           <button class="rounded-2xl bg-rose-600 px-4 py-3 text-left text-sm font-medium text-white" @click="openMobileAction('delete')">删除</button>

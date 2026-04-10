@@ -497,6 +497,135 @@ struct AppState {
     session_manager: Arc<SessionManager>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ThumbnailQuery {
+    size: Option<u32>,
+}
+
+fn is_image_path(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff"
+    )
+}
+
+fn thumbnail_cache_key(
+    username: &str,
+    source: &std::path::Path,
+    size: u32,
+    metadata: &std::fs::Metadata,
+) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut hasher = Sha512::new();
+    hasher.update(username.as_bytes());
+    hasher.update(b"|");
+    hasher.update(source.to_string_lossy().as_bytes());
+    hasher.update(b"|");
+    hasher.update(size.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(metadata.len().to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(modified.to_string().as_bytes());
+    let digest = hasher.finalize();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+async fn ensure_thumbnail_cached(
+    source: PathBuf,
+    output: PathBuf,
+    size: u32,
+) -> Result<(), AppError> {
+    if output.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = output.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::Unknown(format!("create thumbnail cache dir failed: {e}")))?;
+    }
+
+    let source_blocking = source.clone();
+    let output_blocking = output.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let img = image::open(&source_blocking).map_err(|e| format!("open image failed: {e}"))?;
+        let thumb = img.thumbnail(size, size);
+        thumb
+            .save_with_format(&output_blocking, image::ImageFormat::WebP)
+            .map_err(|e| format!("save webp thumbnail failed: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Unknown(format!("thumbnail task join failed: {e}")))?
+    .map_err(AppError::Unknown)
+}
+
+#[named]
+async fn api_thumbnail(
+    token: Token,
+    Path(path): Path<String>,
+    query: Query<ThumbnailQuery>,
+    Extension(cfg): Extension<Arc<AppState>>,
+) -> Result<Response<Body>, AppError> {
+    let Some(root_path) = cfg.get_root_path(&token).await else {
+        return Err(AppError::Unauthorized);
+    };
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::Unauthorized);
+    };
+
+    let source = into_host_path_safely(root_path.as_path(), &path)?;
+    if !source.exists() || !source.is_file() {
+        return Err(AppError::NotFound(path));
+    }
+    if !is_image_path(source.as_path()) {
+        return Err(AppError::BadRequest("当前文件不是可预览图片".to_string()));
+    }
+
+    let size = query.size.unwrap_or(256).clamp(64, 1024);
+    let metadata = tokio::fs::metadata(&source)
+        .await
+        .map_err(|_| AppError::NotFound(source.display().to_string()))?;
+    let cache_key = thumbnail_cache_key(&username, source.as_path(), size, &metadata);
+    let cache_path = cfg
+        .data_path
+        .join("cache")
+        .join("thumbnails")
+        .join(format!("{cache_key}.webp"));
+
+    ensure_thumbnail_cached(source, cache_path.clone(), size).await?;
+    let bytes = tokio::fs::read(&cache_path)
+        .await
+        .map_err(|e| AppError::Unknown(format!("read thumbnail failed: {e}")))?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", HeaderValue::from_static("image/webp"));
+    headers.insert(
+        "Cache-Control",
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        "Content-Length",
+        HeaderValue::from_str(bytes.len().to_string().as_str())
+            .map_err(|e| AppError::Unknown(format!("invalid content length header: {e}")))?,
+    );
+
+    let mut ret = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(bytes))
+        .map_err(|e| AppError::Unknown(format!("build thumbnail response failed: {e}")))?;
+    *(ret.headers_mut()) = headers;
+    Ok(ret)
+}
+
 impl AppState {
     async fn get_session_info(&self, token: &Token) -> Option<SessionInfo> {
         self.session_manager
@@ -1365,6 +1494,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/list_files/{*path}", get(api_get_file_list))
         .route("/api/list_files/", get(api_get_file_list))
+        .route("/api/thumbnail/{*path}", get(api_thumbnail))
         .route("/api/download/{*path}", get(api_download_file))
         .route("/api/download/", get(api_download_file))
         .route("/api/delete", post(api_delete_files))

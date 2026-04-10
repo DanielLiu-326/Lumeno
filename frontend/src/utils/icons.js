@@ -136,6 +136,10 @@ export const IconClipboardPaste = icon([
   "M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z",
 ]);
 
+export const IconScissors = iconStroke(
+  "M7 6a2 2 0 11-4 0 2 2 0 014 0zm0 12a2 2 0 11-4 0 2 2 0 014 0zm0-11l10 10M7 17L17 7",
+);
+
 // ── Misc ────────────────────────────────────────────────
 export const IconCloudUpload = iconStroke(
   "M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12",

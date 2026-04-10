@@ -30,6 +30,7 @@ export function useAlbumApp() {
     const selectedPaths = ref([]);
     const loggedIn = ref(false);
     const clipboard = ref([]);
+    const clipboardMode = ref("copy");
     const lastSelectedIndex = ref(null);
 
     let taskTimer = null;
@@ -329,6 +330,7 @@ export function useAlbumApp() {
             return;
         }
 
+        clipboardMode.value = "copy";
         clipboard.value = selectedEntries.value.map((entry) => ({
             fullPath: entry.fullPath,
             name: entry.name,
@@ -337,8 +339,23 @@ export function useAlbumApp() {
         setMessage(`已复制 ${clipboard.value.length} 项，请浏览到目标目录后点击粘贴。`);
     }
 
+    async function cutSelected() {
+        if (selectedEntries.value.length === 0) {
+            return;
+        }
+
+        clipboardMode.value = "cut";
+        clipboard.value = selectedEntries.value.map((entry) => ({
+            fullPath: entry.fullPath,
+            name: entry.name,
+        }));
+        clearSelection();
+        setMessage(`已剪切 ${clipboard.value.length} 项，请浏览到目标目录后点击粘贴。`);
+    }
+
     function cancelClipboard() {
         clipboard.value = [];
+        clipboardMode.value = "copy";
         setMessage("");
     }
 
@@ -349,10 +366,12 @@ export function useAlbumApp() {
 
         const destination = currentPath.value;
         const items = [...clipboard.value];
-        clipboard.value = [];
+        const isCutMode = clipboardMode.value === "cut";
+        const endpoint = isCutMode ? "/api/move_files" : "/api/copy_files";
+        const actionText = isCutMode ? "移动" : "复制";
 
         try {
-            await apiFetch("/api/copy_files", {
+            await apiFetch(endpoint, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -364,8 +383,12 @@ export function useAlbumApp() {
                     ),
                 }),
             });
-            setMessage("已提交复制任务。");
+            clipboard.value = [];
+            clipboardMode.value = "copy";
+            setMessage(`已提交${actionText}任务。`);
             await refreshTasks();
+            await refreshList();
+            ensureTaskPolling();
         } catch (error) {
             setMessage(error.message, "error");
         }
@@ -542,8 +565,10 @@ export function useAlbumApp() {
         clearFinishedTasks,
         clearSelection,
         clipboard,
+        clipboardMode,
         copySelected,
         currentPath,
+        cutSelected,
         deleteEntry,
         deleteSelected,
         entries,
