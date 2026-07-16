@@ -1,3 +1,5 @@
+import { locale, t } from "../i18n/index.js";
+
 export function formatSize(bytes) {
     if (bytes === null || bytes === undefined) {
         return "-";
@@ -29,7 +31,7 @@ export function formatTime(timestamp) {
         return "-";
     }
 
-    return new Date(Number(timestamp) * 1000).toLocaleString("zh-CN", {
+    return new Date(Number(timestamp) * 1000).toLocaleString(locale.value === "zh" ? "zh-CN" : "en-US", {
         hour12: false,
     });
 }
@@ -48,13 +50,13 @@ export function progressPercent(task) {
 
 export function statusLabel(status) {
     return {
-        0: "等待中",
-        1: "执行中",
-        2: "已暂停",
-        3: "已完成",
-        4: "已取消",
-        5: "失败",
-    }[status] || "未知";
+        0: t("status.pending"),
+        1: t("status.running"),
+        2: t("status.paused"),
+        3: t("status.finished"),
+        4: t("status.cancelled"),
+        5: t("status.failed"),
+    }[status] || t("status.unknown");
 }
 
 export function statusTone(status) {

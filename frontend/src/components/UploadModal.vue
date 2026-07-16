@@ -1,11 +1,16 @@
 <script setup>
 import { ref } from "vue";
 import { IconClose, IconCloudUpload } from "../utils/icons";
+import { t } from "../i18n/index.js";
 
 defineProps({
   busyUpload: {
     type: Boolean,
     required: true,
+  },
+  isDark: {
+    type: Boolean,
+    default: false,
   },
 });
 
@@ -60,11 +65,15 @@ function handleDrop(event) {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
       @click.self="emit('close')"
     >
-      <div class="w-full max-w-md rounded-[2rem] border border-white/70 bg-white p-6 shadow-2xl">
+      <div
+        class="w-full max-w-md rounded-[2rem] border p-6 shadow-2xl"
+        :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-white/70 bg-white'"
+      >
         <div class="mb-5 flex items-center justify-between">
-          <h3 class="text-lg font-semibold text-stone-900">上传文件</h3>
+          <h3 class="text-lg font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-900'">{{ t('upload.title') }}</h3>
           <button
-            class="flex h-8 w-8 items-center justify-center rounded-full text-stone-400 transition hover:bg-stone-200 hover:text-stone-700"
+            class="flex h-8 w-8 items-center justify-center rounded-full transition"
+            :class="isDark ? 'text-stone-400 hover:bg-stone-800 hover:text-stone-200' : 'text-stone-400 hover:bg-stone-200 hover:text-stone-700'"
             @click="emit('close')"
           >
             <IconClose class="h-5 w-5" />
@@ -73,31 +82,35 @@ function handleDrop(event) {
 
         <div
           class="mb-5 flex h-44 flex-col items-center justify-center rounded-2xl border-2 border-dashed transition"
-          :class="isDragOver ? 'border-amber-500 bg-amber-50' : 'border-stone-300 bg-stone-50'"
+          :class="isDragOver
+            ? (isDark ? 'border-amber-500 bg-amber-900/20' : 'border-amber-500 bg-amber-50')
+            : (isDark ? 'border-stone-700 bg-stone-800/80' : 'border-stone-300 bg-stone-50')"
           @dragover.prevent="isDragOver = true"
           @dragleave.self="isDragOver = false"
           @drop="handleDrop"
         >
-          <IconCloudUpload class="mb-3 h-10 w-10 text-stone-400" />
-          <p class="pointer-events-none text-sm text-stone-500">
-            {{ isDragOver ? "松开以上传文件" : "拖拽文件到此处" }}
+          <IconCloudUpload class="mb-3 h-10 w-10" :class="isDark ? 'text-stone-400' : 'text-stone-400'" />
+          <p class="pointer-events-none text-sm" :class="isDark ? 'text-stone-300' : 'text-stone-500'">
+            {{ isDragOver ? t('upload.dropRelease') : t('upload.dropHere') }}
           </p>
         </div>
 
         <div class="grid grid-cols-2 gap-3">
           <button
-            class="rounded-2xl bg-stone-900 px-4 py-3 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-stone-800"
+            class="rounded-2xl px-4 py-3 text-sm font-medium transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+            :class="isDark ? 'bg-stone-100 text-stone-900 hover:bg-white' : 'bg-stone-900 text-white hover:bg-stone-800'"
             :disabled="busyUpload"
             @click="triggerUpload(true)"
           >
-            上传文件夹
+            {{ t('upload.uploadFolder') }}
           </button>
           <button
-            class="rounded-2xl bg-stone-900 px-4 py-3 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-stone-800"
+            class="rounded-2xl px-4 py-3 text-sm font-medium transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+            :class="isDark ? 'bg-stone-100 text-stone-900 hover:bg-white' : 'bg-stone-900 text-white hover:bg-stone-800'"
             :disabled="busyUpload"
             @click="triggerUpload(false)"
           >
-            上传文件
+            {{ t('upload.uploadFiles') }}
           </button>
         </div>
       </div>

@@ -1,4 +1,7 @@
 use async_trait::async_trait;
+use axum::extract::Path;
+use axum::{Extension, Json};
+use function_name::named;
 use serde_json::{Value, json};
 use std::any::Any;
 use std::collections::HashMap;
@@ -6,6 +9,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+use super::common::{AppError, AppState, Token, create_response};
+use super::i18n::{RequestLocale, tr, trf};
+
+const MAX_FINISHED_TASKS: usize = 100;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -90,7 +98,15 @@ pub trait Task: Send + Sync + Any {
 
     async fn execute(&self);
     async fn cancel(&self);
-    async fn do_continue(&self, _extra_info: Value) {}
+    async fn resume(&self, _extra_info: Value) {}
+
+    fn deduplication_key(&self) -> Option<String> {
+        None
+    }
+
+    fn cancellable(&self) -> bool {
+        false
+    }
 
     async fn status(&self) -> Value {
         let base = self.base();
@@ -103,6 +119,7 @@ pub trait Task: Send + Sync + Any {
             "total_cost": base.total_cost.load(Ordering::Relaxed),
             "processed_cost": base.processed_cost.load(Ordering::Relaxed),
             "error_msg": base.error_msg.lock().await.as_deref(),
+            "cancellable": self.cancellable(),
         })
     }
 }
@@ -113,11 +130,65 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
+    async fn evict_finished_tasks(tasks: &mut HashMap<Uuid, Arc<dyn Task>>) {
+        let mut finished = Vec::new();
+        for (k, v) in tasks.iter() {
+            let status = *v.base().status.lock().await;
+            if matches!(
+                status,
+                TaskStatus::Finished | TaskStatus::Failed | TaskStatus::Cancelled
+            ) {
+                finished.push(*k);
+            }
+        }
+        if finished.len() >= MAX_FINISHED_TASKS {
+            for k in &finished {
+                tasks.remove(k);
+            }
+        }
+    }
+
     pub async fn add_task(&self, task: Arc<dyn Task>) {
-        self.task_set.lock().await.insert(task.uuid(), task.clone());
+        let mut tasks = self.task_set.lock().await;
+        Self::evict_finished_tasks(&mut tasks).await;
+        tasks.insert(task.uuid(), task.clone());
+        drop(tasks);
         tokio::spawn(async move {
             task.execute().await;
         });
+    }
+
+    /// Adds a task unless another pending or running task has the same key.
+    /// Returns the active task ID and whether a new task was started.
+    pub async fn add_task_if_absent(&self, task: Arc<dyn Task>) -> (Uuid, bool) {
+        let Some(key) = task.deduplication_key() else {
+            let id = task.uuid();
+            self.add_task(task).await;
+            return (id, true);
+        };
+
+        let mut tasks = self.task_set.lock().await;
+        Self::evict_finished_tasks(&mut tasks).await;
+        for existing in tasks.values() {
+            if existing.deduplication_key().as_deref() != Some(key.as_str()) {
+                continue;
+            }
+            let status = *existing.base().status.lock().await;
+            if matches!(
+                status,
+                TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused
+            ) {
+                return (existing.uuid(), false);
+            }
+        }
+
+        let id = task.uuid();
+        tasks.insert(id, task.clone());
+        drop(tasks);
+        tokio::spawn(async move {
+            task.execute().await;
+        });
+        (id, true)
     }
 
     pub async fn get_task_for_user(&self, id: &Uuid, username: &str) -> Option<Arc<dyn Task>> {
@@ -133,12 +204,16 @@ impl TaskManager {
         &self,
         username: &str,
     ) -> serde_json::Map<String, Value> {
-        let tasks = self.task_set.lock().await;
+        let tasks = self
+            .task_set
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, task)| task.owner() == username)
+            .map(|(uuid, task)| (*uuid, task.clone()))
+            .collect::<Vec<_>>();
         let mut status_map = serde_json::Map::new();
-        for (uuid, value) in tasks.iter() {
-            if value.owner() != username {
-                continue;
-            }
+        for (uuid, value) in tasks {
             let status = value.status().await;
             status_map.insert(uuid.to_string(), status);
         }
@@ -164,5 +239,96 @@ impl TaskManager {
             tasks.remove(k);
         }
         to_remove.len()
+    }
+}
+
+// ── Task API handlers ────────────────────────────────────────────────────────
+
+#[named]
+pub async fn api_get_task_status(
+    locale: RequestLocale,
+    token: Token,
+    Path(uuid): Path<Uuid>,
+    Extension(cfg): Extension<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+    let task = cfg.task_mgr.get_task_for_user(&uuid, &username).await;
+    let Some(task) = task else {
+        return Err(AppError::InvalidTask(trf(
+            locale.as_str(),
+            "error.invalid_task",
+            &[("value", uuid.to_string())],
+        )));
+    };
+    let status = task.status().await;
+    let message = tr(locale.as_str(), "response.success");
+    Ok(create_response(true, &message, 0, Some(status)))
+}
+
+#[named]
+pub async fn api_get_task_list(
+    locale: RequestLocale,
+    token: Token,
+    Extension(cfg): Extension<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+    let status_map = cfg.task_mgr.get_task_status_map_for_user(&username).await;
+    let message = tr(locale.as_str(), "response.success");
+    Ok(create_response(true, &message, 0, Some(status_map.into())))
+}
+
+#[named]
+pub async fn api_clear_finished_tasks(
+    locale: RequestLocale,
+    token: Token,
+    Extension(cfg): Extension<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    eprintln!("{} called:", function_name!());
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+    let count = cfg.task_mgr.clear_finished_for_user(&username).await;
+    let message = tr(locale.as_str(), "response.success");
+    Ok(create_response(
+        true,
+        &message,
+        0,
+        Some(json!({
+            "cleared": count,
+        })),
+    ))
+}
+
+#[named]
+pub async fn api_cancel_task(
+    locale: RequestLocale,
+    token: Token,
+    Path(uuid): Path<Uuid>,
+    Extension(cfg): Extension<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+    let task = cfg.task_mgr.get_task_for_user(&uuid, &username).await;
+    let Some(task) = task else {
+        return Err(AppError::InvalidTask(trf(
+            locale.as_str(),
+            "error.invalid_task",
+            &[("value", uuid.to_string())],
+        )));
+    };
+    if task.cancellable() {
+        task.cancel().await;
+        let message = tr(locale.as_str(), "response.success");
+        Ok(create_response(true, &message, 0, None))
+    } else {
+        Err(AppError::BadRequest(tr(
+            locale.as_str(),
+            "error.task_not_cancellable",
+        )))
     }
 }

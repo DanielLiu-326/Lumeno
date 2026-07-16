@@ -1,0 +1,16 @@
+# Ignore build artifacts
+target/
+*.o
+*.so
+*.d
+
+# Ignore version control directories
+.git
+.gitignore
+
+# Ignore node_modules
+frontend/node_modules
+
+# Ignore temporary files
+*.tmp
+*.log

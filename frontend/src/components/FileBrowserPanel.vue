@@ -1,12 +1,16 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watchEffect } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { prettyPath } from "../utils/path";
+import { isImageEntry, thumbnailUrl } from "../utils/fileBrowser";
+import { t } from "../i18n/index.js";
 import {
   IconArrowLeft, IconClipboardCopy, IconClipboardPaste,
   IconClose, IconDownload, IconFile, IconFolder, IconFolderAdd,
   IconHome, IconPencil, IconRefresh, IconTrash, IconUpload, IconList, IconGrid, IconScissors,
 } from "../utils/icons";
 import UploadModal from "./UploadModal.vue";
+import VirtualGrid from "./VirtualGrid.vue";
+import { VList } from "virtua/vue";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -19,6 +23,7 @@ const props = defineProps({
   clipboardMode: { type: String, default: "copy" },
   currentPath: { type: String, required: true },
   entries: { type: Array, required: true },
+  entryTotal: { type: Number, default: 0 },
   isSelected: { type: Function, required: true },
   selectedEntriesCount: { type: Number, required: true },
   selectAllIndeterminate: { type: Boolean, required: true },
@@ -31,7 +36,7 @@ const emit = defineEmits([
   "cancel-clipboard", "clear-selection", "copy-selected", "cut-selected", "delete-entry",
   "delete-selected", "download-entry", "go-up", "navigate", "new-folder",
   "open-entry", "paste-here", "refresh", "rename-entry", "set-view-mode",
-  "set-selection", "toggle-select-all", "toggle-selection", "upload-directory", "upload-files",
+  "set-selection", "toggle-select-all", "toggle-selection", "upload-directory", "upload-files", "load-more",
 ]);
 
 const selectAllCheckbox = ref(null);
@@ -53,10 +58,28 @@ const dragSelect = reactive({
   h: 0,
 });
 const suppressOpen = ref(false);
+const scrollLoadTimer = ref(null);
+const listVirtualRef = ref(null);
 
 const currentPathLabel = computed(() => prettyPath(props.currentPath));
 const showMobileCheckboxes = computed(() => isMobile.value && props.selectedEntriesCount > 0);
-const clipboardActionLabel = computed(() => (props.clipboardMode === "cut" ? "剪切" : "复制"));
+const clipboardActionLabel = computed(() => (props.clipboardMode === "cut" ? t("files.clipboardCut") : t("files.clipboardCopy")));
+
+function onListVirtualScroll(offset) {
+  if (scrollLoadTimer.value) return;
+  const vl = listVirtualRef.value;
+  if (!vl || props.busyList) return;
+  const distToBottom = vl.scrollSize - offset - vl.viewportSize;
+  if (distToBottom < 500) {
+    scrollLoadTimer.value = true;
+    setTimeout(() => { scrollLoadTimer.value = null; }, 300);
+    emit("load-more");
+  }
+}
+
+function onGridScrollNearBottom() {
+  if (!props.busyList) emit("load-more");
+}
 
 function updateViewportMode() {
   isMobile.value = window.innerWidth < 768;
@@ -64,22 +87,10 @@ function updateViewportMode() {
 
 function entryTooltip(entry) {
   const fullPath = prettyPath(entry.fullPath);
-  const type = entry.is_dir ? "目录" : "文件";
+  const type = entry.is_dir ? t("files.directory") : t("files.file");
   const size = props.formatSize(entry.size);
   const modified = props.formatTime(entry.modified);
-  return `名称: ${entry.name}\n完整路径: ${fullPath}\n类型: ${type}\n大小: ${size}\n修改时间: ${modified}`;
-}
-
-function isImageEntry(entry) {
-  if (!entry || entry.is_dir) {
-    return false;
-  }
-  return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/i.test(entry.name || "");
-}
-
-function thumbnailUrl(entry, size = 256) {
-  const encodedPath = encodeURIComponent(entry.fullPath || "");
-  return `/api/thumbnail/${encodedPath}?size=${size}`;
+  return `${t("tooltip.name")}: ${entry.name}\n${t("tooltip.fullPath")}: ${fullPath}\n${t("tooltip.type")}: ${type}\n${t("tooltip.size")}: ${size}\n${t("tooltip.modified")}: ${modified}`;
 }
 
 function setEntryRef(path, el) {
@@ -168,6 +179,9 @@ function onSurfacePointerDown(event) {
   if (target.closest("button, input, label")) {
     return;
   }
+  if (target.closest("[data-entry-card='true']")) {
+    return;
+  }
   const surface = listSurfaceRef.value;
   if (!surface) {
     return;
@@ -207,6 +221,10 @@ function onSurfacePointerMove(event) {
   dragSelect.w = x2 - x1;
   dragSelect.h = y2 - y1;
   dragSelect.moved = dragSelect.w > 6 || dragSelect.h > 6;
+
+  if (!dragSelect.moved) {
+    return;
+  }
 
   const selected = [];
   for (const entry of props.entries) {
@@ -249,15 +267,6 @@ function openEntryGuard(entry) {
 }
 
 function handleEntryClick(entry, index, event) {
-  if (isMobile.value && props.selectedEntriesCount > 0) {
-    emit("toggle-selection", {
-      path: entry.fullPath,
-      index,
-      additiveKey: true,
-      replace: false,
-    });
-    return;
-  }
   if (event.shiftKey || event.ctrlKey || event.metaKey) {
     emit("toggle-selection", {
       path: entry.fullPath,
@@ -268,6 +277,17 @@ function handleEntryClick(entry, index, event) {
     });
     return;
   }
+
+  if (props.selectedEntriesCount > 0) {
+    emit("toggle-selection", {
+      path: entry.fullPath,
+      index,
+      additiveKey: true,
+      replace: false,
+    });
+    return;
+  }
+
   openEntryGuard(entry);
 }
 
@@ -281,9 +301,15 @@ onBeforeUnmount(() => {
   cancelLongPress();
 });
 
-watchEffect(() => {
+onMounted(() => {
   if (selectAllCheckbox.value) {
     selectAllCheckbox.value.indeterminate = props.selectAllIndeterminate;
+  }
+});
+
+watch(() => props.selectAllIndeterminate, (val) => {
+  if (selectAllCheckbox.value) {
+    selectAllCheckbox.value.indeterminate = val;
   }
 });
 </script>
@@ -296,23 +322,23 @@ watchEffect(() => {
     <!-- Header + toolbar -->
     <div class="mb-5 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
       <div>
-        <p class="mb-2 text-xs font-semibold uppercase tracking-[0.24em]" :class="props.isDark ? 'text-emerald-300' : 'text-emerald-700'">文件浏览</p>
+        <p class="mb-2 text-xs font-semibold uppercase tracking-[0.24em]" :class="props.isDark ? 'text-emerald-300' : 'text-emerald-700'">{{ t('files.title') }}</p>
         <h2 class="font-display text-2xl font-semibold md:text-3xl" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'">{{ currentPathLabel }}</h2>
       </div>
 
       <div class="flex min-h-11 flex-wrap items-center gap-2 xl:justify-end">
         <template v-if="selectedEntriesCount === 0">
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60" :class="props.isDark ? 'bg-stone-100 text-stone-900 hover:bg-white' : 'bg-stone-900 text-white hover:bg-stone-800'" :disabled="!canGoUp || busyList" @click="emit('go-up')">
-            <IconArrowLeft class="h-4 w-4" /> <span class="hidden md:inline">返回上级</span>
+            <IconArrowLeft class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.goUp') }}</span>
           </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60 md:px-4" :class="props.isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" :disabled="busyList" @click="emit('refresh')">
-            <IconRefresh class="h-4 w-4" /> <span class="hidden md:inline">刷新</span>
+            <IconRefresh class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.refresh') }}</span>
           </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition md:px-4" :class="props.isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" @click="emit('new-folder')">
-            <IconFolderAdd class="h-4 w-4" /> <span class="hidden md:inline">新建文件夹</span>
+            <IconFolderAdd class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.newFolder') }}</span>
           </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60 md:px-4" :class="props.isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" :disabled="busyUpload" @click="showUploadModal = true">
-            <IconUpload class="h-4 w-4" /> <span class="hidden md:inline">上传</span>
+            <IconUpload class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.upload') }}</span>
           </button>
           <div class="ml-auto inline-flex items-center gap-1 rounded-xl p-1" :class="props.isDark ? 'bg-stone-800/90' : 'bg-stone-200/90'">
             <button
@@ -320,31 +346,34 @@ watchEffect(() => {
               :class="viewMode === 'list' ? (props.isDark ? 'bg-stone-100 text-stone-900 shadow-sm' : 'bg-white text-stone-900 shadow-sm') : (props.isDark ? 'text-stone-200 hover:bg-stone-700' : 'text-stone-700 hover:bg-stone-300/70')"
               @click="emit('set-view-mode', 'list')"
             >
-              <IconList class="h-4 w-4" /> <span class="hidden md:inline">列表</span>
+              <IconList class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.listView') }}</span>
             </button>
             <button
               class="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition"
               :class="viewMode === 'grid' ? (props.isDark ? 'bg-stone-100 text-stone-900 shadow-sm' : 'bg-white text-stone-900 shadow-sm') : (props.isDark ? 'text-stone-200 hover:bg-stone-700' : 'text-stone-700 hover:bg-stone-300/70')"
               @click="emit('set-view-mode', 'grid')"
             >
-              <IconGrid class="h-4 w-4" /> <span class="hidden md:inline">图标</span>
+              <IconGrid class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.gridView') }}</span>
             </button>
           </div>
         </template>
 
         <template v-else>
-          <span class="mr-auto text-sm font-medium" :class="props.isDark ? 'text-stone-200' : 'text-stone-700'">已选中 {{ selectedEntriesCount }} 项</span>
+          <span class="mr-auto text-sm font-medium" :class="props.isDark ? 'text-stone-200' : 'text-stone-700'">{{ t('files.selectedCount', { count: selectedEntriesCount }) }}</span>
+          <button class="inline-flex items-center gap-1.5 rounded-2xl px-4 py-2.5 text-sm font-medium transition" :class="props.isDark ? 'bg-emerald-800 text-emerald-100 hover:bg-emerald-700' : 'bg-emerald-600 text-white hover:bg-emerald-700'" @click="emit('toggle-select-all')">
+            {{ allSelected && entries.length >= entryTotal ? t('files.deselectAll') : t('files.selectAll') }}
+          </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl bg-rose-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-rose-700" @click="emit('delete-selected')">
-            <IconTrash class="h-4 w-4" /> <span class="hidden md:inline">删除</span>
+            <IconTrash class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.delete') }}</span>
           </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl bg-amber-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-amber-700" @click="emit('copy-selected')">
-            <IconClipboardCopy class="h-4 w-4" /> <span class="hidden md:inline">复制</span>
+            <IconClipboardCopy class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.copy') }}</span>
           </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-sky-700" @click="emit('cut-selected')">
-            <IconScissors class="h-4 w-4" /> <span class="hidden md:inline">剪切</span>
+            <IconScissors class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.cut') }}</span>
           </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-4 py-2.5 text-sm font-medium transition" :class="props.isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" @click="emit('clear-selection')">
-            <IconClose class="h-4 w-4" /> <span class="hidden md:inline">取消</span>
+            <IconClose class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.cancel') }}</span>
           </button>
         </template>
       </div>
@@ -359,14 +388,14 @@ watchEffect(() => {
       <div class="flex items-center gap-2 text-sm" :class="props.isDark ? 'text-amber-200' : 'text-amber-800'">
         <IconScissors v-if="clipboardMode === 'cut'" class="h-5 w-5 shrink-0" />
         <IconClipboardCopy v-else class="h-5 w-5 shrink-0" />
-        <span>已{{ clipboardActionLabel }} <strong>{{ clipboardCount }}</strong> 项，浏览到目标目录后点击粘贴</span>
+        <span>{{ t('files.clipboardBanner', { action: clipboardActionLabel, count: clipboardCount }) }}</span>
       </div>
       <div class="flex w-full gap-2 sm:w-auto">
         <button class="inline-flex items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-amber-700" @click="emit('paste-here')">
-          <IconClipboardPaste class="h-4 w-4" /> 粘贴到此处
+          <IconClipboardPaste class="h-4 w-4" /> {{ t('files.pasteHere') }}
         </button>
         <button class="inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-medium transition" :class="props.isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'" @click="emit('cancel-clipboard')">
-          <IconClose class="h-4 w-4" /> 取消
+          <IconClose class="h-4 w-4" /> {{ t('files.cancel') }}
         </button>
       </div>
     </div>
@@ -401,34 +430,46 @@ watchEffect(() => {
             @change="emit('toggle-select-all')"
           />
         </label>
-        <span>名称</span>
-        <span>类型</span>
-        <span>大小</span>
-        <span>修改时间</span>
-        <span class="text-right">操作</span>
+        <span>{{ t('files.name') }}</span>
+        <span>{{ t('files.type') }}</span>
+        <span>{{ t('files.size') }}</span>
+        <span>{{ t('files.modified') }}</span>
+        <span class="text-right">{{ t('files.actions') }}</span>
       </div>
 
+      <!-- 外层容器用于 drag-select 事件捕获，不自身滚动 -->
         <div
           ref="listSurfaceRef"
-          class="app-scrollbar relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
+          class="relative min-h-0 flex-1 overflow-hidden"
           :class="dragSelect.active ? 'select-none' : ''"
           @pointerdown="onSurfacePointerDown"
           @pointermove="onSurfacePointerMove"
           @pointerup="onSurfacePointerUp"
           @pointerleave="onSurfacePointerUp"
         >
-      <div v-if="busyList" class="px-4 py-12 text-center text-sm" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">正在加载目录...</div>
-      <div v-else-if="entries.length === 0" class="px-4 py-12 text-center text-sm" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">当前目录为空。</div>
+      <div v-if="busyList && entries.length === 0" class="px-4 py-12 text-center text-sm" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('files.loading') }}</div>
+      <div v-else-if="!busyList && entries.length === 0" class="px-4 py-12 text-center text-sm" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('files.empty') }}</div>
 
-      <template v-else-if="viewMode === 'list'">
+      <VList
+        v-else-if="viewMode === 'list'"
+        ref="listVirtualRef"
+        :data="entries"
+        class="app-scrollbar absolute inset-0"
+        :bufferSize="400"
+        @scroll="onListVirtualScroll"
+      >
+        <template #default="{ item: entry, index }">
         <article
-          v-for="entry in entries"
-          :key="entry.fullPath"
           :ref="(el) => setEntryRef(entry.fullPath, el)"
+          data-entry-card="true"
           class="group cursor-pointer select-none border-t px-4 py-3 transition first:border-t-0"
-          :class="props.isDark ? 'border-stone-800 hover:bg-stone-800/70' : 'border-stone-200/70 hover:bg-stone-100/60'"
+          :class="[
+            isSelected(entry.fullPath)
+              ? (props.isDark ? 'border-stone-700 bg-teal-500/10' : 'border-stone-200 bg-teal-50')
+              : (props.isDark ? 'border-stone-800 hover:bg-stone-800/70' : 'border-stone-200/70 hover:bg-stone-100/60'),
+          ]"
           :title="entryTooltip(entry)"
-          @click="handleEntryClick(entry, entries.indexOf(entry), $event)"
+          @click="handleEntryClick(entry, index, $event)"
           @pointerdown="onEntryPointerDown(entry, $event)"
           @pointermove="onEntryPointerMove"
           @pointerup="cancelLongPress"
@@ -441,7 +482,7 @@ watchEffect(() => {
                 class="h-4 w-4 rounded border-stone-300 text-amber-700 focus:ring-amber-200"
                 :checked="isSelected(entry.fullPath)"
                 type="checkbox"
-                @change="emit('toggle-selection', { path: entry.fullPath, index: entries.indexOf(entry), additiveKey: true })"
+                @change="emit('toggle-selection', { path: entry.fullPath, index, additiveKey: true })"
               />
             </label>
 
@@ -453,6 +494,7 @@ watchEffect(() => {
                   :src="thumbnailUrl(entry, 96)"
                   loading="lazy"
                   decoding="async"
+                  fetchpriority="low"
                   alt=""
                 />
                 <IconFolder v-if="entry.is_dir" class="h-5 w-5" />
@@ -461,18 +503,18 @@ watchEffect(() => {
               <span class="min-w-0 truncate text-sm font-medium" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'" :title="entry.name">{{ entry.name }}</span>
             </div>
 
-            <span class="hidden text-sm md:block" :class="props.isDark ? 'text-stone-300' : 'text-stone-600'">{{ entry.is_dir ? "目录" : "文件" }}</span>
+            <span class="hidden text-sm md:block" :class="props.isDark ? 'text-stone-300' : 'text-stone-600'">{{ entry.is_dir ? t('files.directory') : t('files.file') }}</span>
             <span class="hidden text-sm md:block" :class="props.isDark ? 'text-stone-300' : 'text-stone-600'">{{ formatSize(entry.size) }}</span>
             <span class="hidden text-sm md:block" :class="props.isDark ? 'text-stone-300' : 'text-stone-600'">{{ formatTime(entry.modified) }}</span>
 
             <div class="hidden gap-1.5 opacity-0 transition-opacity group-hover:opacity-100 md:flex md:justify-end" @click.stop>
-              <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800" title="重命名" @click="emit('rename-entry', entry)">
+              <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800" :title="t('files.rename')" @click="emit('rename-entry', entry)">
                 <IconPencil class="h-4 w-4" />
               </button>
-              <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800 disabled:cursor-not-allowed disabled:opacity-50" :disabled="entry.is_dir" title="下载" @click="emit('download-entry', entry)">
+              <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800 disabled:cursor-not-allowed disabled:opacity-50" :disabled="entry.is_dir" :title="t('files.download')" @click="emit('download-entry', entry)">
                 <IconDownload class="h-4 w-4" />
               </button>
-              <button class="flex h-8 w-8 items-center justify-center rounded-full text-rose-500 transition hover:bg-rose-100 hover:text-rose-700" title="删除" @click="emit('delete-entry', entry)">
+              <button class="flex h-8 w-8 items-center justify-center rounded-full text-rose-500 transition hover:bg-rose-100 hover:text-rose-700" :title="t('files.delete')" @click="emit('delete-entry', entry)">
                 <IconTrash class="h-4 w-4" />
               </button>
             </div>
@@ -486,7 +528,7 @@ watchEffect(() => {
                     class="h-4 w-4 rounded border-stone-300 text-amber-700 focus:ring-amber-200"
                     :checked="isSelected(entry.fullPath)"
                     type="checkbox"
-                    @change="emit('toggle-selection', { path: entry.fullPath, index: entries.indexOf(entry), additiveKey: true })"
+                    @change="emit('toggle-selection', { path: entry.fullPath, index, additiveKey: true })"
                   />
                 </label>
                 <span class="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
@@ -496,6 +538,7 @@ watchEffect(() => {
                     :src="thumbnailUrl(entry, 96)"
                     loading="lazy"
                     decoding="async"
+                    fetchpriority="low"
                     alt=""
                   />
                   <IconFolder v-if="entry.is_dir" class="h-5 w-5" />
@@ -507,21 +550,34 @@ watchEffect(() => {
             </div>
             <div class="mt-2 flex items-center justify-between text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">
               <span>{{ formatTime(entry.modified) }}</span>
-              <span>{{ entry.is_dir ? "目录" : "文件" }}</span>
+              <span>{{ entry.is_dir ? t('files.directory') : t('files.file') }}</span>
             </div>
           </div>
         </article>
-      </template>
+        </template>
+      </VList>
 
-      <div v-else class="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+      <VirtualGrid
+        v-else-if="viewMode === 'grid' && entries.length > 0"
+        :items="entries"
+        item-key="fullPath"
+        grid-class="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7"
+        class="absolute inset-0"
+        @scroll-near-bottom="onGridScrollNearBottom"
+      >
+        <template #default="{ item: entry, index }">
         <article
-          v-for="entry in entries"
           :key="entry.fullPath"
           :ref="(el) => setEntryRef(entry.fullPath, el)"
+          data-entry-card="true"
           class="group relative cursor-pointer select-none rounded-2xl border p-3 transition hover:-translate-y-0.5 hover:shadow-sm"
-          :class="props.isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200/80 bg-white/70 hover:border-stone-300'"
+          :class="[
+            isSelected(entry.fullPath)
+              ? (props.isDark ? 'border-teal-500 bg-teal-500/10' : 'border-teal-300 bg-teal-50')
+              : (props.isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200/80 bg-white/70 hover:border-stone-300'),
+          ]"
           :title="entryTooltip(entry)"
-          @click="handleEntryClick(entry, entries.indexOf(entry), $event)"
+          @click="handleEntryClick(entry, index, $event)"
           @pointerdown="onEntryPointerDown(entry, $event)"
           @pointermove="onEntryPointerMove"
           @pointerup="cancelLongPress"
@@ -533,7 +589,7 @@ watchEffect(() => {
               class="h-4 w-4 rounded border-stone-300 text-amber-700 focus:ring-amber-200"
               :checked="isSelected(entry.fullPath)"
               type="checkbox"
-              @change="emit('toggle-selection', { path: entry.fullPath, index: entries.indexOf(entry), additiveKey: true })"
+              @change="emit('toggle-selection', { path: entry.fullPath, index, additiveKey: true })"
             />
           </label>
 
@@ -544,6 +600,7 @@ watchEffect(() => {
               :src="thumbnailUrl(entry, 256)"
               loading="lazy"
               decoding="async"
+              fetchpriority="low"
               alt=""
             />
             <IconFolder v-if="entry.is_dir" class="h-10 w-10" />
@@ -552,23 +609,24 @@ watchEffect(() => {
 
           <div class="mt-3">
             <p class="truncate text-sm font-semibold" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'" :title="entry.name">{{ entry.name }}</p>
-            <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ entry.is_dir ? "目录" : formatSize(entry.size) }}</p>
+            <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ entry.is_dir ? t('files.directory') : formatSize(entry.size) }}</p>
             <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatTime(entry.modified) }}</p>
           </div>
 
           <div class="mt-3 hidden gap-1.5 opacity-0 transition-opacity group-hover:opacity-100 md:flex" @click.stop>
-            <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800" title="重命名" @click="emit('rename-entry', entry)">
+            <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800" :title="t('files.rename')" @click="emit('rename-entry', entry)">
               <IconPencil class="h-4 w-4" />
             </button>
-            <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800 disabled:cursor-not-allowed disabled:opacity-50" :disabled="entry.is_dir" title="下载" @click="emit('download-entry', entry)">
+            <button class="flex h-8 w-8 items-center justify-center rounded-full text-stone-500 transition hover:bg-stone-200 hover:text-stone-800 disabled:cursor-not-allowed disabled:opacity-50" :disabled="entry.is_dir" :title="t('files.download')" @click="emit('download-entry', entry)">
               <IconDownload class="h-4 w-4" />
             </button>
-            <button class="flex h-8 w-8 items-center justify-center rounded-full text-rose-500 transition hover:bg-rose-100 hover:text-rose-700" title="删除" @click="emit('delete-entry', entry)">
+            <button class="flex h-8 w-8 items-center justify-center rounded-full text-rose-500 transition hover:bg-rose-100 hover:text-rose-700" :title="t('files.delete')" @click="emit('delete-entry', entry)">
               <IconTrash class="h-4 w-4" />
             </button>
           </div>
         </article>
-      </div>
+        </template>
+      </VirtualGrid>
 
       <div
         v-if="dragSelect.active && dragSelect.moved"
@@ -591,11 +649,11 @@ watchEffect(() => {
           </button>
         </div>
         <div class="grid gap-2">
-          <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('select')">多选</button>
-          <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-sky-900/70 text-sky-100' : 'bg-sky-100 text-sky-700'" @click="openMobileAction('cut')">剪切</button>
-          <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('rename')">重命名</button>
-          <button v-if="!actionMenuEntry.is_dir" class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('download')">下载</button>
-          <button class="rounded-2xl bg-rose-600 px-4 py-3 text-left text-sm font-medium text-white" @click="openMobileAction('delete')">删除</button>
+          <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('select')">{{ t('files.multiSelect') }}</button>
+          <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-sky-900/70 text-sky-100' : 'bg-sky-100 text-sky-700'" @click="openMobileAction('cut')">{{ t('files.cut') }}</button>
+          <button class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('rename')">{{ t('files.rename') }}</button>
+          <button v-if="!actionMenuEntry.is_dir" class="rounded-2xl px-4 py-3 text-left text-sm font-medium" :class="props.isDark ? 'bg-stone-800' : 'bg-stone-100'" @click="openMobileAction('download')">{{ t('files.download') }}</button>
+          <button class="rounded-2xl bg-rose-600 px-4 py-3 text-left text-sm font-medium text-white" @click="openMobileAction('delete')">{{ t('files.delete') }}</button>
         </div>
       </div>
     </div>
@@ -603,6 +661,7 @@ watchEffect(() => {
     <UploadModal
       v-if="showUploadModal"
       :busy-upload="busyUpload"
+      :is-dark="props.isDark"
       @close="showUploadModal = false"
       @upload-directory="(files) => { emit('upload-directory', files); showUploadModal = false; }"
       @upload-files="(files) => { emit('upload-files', files); showUploadModal = false; }"

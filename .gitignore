@@ -1,3 +1,18 @@
 /target
 /frontend/node_modules
 /dist
+/build_router
+
+# Local environment configuration and secrets
+/.env
+/.env.*
+/frontend/.env.local
+/frontend/.env.*.local
+/cf-ddns/.env
+/swag/.env
+/swag/config/dns-conf/cloudflare.ini
+
+# Local editor and operating-system artifacts
+/.gitconfig
+.DS_Store
+*.log

@@ -1,6 +1,7 @@
 <script setup>
 import { formatSize, progressPercent, statusLabel, statusTone } from "../utils/format";
 import { IconCheck } from "../utils/icons";
+import { t } from "../i18n/index.js";
 
 defineProps({
   loggedIn: {
@@ -17,7 +18,7 @@ defineProps({
   },
 });
 
-defineEmits(["clear-finished"]);
+defineEmits(["clear-finished", "cancel-task"]);
 </script>
 
 <template>
@@ -26,8 +27,8 @@ defineEmits(["clear-finished"]);
   >
     <div class="mb-4 flex items-start justify-between gap-4">
       <div>
-        <p class="mb-2 text-xs font-semibold uppercase tracking-[0.24em] text-amber-700">后台任务</p>
-        <h2 class="font-display text-3xl font-semibold text-stone-900">任务中心</h2>
+        <p class="mb-2 text-xs font-semibold uppercase tracking-[0.24em] text-amber-700">{{ t("tasks.title") }}</p>
+        <h2 class="font-display text-3xl font-semibold text-stone-900">{{ t("tasks.center") }}</h2>
       </div>
       <button
         v-if="loggedIn && tasks.length > 0"
@@ -35,7 +36,7 @@ defineEmits(["clear-finished"]);
         @click="$emit('clear-finished')"
       >
         <IconCheck class="h-4 w-4" />
-        清理已完成
+        {{ t("tasks.clearFinished") }}
       </button>
     </div>
 
@@ -44,7 +45,7 @@ defineEmits(["clear-finished"]);
       class="mb-4 rounded-[1.5rem] border-l-4 px-4 py-4"
       :class="message.kind === 'error' ? 'border-l-rose-600 bg-rose-50 text-rose-900' : 'border-l-emerald-600 bg-emerald-50 text-emerald-900'"
     >
-      <strong class="block text-sm">{{ message.kind === "error" ? "错误" : "提示" }}</strong>
+      <strong class="block text-sm">{{ message.kind === "error" ? t("tasks.error") : t("tasks.info") }}</strong>
       <p class="mt-2 text-sm leading-6">{{ message.text }}</p>
     </section>
 
@@ -56,12 +57,19 @@ defineEmits(["clear-finished"]);
       >
         <div class="mb-2 flex items-start justify-between gap-3">
           <strong class="min-w-0 truncate text-sm text-stone-900" :title="task.name">{{ task.name }}</strong>
-          <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium" :class="statusTone(task.status)">
-            {{ statusLabel(task.status) }}
-          </span>
+          <div class="flex shrink-0 items-center gap-2">
+            <button
+              v-if="task.cancellable && (task.status === 0 || task.status === 1)"
+              class="rounded-full bg-rose-100 px-2.5 py-1 text-[11px] font-medium text-rose-700 transition hover:bg-rose-200"
+              @click="$emit('cancel-task', task.id)"
+            >{{ t("tasks.cancel") }}</button>
+            <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium" :class="statusTone(task.status)">
+              {{ statusLabel(task.status) }}
+            </span>
+          </div>
         </div>
 
-        <p class="truncate text-sm text-stone-500" :title="task.current_task">{{ task.current_task || "等待任务更新" }}</p>
+  <p class="truncate text-sm text-stone-500" :title="task.current_task">{{ task.current_task || t("tasks.waitingForUpdate") }}</p>
 
         <div class="mt-3 h-2.5 overflow-hidden rounded-full bg-stone-200">
           <div
@@ -71,7 +79,7 @@ defineEmits(["clear-finished"]);
         </div>
 
         <div class="mt-3 flex flex-wrap gap-3 text-xs text-stone-500">
-          <span>{{ task.processed_count }} / {{ task.total_count }} 项</span>
+          <span>{{ task.processed_count }} / {{ task.total_count }} {{ t("tasks.items") }}</span>
           <span>{{ formatSize(task.processed_cost) }} / {{ formatSize(task.total_cost) }}</span>
         </div>
 
@@ -79,18 +87,18 @@ defineEmits(["clear-finished"]);
       </div>
 
       <div v-if="tasks.length === 0" class="rounded-[1.5rem] border border-dashed border-stone-300 px-4 py-8 text-center text-sm text-stone-500">
-        暂无后台任务。
+        {{ t("tasks.noTasks") }}
       </div>
     </section>
 
     <section v-else class="rounded-[1.5rem] border border-dashed border-stone-300 px-4 py-5 text-sm text-stone-600">
-      <h3 class="mb-3 font-medium text-stone-900">前端已接入的接口</h3>
+      <h3 class="mb-3 font-medium text-stone-900">{{ t("tasks.connectedApis") }}</h3>
       <ul class="list-disc space-y-2 pl-5">
-        <li>登录 /api/login</li>
-        <li>目录浏览 /api/list_files</li>
-        <li>下载、删除、重命名、新建文件夹</li>
-        <li>上传 /api/upload + /api/upload_feed</li>
-        <li>任务列表 /api/get_task_list/</li>
+        <li>{{ t("tasks.apiLogin") }}</li>
+        <li>{{ t("tasks.apiListFiles") }}</li>
+        <li>{{ t("tasks.apiFileOps") }}</li>
+        <li>{{ t("tasks.apiUpload") }}</li>
+        <li>{{ t("tasks.apiTasks") }}</li>
       </ul>
     </section>
   </aside>

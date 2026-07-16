@@ -1,4 +1,7 @@
 <script setup>
+import { ref } from "vue";
+import { t } from "../i18n/index.js";
+
 defineProps({
   busyLogin: {
     type: Boolean,
@@ -10,7 +13,8 @@ defineProps({
   },
 });
 
-defineEmits(["submit"]);
+const emit = defineEmits(["submit", "register"]);
+const isRegisterMode = ref(false);
 </script>
 
 <template>
@@ -36,38 +40,38 @@ defineEmits(["submit"]);
         >
           Album
         </h1>
-        <p class="mt-2 text-sm text-stone-500">登录到你的目录</p>
+        <p class="mt-2 text-sm text-stone-500">{{ isRegisterMode ? t('login.createAccount') : t('login.loginDescription') }}</p>
       </div>
 
-      <form class="grid gap-4" @submit.prevent="$emit('submit')">
+      <form class="grid gap-4" @submit.prevent="isRegisterMode ? $emit('register') : $emit('submit')">
         <label class="grid gap-2">
-          <span class="text-sm text-stone-600">用户名</span>
+          <span class="text-sm text-stone-600">{{ t('login.username') }}</span>
           <input
             v-model.trim="loginForm.username"
             autocomplete="username"
             class="rounded-2xl border border-stone-200 bg-white/85 px-4 py-3 text-stone-900 outline-none transition focus:border-amber-500 focus:ring-4 focus:ring-amber-100"
-            placeholder="daniel / irene"
+            :placeholder="isRegisterMode ? t('login.usernamePlaceholderRegister') : t('login.usernamePlaceholderLogin')"
           />
         </label>
 
         <label class="grid gap-2">
-          <span class="text-sm text-stone-600">密码</span>
+          <span class="text-sm text-stone-600">{{ t('login.password') }}</span>
           <input
             v-model.trim="loginForm.passphrase"
-            autocomplete="current-password"
+            :autocomplete="isRegisterMode ? 'new-password' : 'current-password'"
             class="rounded-2xl border border-stone-200 bg-white/85 px-4 py-3 text-stone-900 outline-none transition focus:border-amber-500 focus:ring-4 focus:ring-amber-100"
-            placeholder="输入原始密码"
+            :placeholder="isRegisterMode ? t('login.setPassword') : t('login.enterPassword')"
             type="password"
           />
         </label>
 
-        <label class="flex items-center gap-3 text-sm text-stone-600">
+        <label v-if="!isRegisterMode" class="flex items-center gap-3 text-sm text-stone-600">
           <input
             v-model="loginForm.keepLogin"
             class="h-4 w-4 rounded border-stone-300 text-amber-700 focus:ring-amber-200"
             type="checkbox"
           />
-          <span>七天内保持登录</span>
+          <span>{{ t('login.keepLogin') }}</span>
         </label>
 
         <button
@@ -75,9 +79,20 @@ defineEmits(["submit"]);
           :disabled="busyLogin"
           type="submit"
         >
-          {{ busyLogin ? "登录中..." : "登录" }}
+          {{ busyLogin ? (isRegisterMode ? t('login.registering') : t('login.loggingIn')) : (isRegisterMode ? t('login.register') : t('login.login')) }}
         </button>
       </form>
+
+      <p class="mt-4 text-center text-sm text-stone-500">
+        <template v-if="isRegisterMode">
+          {{ t('login.hasAccount') }}
+          <button class="font-medium text-amber-700 hover:underline" @click="isRegisterMode = false">{{ t('login.backToLogin') }}</button>
+        </template>
+        <template v-else>
+          {{ t('login.noAccount') }}
+          <button class="font-medium text-amber-700 hover:underline" @click="isRegisterMode = true">{{ t('login.register') }}</button>
+        </template>
+      </p>
     </section>
   </div>
 </template>
