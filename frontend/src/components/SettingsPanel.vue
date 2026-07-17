@@ -17,7 +17,7 @@ const props = defineProps({
   onWebdavUpdate: { type: Function, default: null },
 });
 
-const emit = defineEmits(["update-settings", "update-preferences", "update-member", "update-password", "delete-member", "reset-member-password"]);
+const emit = defineEmits(["update-settings", "scan-thumbnails", "update-preferences", "update-member", "update-password", "delete-member", "reset-member-password"]);
 
 const localSettings = ref({});
 const localPreferences = ref({ locale: "en" });
@@ -110,7 +110,11 @@ function copyWebdavMountCmd(share) {
 watch(
   () => props.settings,
   (val) => {
-    localSettings.value = { ...val };
+    localSettings.value = {
+      thumbnail_generation_mode: "on_demand",
+      thumbnail_scan_interval: "1d",
+      ...val,
+    };
   },
   { immediate: true, deep: true }
 );
@@ -133,6 +137,10 @@ watch(
 
 function save() {
   emit("update-settings", { ...localSettings.value });
+}
+
+function scanThumbnailsNow() {
+  emit("scan-thumbnails");
 }
 
 function savePreferences() {
@@ -454,11 +462,46 @@ function promptResetPassword(member) {
                   :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
               </div>
               <div>
+                <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.thumbnailGenerationMode') }}</label>
+                <select v-model="localSettings.thumbnail_generation_mode"
+                  class="w-full rounded-lg border px-3 py-2 text-sm"
+                  :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'">
+                  <option value="on_demand">{{ t('settings.thumbnailGenerationOnDemand') }}</option>
+                  <option value="background">{{ t('settings.thumbnailGenerationBackground') }}</option>
+                </select>
+                <p class="mt-1 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.thumbnailGenerationModeHint') }}</p>
+              </div>
+              <div v-if="localSettings.thumbnail_generation_mode === 'background'">
+                <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.thumbnailScanInterval') }}</label>
+                <select v-model="localSettings.thumbnail_scan_interval"
+                  class="w-full rounded-lg border px-3 py-2 text-sm"
+                  :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'">
+                  <option value="12h">{{ t('settings.thumbnailScanEvery12Hours') }}</option>
+                  <option value="1d">{{ t('settings.thumbnailScanDaily') }}</option>
+                  <option value="3d">{{ t('settings.thumbnailScanEvery3Days') }}</option>
+                  <option value="7d">{{ t('settings.thumbnailScanWeekly') }}</option>
+                </select>
+                <p class="mt-1 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.thumbnailScanIntervalHint') }}</p>
+              </div>
+              <button type="button"
+                class="self-start rounded-lg px-4 py-2 text-sm font-medium transition"
+                :class="isDark ? 'bg-stone-700 text-stone-100 hover:bg-stone-600' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
+                @click="scanThumbnailsNow">
+                {{ t('settings.thumbnailScanNow') }}
+              </button>
+              <div>
                 <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.thumbnailConcurrency') }}</label>
                 <input v-model.number="localSettings.thumbnail_concurrency" type="number" min="1" max="32" placeholder="3"
                   class="w-full rounded-lg border px-3 py-2 text-sm"
                   :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
                 <p class="mt-1 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.thumbnailConcurrencyHint') }}</p>
+              </div>
+              <div>
+                <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.darktableConcurrency') }}</label>
+                <input v-model.number="localSettings.darktable_concurrency" type="number" min="1" max="32" placeholder="1"
+                  class="w-full rounded-lg border px-3 py-2 text-sm"
+                  :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                <p class="mt-1 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.darktableConcurrencyHint') }}</p>
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.photosPerPage') }}</label>

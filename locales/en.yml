@@ -5,6 +5,7 @@ response:
   registration_success: "Registration successful"
   logged_out: "Logged out"
   settings_saved: "Settings saved"
+  thumbnail_scan_started: "Thumbnail scan tasks started"
   preferences_saved: "Language preference saved"
   password_updated: "Password updated"
   member_updated: "Member updated"
@@ -96,6 +97,7 @@ task:
   upload_album: "Upload from local to album {album}"
   import_album: "Import from cloud files to album {album}"
   rebuild_index: "Rebuild index: {album}"
+  background_thumbnails: "Generate thumbnails in background"
   move_failed: "Failed to move {count} items"
 
 collections:

@@ -119,3 +119,48 @@ DockerFile           Rust nightly 开发镜像
 cd frontend && npm run build
 cd .. && cargo +nightly test
 ```
+
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `BOOTSTRAP_ADMIN_USER` | 首次启动时创建的管理员用户名 | `admin` |
+| `BOOTSTRAP_ADMIN_PASSWORD` | 首次启动时创建的管理员密码 | `changeme` |
+| `TRUST_PROXY` | 设为 `1` 或 `true` 后信任反向代理的 `X-Forwarded-Proto`，用于 HTTPS Cookie 判断 | 未启用 |
+
+只有在反向代理会正确覆盖客户端传入的 `X-Forwarded-Proto` 时，才应启用 `TRUST_PROXY`。
+
+## 数据与备份
+
+应用的持久化根目录为 `dist/data/`。部署时应将此目录挂载到持久卷，并定期备份：
+
+- 用户、设置和会话数据
+- HMAC 密钥文件
+- 用户上传的文件和相册
+- 图片 XMP sidecar 文件
+
+不要丢失 HMAC 密钥：重建该密钥会使已有登录会话失效。相册索引和缩略图缓存可以重新生成，但原始图片和 XMP 元数据不可替代。
+
+## 反向代理与安全
+
+- 使用 HTTPS 暴露服务，并仅在可信代理后启用 `TRUST_PROXY`。
+- 更改默认管理员密码，限制 `dist/data/` 的文件系统访问权限。
+- WebDAV 路径为 `/dav/`；应与主站使用同一套认证和 HTTPS 策略。
+- 不要将 `.env` 文件、Cloudflare 凭据或 `dist/data/` 内容提交到版本控制。
+
+## 项目结构
+
+```text
+src/                 Rust 服务与 API
+src/backend/         认证、文件、相册、设置和任务模块
+frontend/            Vue 前端源码
+locales/             后端国际化文案
+dist/resources/      前端构建产物
+dist/data/           运行时数据和用户文件
+DockerFile           Rust nightly 开发镜像
+```
+
+## 验证
+
+```bash
+cd frontend && npm run build
+cd .. && cargo +nightly test
+```

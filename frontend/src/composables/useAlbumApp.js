@@ -77,6 +77,9 @@ export function useAlbumApp() {
     const members = ref([]);
     const settings = ref({});
     const webdavShares = ref([]);
+    const dashboard = ref(null);
+    const dashboardLoading = ref(false);
+    const dashboardError = ref("");
     const isAdmin = computed(() => userRole.value === "admin");
 
     // ── Conflict modal ─────────────────────────────────────────────────────
@@ -174,6 +177,20 @@ export function useAlbumApp() {
         return response;
     }
 
+    async function refreshDashboard() {
+        if (!loggedIn.value || dashboardLoading.value) return;
+        dashboardLoading.value = true;
+        dashboardError.value = "";
+        try {
+            const payload = await apiFetch("/api/dashboard");
+            dashboard.value = payload.data || null;
+        } catch (error) {
+            dashboardError.value = error.message || t("dashboard.loadError");
+        } finally {
+            dashboardLoading.value = false;
+        }
+    }
+
     async function login() {
         if (!loginForm.username || !loginForm.passphrase) {
             setMessage(t("msg.enterCredentials"), "error");
@@ -209,6 +226,7 @@ export function useAlbumApp() {
             await refreshSettings();
             await refreshMembers();
             await refreshWebdavShares();
+            await refreshDashboard();
             ensureTaskPolling();
         } catch (error) {
             setMessage(error.message, "error");
@@ -1309,6 +1327,18 @@ export function useAlbumApp() {
         }
     }
 
+    async function scanThumbnailsNow() {
+        try {
+            const payload = await apiFetch("/api/settings/thumbnail-scan", {
+                method: "POST",
+            });
+            setMessage(payload.message || t("settings.thumbnailScanStarted"));
+            await refreshTasks();
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
     async function updatePreferences(updates) {
         try {
             const payload = await apiFetch("/api/preferences", {
@@ -1416,6 +1446,8 @@ export function useAlbumApp() {
         setLocale(userLocale.value);
         members.value = [];
         settings.value = {};
+        dashboard.value = null;
+        dashboardError.value = "";
         stopTaskPolling();
         entries.value = [];
         tasks.value = [];
@@ -1480,6 +1512,7 @@ export function useAlbumApp() {
         await refreshPreferences();
         await refreshMembers();
         await refreshWebdavShares();
+        await refreshDashboard();
         ensureTaskPolling();
         setMessage(t("msg.sessionRestored"), "info");
     }
@@ -1535,6 +1568,9 @@ export function useAlbumApp() {
         createAlbum,
         currentPath,
         currentUser,
+        dashboard,
+        dashboardError,
+        dashboardLoading,
         userLocale,
         cutSelected,
         deleteAlbum,
@@ -1572,6 +1608,7 @@ export function useAlbumApp() {
         rebuildAlbumIndex,
         refreshAlbumPhotos,
         refreshAlbums,
+        refreshDashboard,
         refreshList,
         register,
         renameEntry,
@@ -1601,6 +1638,7 @@ export function useAlbumApp() {
         copyPhotoToAlbum,
         updatePreferences,
         updateSettings,
+        scanThumbnailsNow,
         updateWebdavShare,
         uploadAvatar,
         uploadFiles,

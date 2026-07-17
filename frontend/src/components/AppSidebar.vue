@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from "vue";
-import { IconFolder, IconAlbum, IconGear, IconCalendarDay, IconSparkles } from "../utils/icons";
+import { IconFolder, IconAlbum, IconGear, IconCalendarDay, IconHome, IconSparkles } from "../utils/icons";
 import { t } from "../i18n/index.js";
 
 const props = defineProps({
@@ -18,7 +18,7 @@ const props = defineProps({
   },
   activeTab: {
     type: String,
-    default: "files",
+    default: "dashboard",
   },
 });
 
@@ -27,8 +27,9 @@ const emit = defineEmits(["switch-tab"]);
 const avatarLetter = computed(() => (props.username ? props.username[0].toUpperCase() : "?"));
 
 const tabs = computed(() => [
-  { key: "files", label: t("nav.files"), icon: IconFolder },
+  { key: "dashboard", label: t("nav.dashboard"), icon: IconHome },
   { key: "albums", label: t("nav.albums"), icon: IconAlbum },
+  { key: "files", label: t("nav.files"), icon: IconFolder },
   { key: "on_this_day", label: t("nav.on_this_day"), icon: IconCalendarDay },
   { key: "daily_picks", label: t("nav.daily_picks"), icon: IconSparkles },
 ]);

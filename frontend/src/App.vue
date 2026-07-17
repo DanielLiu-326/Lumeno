@@ -4,6 +4,7 @@ import AlbumPanel from "./components/AlbumPanel.vue";
 import AppSidebar from "./components/AppSidebar.vue";
 import ConflictModal from "./components/ConflictModal.vue";
 import DailyPicksPanel from "./components/DailyPicksPanel.vue";
+import DashboardPanel from "./components/DashboardPanel.vue";
 import FileBrowserPanel from "./components/FileBrowserPanel.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import OnThisDayPanel from "./components/OnThisDayPanel.vue";
@@ -14,7 +15,7 @@ import { IconBell, IconClose, IconMenu, IconMoon, IconPower, IconSun, IconTasks 
 import { t, locale } from "./i18n/index.js";
 
 const app = proxyRefs(useAlbumApp());
-const activeTab = ref("files");
+const activeTab = ref("dashboard");
 const mobileSidebarOpen = ref(false);
 const taskListOpen = ref(false);
 const notificationOpen = ref(false);
@@ -44,6 +45,7 @@ const unreadNotificationCount = computed(
 
 const isDark = computed(() => theme.value === "dark");
 const activeTabTitle = computed(() => {
+  if (activeTab.value === "dashboard") return t("nav.dashboard");
   if (activeTab.value === "albums") return t("nav.albums");
   if (activeTab.value === "settings") return t("nav.settings");
   if (activeTab.value === "on_this_day") return t("nav.on_this_day");
@@ -182,9 +184,16 @@ watch(
   async (tab) => {
     if (tab === "albums") {
       await app.refreshAlbums();
+    } else if (tab === "dashboard") {
+      await app.refreshDashboard();
     }
   },
 );
+
+async function openDashboardAlbum(album) {
+  activeTab.value = "albums";
+  await app.selectAlbum(album);
+}
 </script>
 
 <template>
@@ -405,7 +414,21 @@ watch(
       </div>
 
       <div class="relative z-10 flex flex-1 gap-5 overflow-hidden p-3 md:p-6">
-        <template v-if="activeTab === 'files'">
+        <template v-if="activeTab === 'dashboard'">
+          <div class="min-h-0 min-w-0 w-full">
+            <DashboardPanel
+              :is-dark="isDark"
+              :data="app.dashboard"
+              :loading="app.dashboardLoading"
+              :error="app.dashboardError"
+              @refresh="app.refreshDashboard"
+              @navigate="(tab) => (activeTab = tab)"
+              @select-album="openDashboardAlbum"
+            />
+          </div>
+        </template>
+
+        <template v-else-if="activeTab === 'files'">
           <div class="min-h-0 min-w-0 w-full">
             <FileBrowserPanel
               :is-dark="isDark"
@@ -515,6 +538,7 @@ watch(
               :webdav-shares="app.webdavShares"
               :on-webdav-update="app.updateWebdavShare"
               @update-settings="app.updateSettings"
+              @scan-thumbnails="app.scanThumbnailsNow"
               @update-member="app.updateMember"
               @update-password="app.updatePassword"
               @update-preferences="app.updatePreferences"

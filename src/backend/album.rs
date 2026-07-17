@@ -19,11 +19,13 @@ use std::io::BufReader;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::u8;
+use tokio::sync::Notify;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use super::common::{
-    AppError, AppState, Token, create_response, into_host_path_safely, move_file_or_dir,
+    AppError, AppState, ConcurrencyLimiter, ConcurrencyPermit, Token, create_response,
+    into_host_path_safely, move_file_or_dir,
 };
 use super::i18n::{RequestLocale, tr, trf};
 use super::tasks::{Task, TaskBase, TaskStatus};
@@ -141,7 +143,19 @@ async fn ensure_thumbnail_cached(
     source: PathBuf,
     output: PathBuf,
     size: u32,
+    thumbnail_limiter: &Arc<ConcurrencyLimiter>,
+    darktable_limiter: &Arc<ConcurrencyLimiter>,
 ) -> Result<(), AppError> {
+    if output.exists() {
+        return Ok(());
+    }
+
+    let limiter = if is_raw_path(&source) {
+        darktable_limiter
+    } else {
+        thumbnail_limiter
+    };
+    let permit = limiter.acquire().await;
     if output.exists() {
         return Ok(());
     }
@@ -154,11 +168,12 @@ async fn ensure_thumbnail_cached(
 
     if is_raw_path(&source) {
         // Use darktable-cli to generate thumbnail for RAW files
-        DarktableClient::generate_thumbnail(&source, &output, size).await
+        let result = DarktableClient::generate_thumbnail(&source, &output, size, permit).await;
+        result
     } else {
         let source_blocking = source.clone();
         let output_blocking = output.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
             let bytes =
                 std::fs::read(&source_blocking).map_err(|e| format!("read image failed: {e}"))?;
             let img =
@@ -195,8 +210,228 @@ async fn ensure_thumbnail_cached(
         })
         .await
         .map_err(|e| AppError::Unknown(format!("thumbnail task join failed: {e}")))?
-        .map_err(AppError::Unknown)
+        .map_err(AppError::Unknown);
+        drop(permit);
+        result
     }
+}
+
+const BACKGROUND_THUMBNAIL_SIZE: u32 = 360;
+
+async fn generate_thumbnail_batch(
+    base: &TaskBase,
+    cfg: &AppState,
+    thumbnails: Vec<(PathBuf, PathBuf)>,
+    concurrency: usize,
+) -> Vec<String> {
+    use futures::StreamExt;
+
+    futures::stream::iter(thumbnails)
+        .map(|(source, output)| async move {
+            base.set_cur_task(
+                source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+            .await;
+            let error = ensure_thumbnail_cached(
+                source.clone(),
+                output,
+                BACKGROUND_THUMBNAIL_SIZE,
+                &cfg.thumbnail_limiter,
+                &cfg.darktable_limiter,
+            )
+            .await
+            .err()
+            .map(|error| format!("{}: {error}", source.display()));
+            base.add_processed_count(1);
+            error
+        })
+        .buffer_unordered(concurrency.max(1))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+struct BackgroundThumbnailTask {
+    base: TaskBase,
+    cfg: Arc<AppState>,
+}
+
+impl BackgroundThumbnailTask {
+    fn new(name: String, username: String, cfg: Arc<AppState>) -> Self {
+        Self {
+            base: TaskBase::new(name, username),
+            cfg,
+        }
+    }
+}
+
+#[async_trait]
+impl Task for BackgroundThumbnailTask {
+    fn base(&self) -> &TaskBase {
+        &self.base
+    }
+
+    fn deduplication_key(&self) -> Option<String> {
+        Some(format!("background-thumbnails:{}", self.base.owner))
+    }
+
+    async fn execute(&self) {
+        self.base.set_status(TaskStatus::Running).await;
+        self.base.set_cur_task("Scanning albums".to_string()).await;
+
+        let user_root = self.cfg.user_root_path(&self.base.owner);
+        let mut sources = Vec::new();
+        collect_album_images(&albums_root(&user_root), &mut sources).await;
+        let manifest_path = self
+            .cfg
+            .data_path
+            .join("cache")
+            .join("thumbnail-manifests")
+            .join(format!("{}.json", self.base.owner));
+        let old_manifest = tokio::fs::read_to_string(&manifest_path)
+            .await
+            .ok()
+            .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
+            .unwrap_or_default();
+        let mut current_manifest = HashMap::new();
+        let mut thumbnails = Vec::new();
+        for source in sources {
+            let Ok(metadata) = tokio::fs::metadata(&source).await else {
+                continue;
+            };
+            let cache_key = thumbnail_cache_key(
+                &self.base.owner,
+                &source,
+                BACKGROUND_THUMBNAIL_SIZE,
+                &metadata,
+            );
+            let output = self
+                .cfg
+                .data_path
+                .join("cache")
+                .join("thumbnails")
+                .join(format!("{cache_key}.webp"));
+            current_manifest.insert(cache_key, source.to_string_lossy().into_owned());
+            thumbnails.push((source, output));
+        }
+        let stale_keys = old_manifest
+            .keys()
+            .filter(|key| !current_manifest.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.base
+            .set_total_count(thumbnails.len() + stale_keys.len());
+
+        let (raw_thumbnails, image_thumbnails): (Vec<_>, Vec<_>) = thumbnails
+            .into_iter()
+            .partition(|(source, _)| is_raw_path(source));
+        let (mut image_errors, raw_errors) = tokio::join!(
+            generate_thumbnail_batch(
+                &self.base,
+                &self.cfg,
+                image_thumbnails,
+                self.cfg.thumbnail_limiter.limit(),
+            ),
+            generate_thumbnail_batch(
+                &self.base,
+                &self.cfg,
+                raw_thumbnails,
+                self.cfg.darktable_limiter.limit(),
+            ),
+        );
+        image_errors.extend(raw_errors);
+        let mut errors = image_errors;
+
+        for cache_key in stale_keys {
+            self.base
+                .set_cur_task(format!("Removing {cache_key}.webp"))
+                .await;
+            let cache_path = self
+                .cfg
+                .data_path
+                .join("cache")
+                .join("thumbnails")
+                .join(format!("{cache_key}.webp"));
+            if let Err(error) = tokio::fs::remove_file(&cache_path).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                errors.push(format!("{}: {error}", cache_path.display()));
+            }
+            self.base.add_processed_count(1);
+        }
+
+        if let Some(parent) = manifest_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        if let Ok(data) = serde_json::to_vec_pretty(&current_manifest)
+            && let Err(error) = tokio::fs::write(&manifest_path, data).await
+        {
+            errors.push(format!("{}: {error}", manifest_path.display()));
+        }
+
+        if errors.is_empty() {
+            self.base.set_cur_task("Finished".to_string()).await;
+            self.base.set_status(TaskStatus::Finished).await;
+        } else {
+            self.base
+                .set_error_msg(format!("{} thumbnail(s) failed", errors.len()))
+                .await;
+            self.base.set_status(TaskStatus::Failed).await;
+            for error in errors {
+                eprintln!("[thumbnail-prewarm] {error}");
+            }
+        }
+    }
+
+    async fn cancel(&self) {}
+}
+
+pub async fn queue_background_thumbnail_tasks(cfg: &Arc<AppState>) {
+    for username in cfg.user_manager.list_usernames().await {
+        let locale = cfg.user_manager.get_locale(&username).await;
+        let task = Arc::new(BackgroundThumbnailTask::new(
+            tr(&locale, "task.background_thumbnails"),
+            username,
+            cfg.clone(),
+        ));
+        cfg.task_mgr.add_task_if_absent(task).await;
+    }
+}
+
+pub fn spawn_thumbnail_prewarmer(cfg: Arc<AppState>) {
+    let wake = Arc::new(Notify::new());
+    let wake_on_setting_change = wake.clone();
+    cfg.settings_manager.register_change_handler(move |change| {
+        if change
+            .changed_keys
+            .iter()
+            .any(|key| key == "thumbnail_generation_mode" || key == "thumbnail_scan_interval")
+            && super::settings::SettingsManager::background_thumbnail_generation_from(
+                &change.settings,
+            )
+        {
+            wake_on_setting_change.notify_one();
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            if cfg.settings_manager.background_thumbnail_generation().await {
+                queue_background_thumbnail_tasks(&cfg).await;
+            }
+            let interval = cfg.settings_manager.thumbnail_scan_interval().await;
+            tokio::select! {
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(interval) => {}
+            }
+        }
+    });
 }
 
 /// Encapsulates all `darktable-cli` invocations. Each method creates an
@@ -205,18 +440,80 @@ async fn ensure_thumbnail_cached(
 struct DarktableClient;
 
 impl DarktableClient {
+    async fn run(
+        mut command: tokio::process::Command,
+        operation: &'static str,
+        source: PathBuf,
+        config_dir: PathBuf,
+        permit: ConcurrencyPermit,
+        thumbnail_output: Option<(PathBuf, PathBuf)>,
+    ) -> Result<std::process::ExitStatus, AppError> {
+        let task = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let active = permit.active();
+            let limit = permit.limit();
+            let limiter_id = permit.limiter_id();
+            let mut child = command.spawn().map_err(|e| {
+                AppError::Unknown(format!("failed to run darktable-cli for {operation}: {e}"))
+            })?;
+            let pid = child.id().unwrap_or(0);
+            eprintln!(
+                "[darktable] start service_pid={} limiter={limiter_id:x} operation={operation} pid={pid} active={active}/{limit} source={}",
+                std::process::id(),
+                source.display()
+            );
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| AppError::Unknown(format!("failed to wait for darktable-cli: {e}")))?;
+            eprintln!(
+                "[darktable] finish service_pid={} limiter={limiter_id:x} operation={operation} pid={pid} active={active}/{limit} status={status} elapsed_ms={} source={}",
+                std::process::id(),
+                started.elapsed().as_millis(),
+                source.display()
+            );
+            let _ = tokio::fs::remove_dir_all(config_dir).await;
+            if status.success() {
+                if let Some((temp, output)) = thumbnail_output {
+                    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
+                        let image = image::open(&temp).map_err(|e| {
+                            AppError::Unknown(format!("open darktable output: {e}"))
+                        })?;
+                        image
+                            .save_with_format(&output, image::ImageFormat::WebP)
+                            .map_err(|e| AppError::Unknown(format!("save webp thumbnail: {e}")))?;
+                        let _ = std::fs::remove_file(temp);
+                        Ok(())
+                    })
+                    .await
+                    .map_err(|e| {
+                        AppError::Unknown(format!("thumbnail convert join failed: {e}"))
+                    })??;
+                }
+            }
+            drop(permit);
+            Ok(status)
+        });
+
+        task.await
+            .map_err(|e| AppError::Unknown(format!("darktable task join failed: {e}")))?
+    }
+
     /// Generate a WebP thumbnail for a RAW file via `darktable-cli`.
     async fn generate_thumbnail(
         source: &std::path::Path,
         output: &std::path::Path,
         size: u32,
+        permit: ConcurrencyPermit,
     ) -> Result<(), AppError> {
         // darktable-cli outputs to a temp jpg then we convert to webp
         let temp_jpg = output.with_extension("tmp.jpg");
+        let _ = tokio::fs::remove_file(&temp_jpg).await;
         let config_dir =
             std::env::temp_dir().join(format!("darktable-config-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&config_dir);
-        let status = tokio::process::Command::new("darktable-cli")
+        let mut command = tokio::process::Command::new("darktable-cli");
+        command
             .arg(source)
             .arg(&temp_jpg)
             .arg("--width")
@@ -229,33 +526,23 @@ impl DarktableClient {
             .arg("--library")
             .arg(":memory:")
             .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .await
-            .map_err(|e| {
-                AppError::Unknown(format!("failed to run darktable-cli for thumbnail: {e}"))
-            })?;
-        let _ = std::fs::remove_dir_all(&config_dir);
+            .stderr(std::process::Stdio::inherit());
+        let status = Self::run(
+            command,
+            "thumbnail",
+            source.to_path_buf(),
+            config_dir,
+            permit,
+            Some((temp_jpg.clone(), output.to_path_buf())),
+        )
+        .await?;
         if !status.success() {
             let _ = tokio::fs::remove_file(&temp_jpg).await;
             return Err(AppError::Unknown(
                 "darktable-cli exited with non-zero status".into(),
             ));
         }
-        tokio::task::spawn_blocking({
-            let temp = temp_jpg.clone();
-            let out = output.to_path_buf();
-            move || -> Result<(), String> {
-                let img = image::open(&temp).map_err(|e| format!("open darktable output: {e}"))?;
-                img.save_with_format(&out, image::ImageFormat::WebP)
-                    .map_err(|e| format!("save webp thumbnail: {e}"))?;
-                let _ = std::fs::remove_file(&temp);
-                Ok(())
-            }
-        })
-        .await
-        .map_err(|e| AppError::Unknown(format!("thumbnail convert join failed: {e}")))?
-        .map_err(AppError::Unknown)
+        Ok(())
     }
 
     /// Generate a JPEG preview via `darktable-cli`, optionally applying an XMP sidecar.
@@ -264,6 +551,7 @@ impl DarktableClient {
         xmp: Option<&std::path::Path>,
         output: &std::path::Path,
         size: u32,
+        permit: ConcurrencyPermit,
     ) -> Result<(), AppError> {
         let config_dir =
             std::env::temp_dir().join(format!("darktable-config-{}", uuid::Uuid::new_v4()));
@@ -287,11 +575,15 @@ impl DarktableClient {
             .arg(":memory:")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let status = cmd
-            .status()
-            .await
-            .map_err(|e| AppError::Unknown(format!("darktable-cli not found or failed: {e}")))?;
-        let _ = tokio::fs::remove_dir_all(&config_dir).await;
+        let status = Self::run(
+            cmd,
+            "preview",
+            source.to_path_buf(),
+            config_dir,
+            permit,
+            None,
+        )
+        .await?;
         if !status.success() {
             let _ = tokio::fs::remove_file(output).await;
             return Err(AppError::Unknown(
@@ -309,6 +601,7 @@ impl DarktableClient {
         out_ext: &str,
         quality: u32,
         max_width: u32,
+        permit: ConcurrencyPermit,
     ) -> Result<(), AppError> {
         let config_dir =
             std::env::temp_dir().join(format!("darktable-config-{}", uuid::Uuid::new_v4()));
@@ -327,11 +620,15 @@ impl DarktableClient {
             .arg(":memory:")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let status = cmd
-            .status()
-            .await
-            .map_err(|e| AppError::Unknown(format!("darktable-cli not found or failed: {e}")))?;
-        let _ = tokio::fs::remove_dir_all(&config_dir).await;
+        let status = Self::run(
+            cmd,
+            "export",
+            source.to_path_buf(),
+            config_dir,
+            permit,
+            None,
+        )
+        .await?;
         if !status.success() {
             let _ = tokio::fs::remove_file(output).await;
             return Err(AppError::Unknown("darktable-cli export failed".into()));
@@ -400,24 +697,23 @@ pub async fn api_thumbnail(
     let metadata = tokio::fs::metadata(&source)
         .await
         .map_err(|_| AppError::NotFound(source.display().to_string()))?;
-    let cache_key = thumbnail_cache_key(&username, source.as_path(), size, &metadata);
+    let cache_owner = query.owner.as_deref().unwrap_or(&username);
+    let cache_key = thumbnail_cache_key(cache_owner, source.as_path(), size, &metadata);
     let cache_path = cfg
         .data_path
         .join("cache")
         .join("thumbnails")
         .join(format!("{cache_key}.webp"));
 
-    // For cache misses, limit concurrent generation to avoid starving other handlers.
-    // Cache hits bypass the semaphore — the file-exists check inside
-    // ensure_thumbnail_cached returns immediately, so no I/O is blocked.
-    if !cache_path.exists() {
-        let sem = cfg.thumbnail_semaphore.read().unwrap().clone();
-        let _permit = sem
-            .acquire_owned()
-            .await
-            .map_err(|_| AppError::Unknown("thumbnail semaphore closed".into()))?;
-        ensure_thumbnail_cached(source, cache_path.clone(), size).await?;
-    }
+    // Cache hits bypass the limiter inside ensure_thumbnail_cached().
+    ensure_thumbnail_cached(
+        source,
+        cache_path.clone(),
+        size,
+        &cfg.thumbnail_limiter,
+        &cfg.darktable_limiter,
+    )
+    .await?;
 
     let file = tokio::fs::File::open(&cache_path)
         .await
@@ -570,12 +866,25 @@ pub async fn api_darktable_preview(
         .join(format!("{cache_key}.jpg"));
 
     if !cache_path.exists() {
-        if let Some(parent) = cache_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                AppError::Unknown(format!("create darktable cache dir failed: {e}"))
-            })?;
+        let permit = cfg.darktable_limiter.acquire().await;
+        if cache_path.exists() {
+            drop(permit);
+        } else {
+            if let Some(parent) = cache_path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    AppError::Unknown(format!("create darktable cache dir failed: {e}"))
+                })?;
+            }
+            let result = DarktableClient::generate_preview(
+                &source,
+                xmp_path.as_deref(),
+                &cache_path,
+                size,
+                permit,
+            )
+            .await;
+            result?;
         }
-        DarktableClient::generate_preview(&source, xmp_path.as_deref(), &cache_path, size).await?;
     }
 
     let file = tokio::fs::File::open(&cache_path)
@@ -682,15 +991,20 @@ pub async fn api_albums_export(
         .map_err(|e| AppError::Unknown(format!("create export dir failed: {e}")))?;
     let export_path = export_dir.join(format!("{export_id}.{out_ext}"));
 
-    DarktableClient::export(
-        &source,
-        &xmp_path,
-        &export_path,
-        out_ext,
-        quality,
-        max_width,
-    )
-    .await?;
+    {
+        let permit = cfg.darktable_limiter.acquire().await;
+        let result = DarktableClient::export(
+            &source,
+            &xmp_path,
+            &export_path,
+            out_ext,
+            quality,
+            max_width,
+            permit,
+        )
+        .await;
+        result?;
+    }
 
     let bytes = tokio::fs::read(&export_path)
         .await
@@ -1792,14 +2106,21 @@ async fn collect_album_images(path: &FsPath, out: &mut Vec<PathBuf>) {
 // ── Migration: JSON sidecars → XMP ───────────────────────────────────────────
 
 #[async_recursion]
-async fn scan_json_sidecars_recursive(dir: &FsPath, out: &mut Vec<PathBuf>) {
+async fn scan_json_sidecars_recursive(
+    dir: &FsPath,
+    excluded_dir: &FsPath,
+    out: &mut Vec<PathBuf>,
+) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
         return;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
+        if path == excluded_dir {
+            continue;
+        }
         if path.is_dir() {
-            scan_json_sidecars_recursive(&path, out).await;
+            scan_json_sidecars_recursive(&path, excluded_dir, out).await;
         } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 let image_path = path.parent().unwrap_or_else(|| FsPath::new("")).join(stem);
@@ -1814,7 +2135,7 @@ async fn scan_json_sidecars_recursive(dir: &FsPath, out: &mut Vec<PathBuf>) {
 /// Scan `data_path` recursively for legacy `.json` image sidecars.
 pub async fn scan_json_sidecars(data_path: &FsPath) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    scan_json_sidecars_recursive(data_path, &mut result).await;
+    scan_json_sidecars_recursive(data_path, &data_path.join("cache"), &mut result).await;
     result
 }
 
@@ -3815,6 +4136,8 @@ struct AlbumSource {
     owner: String,
     owner_root: PathBuf,
     display_name: String,
+    cover: String,
+    description: String,
 }
 
 /// Gather every album accessible by `username`: own albums + albums shared to them.
@@ -3839,6 +4162,8 @@ async fn collect_accessible_album_sources(cfg: &AppState, username: &str) -> Vec
                     owner: username.to_string(),
                     owner_root: user_root.clone(),
                     display_name,
+                    cover: meta.cover,
+                    description: meta.description,
                 });
             }
         }
@@ -3870,6 +4195,8 @@ async fn collect_accessible_album_sources(cfg: &AppState, username: &str) -> Vec
                         owner: owner.clone(),
                         owner_root: owner_root.clone(),
                         display_name,
+                        cover: meta.cover,
+                        description: meta.description,
                     });
                 }
             }
@@ -3877,6 +4204,216 @@ async fn collect_accessible_album_sources(cfg: &AppState, username: &str) -> Vec
     }
 
     sources
+}
+
+pub async fn api_dashboard(
+    locale: RequestLocale,
+    token: Token,
+    Extension(cfg): Extension<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    let Some(session) = cfg.get_session_info(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+    let username = session.username;
+    let sources = collect_accessible_album_sources(&cfg, &username).await;
+    let own_album_count = sources.iter().filter(|source| source.owner == username).count();
+    let shared_album_count = sources.len().saturating_sub(own_album_count);
+
+    let now = chrono::Local::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let today_md = now.format("%m-%d").to_string();
+    let mut accessible_photo_count = 0usize;
+    let mut total_bytes = 0u64;
+    let mut dated_photo_count = 0usize;
+    let mut photos = Vec::<Value>::new();
+    let mut albums = Vec::<(String, Value)>::new();
+
+    for source in sources {
+        let album_key = if source.owner == username {
+            source.dir_name.clone()
+        } else {
+            format!("{}/{}", source.owner, source.dir_name)
+        };
+        let index = load_or_queue_album_index(
+            cfg.as_ref(),
+            &username,
+            &source.owner_root,
+            &source.owner,
+            &source.dir_name,
+            locale.as_str(),
+        )
+        .await?
+        .unwrap_or(AlbumIndex {
+            version: 2,
+            entries: Vec::new(),
+        });
+
+        accessible_photo_count += index.entries.len();
+        total_bytes += index.entries.iter().map(|entry| entry.size).sum::<u64>();
+        dated_photo_count += index
+            .entries
+            .iter()
+            .filter(|entry| !entry.date.is_empty() && entry.date != "1970-01-01")
+            .count();
+
+        let latest_date = index
+            .entries
+            .iter()
+            .map(|entry| entry.date.as_str())
+            .max()
+            .unwrap_or("")
+            .to_string();
+        albums.push((
+            latest_date.clone(),
+            json!({
+                "album": album_key,
+                "dir_name": source.dir_name,
+                "name": source.display_name,
+                "owner": source.owner,
+                "cover": source.cover,
+                "description": source.description,
+                "photo_count": index.entries.len(),
+                "latest_date": latest_date,
+            }),
+        ));
+
+        for entry in index.entries {
+            let mut photo = serde_json::to_value(entry).unwrap_or_default();
+            if let Some(object) = photo.as_object_mut() {
+                object.insert("album".to_string(), json!(&album_key));
+                object.insert("album_name".to_string(), json!(&source.display_name));
+                object.insert("owner".to_string(), json!(&source.owner));
+            }
+            photos.push(photo);
+        }
+    }
+
+    photos.sort_by(|left, right| {
+        let left_date = left
+            .get("datetime")
+            .and_then(Value::as_str)
+            .filter(|date| !date.is_empty())
+            .or_else(|| left.get("date").and_then(Value::as_str))
+            .unwrap_or("");
+        let right_date = right
+            .get("datetime")
+            .and_then(Value::as_str)
+            .filter(|date| !date.is_empty())
+            .or_else(|| right.get("date").and_then(Value::as_str))
+            .unwrap_or("");
+        right_date.cmp(left_date).then_with(|| {
+            left.get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .cmp(right.get("path").and_then(Value::as_str).unwrap_or(""))
+        })
+    });
+    let recent_photos = photos.iter().take(12).cloned().collect::<Vec<_>>();
+
+    albums.sort_by(|left, right| right.0.cmp(&left.0));
+    let recent_albums = albums
+        .into_iter()
+        .take(6)
+        .map(|(_, album)| album)
+        .collect::<Vec<_>>();
+
+    let on_this_day_photos = photos
+        .iter()
+        .filter(|photo| {
+            photo
+                .get("date")
+                .and_then(Value::as_str)
+                .and_then(|date| date.get(5..))
+                == Some(today_md.as_str())
+        })
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>();
+    let on_this_day_count = on_this_day_photos.len();
+
+    let seed = format!("{username}|{today}");
+    let mut daily_picks = photos.clone();
+    daily_picks.sort_by_cached_key(|photo| {
+        let path = photo.get("path").and_then(Value::as_str).unwrap_or("");
+        let album = photo.get("album").and_then(Value::as_str).unwrap_or("");
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        hasher.update(b"|");
+        hasher.update(album.as_bytes());
+        hasher.update(b"|");
+        hasher.update(path.as_bytes());
+        let result = hasher.finalize();
+        u64::from_le_bytes(result[..8].try_into().unwrap_or([0u8; 8]))
+    });
+    daily_picks.truncate(8);
+
+    let task_map = cfg.task_mgr.get_task_status_map_for_user(&username).await;
+    let mut active_tasks = task_map
+        .into_iter()
+        .filter_map(|(id, mut task)| {
+            let status = task.get("status").and_then(Value::as_u64)?;
+            if status > TaskStatus::Paused as u64 {
+                return None;
+            }
+            task.as_object_mut()?.insert("id".to_string(), json!(id));
+            Some(task)
+        })
+        .collect::<Vec<_>>();
+    let active_task_count = active_tasks.len();
+    active_tasks.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(right.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    active_tasks.truncate(6);
+
+    let admin = if session.role == super::auth::Role::Admin {
+        let settings = cfg.settings_manager.get_all().await;
+        Some(json!({
+            "user_count": cfg.user_manager.list_usernames().await.len(),
+            "webdav_share_count": super::settings::webdav_share_count(&cfg.data_path).await,
+            "settings": {
+                "allow_registration": settings.get("allow_registration").cloned().unwrap_or(json!(true)),
+                "thumbnail_generation_mode": settings.get("thumbnail_generation_mode").cloned().unwrap_or(json!("on_demand")),
+                "thumbnail_concurrency": settings.get("thumbnail_concurrency").cloned().unwrap_or(json!(3)),
+                "darktable_concurrency": settings.get("darktable_concurrency").cloned().unwrap_or(json!(1)),
+            }
+        }))
+    } else {
+        None
+    };
+
+    let data = json!({
+        "summary": {
+            "own_album_count": own_album_count,
+            "shared_album_count": shared_album_count,
+            "accessible_photo_count": accessible_photo_count,
+            "total_bytes": total_bytes,
+            "dated_photo_count": dated_photo_count,
+            "active_task_count": active_task_count,
+            "uptime_seconds": cfg.started_at.elapsed().as_secs(),
+        },
+        "recent_photos": recent_photos,
+        "recent_albums": recent_albums,
+        "on_this_day": {
+            "date": today_md,
+            "count": on_this_day_count,
+            "photos": on_this_day_photos,
+        },
+        "daily_picks": {
+            "date": today,
+            "photos": daily_picks,
+        },
+        "active_tasks": active_tasks,
+        "admin": admin,
+    });
+    Ok(create_response(
+        true,
+        &tr(locale.as_str(), "response.success"),
+        0,
+        Some(data),
+    ))
 }
 
 // ── On This Day ──────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -15,9 +15,17 @@ use super::auth::Role;
 use super::common::{AppError, AppState, RateLimiter, Token, create_response};
 use super::i18n::{RequestLocale, SUPPORTED_LOCALES, normalize_locale, tr, trf};
 
+pub struct SettingsChange {
+    pub changed_keys: Vec<String>,
+    pub settings: Value,
+}
+
+pub type SettingsChangeHandler = dyn Fn(&SettingsChange) + Send + Sync;
+
 pub struct SettingsManager {
     settings: Mutex<Value>,
     persist_path: PathBuf,
+    change_handlers: StdMutex<Vec<Arc<SettingsChangeHandler>>>,
 }
 
 impl SettingsManager {
@@ -33,7 +41,15 @@ impl SettingsManager {
         Self {
             settings: Mutex::new(settings),
             persist_path,
+            change_handlers: StdMutex::new(Vec::new()),
         }
+    }
+
+    pub fn register_change_handler<F>(&self, handler: F)
+    where
+        F: Fn(&SettingsChange) + Send + Sync + 'static,
+    {
+        self.change_handlers.lock().unwrap().push(Arc::new(handler));
     }
 
     pub async fn get_all(&self) -> Value {
@@ -42,20 +58,47 @@ impl SettingsManager {
 
     pub async fn set_value(&self, key: &str, value: Value) {
         let mut locked = self.settings.lock().await;
+        let mut changed = false;
         if let Some(obj) = locked.as_object_mut() {
+            changed = obj.get(key) != Some(&value);
             obj.insert(key.to_owned(), value);
         }
-        self.save_to_disk(&locked);
+        let settings = locked.clone();
+        drop(locked);
+        self.save_to_disk(&settings);
+        if changed {
+            self.notify_change(vec![key.to_owned()], settings);
+        }
     }
 
     pub async fn set_many(&self, updates: Value) {
         let mut locked = self.settings.lock().await;
+        let mut changed_keys = Vec::new();
         if let (Some(target), Some(source)) = (locked.as_object_mut(), updates.as_object()) {
             for (k, v) in source {
+                if target.get(k) != Some(v) {
+                    changed_keys.push(k.clone());
+                }
                 target.insert(k.clone(), v.clone());
             }
         }
-        self.save_to_disk(&locked);
+        let settings = locked.clone();
+        drop(locked);
+        self.save_to_disk(&settings);
+        if !changed_keys.is_empty() {
+            self.notify_change(changed_keys, settings);
+        }
+    }
+
+    fn notify_change(&self, changed_keys: Vec<String>, settings: Value) {
+        let handlers = self.change_handlers.lock().unwrap().clone();
+        let change = SettingsChange {
+            changed_keys,
+            settings,
+        };
+        for handler in handlers {
+            handler(&change);
+        }
     }
 
     // ── Typed getters ────────────────────────────────────────────────────────
@@ -70,15 +113,48 @@ impl SettingsManager {
             .unwrap_or(0)
     }
 
-    /// Max concurrent thumbnail-generation workers (1–32, default 3).
-    pub async fn thumbnail_concurrency(&self) -> usize {
-        self.settings
-            .lock()
-            .await
+    pub fn thumbnail_concurrency_from(settings: &Value) -> usize {
+        settings
             .get("thumbnail_concurrency")
             .and_then(|v| v.as_u64())
             .map(|n| (n as usize).max(1).min(32))
             .unwrap_or(3)
+    }
+
+    pub fn darktable_concurrency_from(settings: &Value) -> usize {
+        settings
+            .get("darktable_concurrency")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).max(1).min(32))
+            .unwrap_or(1)
+    }
+
+    pub async fn background_thumbnail_generation(&self) -> bool {
+        Self::background_thumbnail_generation_from(&*self.settings.lock().await)
+    }
+
+    pub fn background_thumbnail_generation_from(settings: &Value) -> bool {
+        settings
+            .get("thumbnail_generation_mode")
+            .and_then(|value| value.as_str())
+            == Some("background")
+    }
+
+    pub async fn thumbnail_scan_interval(&self) -> std::time::Duration {
+        Self::thumbnail_scan_interval_from(&*self.settings.lock().await)
+    }
+
+    pub fn thumbnail_scan_interval_from(settings: &Value) -> std::time::Duration {
+        let hours = match settings
+            .get("thumbnail_scan_interval")
+            .and_then(|value| value.as_str())
+        {
+            Some("12h") => 12,
+            Some("3d") => 3 * 24,
+            Some("7d") => 7 * 24,
+            _ => 24,
+        };
+        std::time::Duration::from_secs(hours * 60 * 60)
     }
 
     /// Whether public user registration is allowed (default true).
@@ -137,15 +213,33 @@ pub async fn api_settings_update(
             "error.admin_only_settings",
         )));
     }
-    let update_semaphore = payload.settings.get("thumbnail_concurrency").is_some();
     cfg.settings_manager.set_many(payload.settings).await;
-    if update_semaphore {
-        let n = cfg.settings_manager.thumbnail_concurrency().await;
-        *cfg.thumbnail_semaphore.write().unwrap() = Arc::new(tokio::sync::Semaphore::new(n));
-    }
     let settings = cfg.settings_manager.get_all().await;
     let message = tr(locale.as_str(), "response.settings_saved");
     Ok(create_response(true, &message, 0, Some(settings)))
+}
+
+pub async fn api_thumbnail_scan_now(
+    locale: RequestLocale,
+    token: Token,
+    Extension(cfg): Extension<Arc<AppState>>,
+) -> Result<Json<Value>, AppError> {
+    let Some(session) = cfg.get_session_info(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+    if session.role != Role::Admin {
+        return Err(AppError::Forbidden(tr(
+            locale.as_str(),
+            "error.admin_only_settings",
+        )));
+    }
+    super::album::queue_background_thumbnail_tasks(&cfg).await;
+    Ok(create_response(
+        true,
+        &tr(locale.as_str(), "response.thumbnail_scan_started"),
+        0,
+        None,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -591,6 +685,10 @@ async fn load_webdav_shares(data_path: &std::path::Path) -> Vec<WebdavShare> {
         return vec![];
     };
     serde_json::from_str(&raw).unwrap_or_default()
+}
+
+pub(crate) async fn webdav_share_count(data_path: &std::path::Path) -> usize {
+    load_webdav_shares(data_path).await.len()
 }
 
 async fn save_webdav_shares(

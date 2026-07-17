@@ -19,12 +19,13 @@ use backend::album::{
     api_albums_delete, api_albums_delete_photos, api_albums_export, api_albums_import,
     api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_rebuild_index,
     api_albums_share, api_albums_unshare, api_albums_update, api_albums_upload, api_daily_picks,
-    api_darktable_preview, api_has_xmp, api_on_this_day, api_thumbnail,
+    api_dashboard, api_darktable_preview, api_has_xmp, api_on_this_day, api_thumbnail,
+    spawn_thumbnail_prewarmer,
 };
 use backend::auth::{
     Role, SessionManager, UserManager, api_login, api_logout, api_register, api_whoami,
 };
-use backend::common::{AppState, RateLimiter, security_headers, spawn_cache_gc};
+use backend::common::{AppState, ConcurrencyLimiter, RateLimiter, security_headers, spawn_cache_gc};
 use backend::files::{
     api_copy_files, api_delete_files, api_download_file, api_get_file_list, api_move_files,
     api_new_folder, api_rename_file, api_upload, api_upload_feed, web_egui_file, web_file,
@@ -33,7 +34,8 @@ use backend::settings::{
     SettingsManager, api_admin_reset_password, api_admin_users_delete, api_admin_users_get,
     api_admin_users_update, api_avatar_get, api_avatar_upload, api_password_update,
     api_preferences_get, api_preferences_update, api_settings_get, api_settings_update,
-    api_webdav_handler, api_webdav_shares_get, api_webdav_shares_update,
+    api_thumbnail_scan_now, api_webdav_handler, api_webdav_shares_get,
+    api_webdav_shares_update,
 };
 use backend::tasks::{
     TaskManager, api_cancel_task, api_clear_finished_tasks, api_get_task_list, api_get_task_status,
@@ -67,8 +69,10 @@ async fn main() {
 
     let user_manager = Arc::new(UserManager::new(Some(users_file)));
     let settings_manager = Arc::new(SettingsManager::new(settings_file));
-    let thumbnail_concurrency = settings_manager.thumbnail_concurrency().await;
+    let thumbnail_limiter = ConcurrencyLimiter::for_thumbnails(&settings_manager).await;
+    let darktable_limiter = ConcurrencyLimiter::for_darktable(&settings_manager).await;
     let app_state = Arc::new(AppState {
+        started_at: std::time::Instant::now(),
         data_path,
         resources_path: std::path::PathBuf::from("./dist/resources")
             .canonicalize()
@@ -80,9 +84,8 @@ async fn main() {
         session_manager: Arc::new(SessionManager::new(Some(sessions_file))),
         settings_manager,
         trust_proxy_headers,
-        thumbnail_semaphore: std::sync::RwLock::new(Arc::new(tokio::sync::Semaphore::new(
-            thumbnail_concurrency,
-        ))),
+        thumbnail_limiter,
+        darktable_limiter,
     });
 
     // Bootstrap an admin user on first run.
@@ -159,10 +162,12 @@ async fn main() {
         .route("/api/albums/has_xmp/{*path}", get(api_has_xmp))
         .route("/api/on-this-day", get(api_on_this_day))
         .route("/api/daily-picks", get(api_daily_picks))
+        .route("/api/dashboard", get(api_dashboard))
         .route(
             "/api/settings",
             get(api_settings_get).post(api_settings_update),
         )
+        .route("/api/settings/thumbnail-scan", post(api_thumbnail_scan_now))
         .route(
             "/api/preferences",
             get(api_preferences_get).post(api_preferences_update),
@@ -213,9 +218,9 @@ async fn main() {
         .layer(Extension(RateLimiter::new()))
         .layer(Extension(app_state.clone()));
 
-    spawn_cache_gc(app_state);
-
     let listener = tokio::net::TcpListener::bind("[::]:3000").await.unwrap();
+    spawn_thumbnail_prewarmer(app_state.clone());
+    spawn_cache_gc(app_state);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

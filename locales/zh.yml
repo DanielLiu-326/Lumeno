@@ -5,6 +5,7 @@ response:
   registration_success: "注册成功"
   logged_out: "已退出登录"
   settings_saved: "设置已保存"
+  thumbnail_scan_started: "缩略图扫描任务已启动"
   preferences_saved: "语言偏好已保存"
   password_updated: "密码已更新"
   member_updated: "成员信息已更新"
@@ -96,6 +97,7 @@ task:
   upload_album: "从本地上传到{album}相册"
   import_album: "从云端文件导入到相册{album}"
   rebuild_index: "重建索引：{album}"
+  background_thumbnails: "后台生成缩略图"
   move_failed: "有 {count} 项移动失败"
 
 collections:

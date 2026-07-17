@@ -14,11 +14,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use super::auth::{SessionInfo, SessionManager, UserManager, extract_token_from_cookie};
 use super::i18n::{resolve_locale, tr};
-use super::settings::SettingsManager;
+use super::settings::{SettingsChange, SettingsManager};
 use super::tasks::TaskManager;
 
 #[macro_export]
@@ -111,6 +111,7 @@ where
 }
 
 pub struct AppState {
+    pub started_at: Instant,
     pub data_path: PathBuf,
     pub resources_path: PathBuf,
     pub egui_resources_path: PathBuf,
@@ -120,10 +121,121 @@ pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub settings_manager: Arc<SettingsManager>,
     pub trust_proxy_headers: bool,
-    /// Limits concurrent thumbnail generation (not cache hits) to prevent
-    /// thumbnail work from starving other request handlers.
-    /// Wrapped in RwLock so the limit can be changed at runtime via settings.
-    pub thumbnail_semaphore: std::sync::RwLock<Arc<tokio::sync::Semaphore>>,
+    pub thumbnail_limiter: Arc<ConcurrencyLimiter>,
+    pub darktable_limiter: Arc<ConcurrencyLimiter>,
+}
+
+struct ConcurrencyLimiterState {
+    limit: usize,
+    active: usize,
+}
+
+/// A resizable concurrency limiter. Lowering its limit does not interrupt
+/// current work; it blocks new work until the active count drops below it.
+pub struct ConcurrencyLimiter {
+    state: std::sync::Mutex<ConcurrencyLimiterState>,
+    available: Notify,
+}
+
+pub struct ConcurrencyPermit {
+    limiter: Arc<ConcurrencyLimiter>,
+    active: usize,
+    limit: usize,
+}
+
+impl ConcurrencyLimiter {
+    async fn new<F>(
+        settings_manager: &Arc<SettingsManager>,
+        setting_key: &'static str,
+        read_limit: F,
+    ) -> Arc<Self>
+    where
+        F: Fn(&serde_json::Value) -> usize + Send + Sync + 'static,
+    {
+        let settings = settings_manager.get_all().await;
+        let limiter = Arc::new(Self {
+            state: std::sync::Mutex::new(ConcurrencyLimiterState {
+                limit: read_limit(&settings),
+                active: 0,
+            }),
+            available: Notify::new(),
+        });
+        let weak_limiter = Arc::downgrade(&limiter);
+        settings_manager.register_change_handler(move |change: &SettingsChange| {
+            if change.changed_keys.iter().any(|key| key == setting_key) {
+                if let Some(limiter) = weak_limiter.upgrade() {
+                    limiter.set_limit(read_limit(&change.settings));
+                }
+            }
+        });
+        limiter
+    }
+
+    pub async fn for_thumbnails(settings_manager: &Arc<SettingsManager>) -> Arc<Self> {
+        Self::new(
+            settings_manager,
+            "thumbnail_concurrency",
+            SettingsManager::thumbnail_concurrency_from,
+        )
+        .await
+    }
+
+    pub async fn for_darktable(settings_manager: &Arc<SettingsManager>) -> Arc<Self> {
+        Self::new(
+            settings_manager,
+            "darktable_concurrency",
+            SettingsManager::darktable_concurrency_from,
+        )
+        .await
+    }
+
+    pub async fn acquire(self: &Arc<Self>) -> ConcurrencyPermit {
+        loop {
+            let notified = self.available.notified();
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.active < state.limit {
+                    state.active += 1;
+                    return ConcurrencyPermit {
+                        limiter: self.clone(),
+                        active: state.active,
+                        limit: state.limit,
+                    };
+                }
+            }
+            notified.await;
+        }
+    }
+
+    pub fn set_limit(&self, limit: usize) {
+        self.state.lock().unwrap().limit = limit;
+        self.available.notify_waiters();
+    }
+
+    pub fn limit(&self) -> usize {
+        self.state.lock().unwrap().limit
+    }
+}
+
+impl ConcurrencyPermit {
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub fn limiter_id(&self) -> usize {
+        Arc::as_ptr(&self.limiter) as usize
+    }
+}
+
+impl Drop for ConcurrencyPermit {
+    fn drop(&mut self) {
+        self.limiter.state.lock().unwrap().active -= 1;
+        self.limiter.available.notify_one();
+    }
 }
 
 impl AppState {
