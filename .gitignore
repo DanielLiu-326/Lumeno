@@ -2,6 +2,7 @@
 /frontend/node_modules
 /dist
 /build_router
+/.venv-ai
 
 # Local environment configuration and secrets
 /.env

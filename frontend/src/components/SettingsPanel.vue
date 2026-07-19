@@ -5,6 +5,7 @@ import { availableLocales, t } from "../i18n/index.js";
 const props = defineProps({
   isDark: { type: Boolean, default: false },
   settings: { type: Object, default: () => ({}) },
+  aiStatus: { type: Object, default: null },
   members: { type: Array, default: () => ([]) },
   isAdmin: { type: Boolean, default: false },
   currentUser: { type: String, default: "" },
@@ -13,6 +14,7 @@ const props = defineProps({
   userAvatar: { type: String, default: null },
   onUpdatePassword: { type: Function, default: null },
   onUploadAvatar: { type: Function, default: null },
+  onAiIndex: { type: Function, default: null },
   webdavShares: { type: Array, default: () => [] },
   onWebdavUpdate: { type: Function, default: null },
 });
@@ -25,6 +27,7 @@ const localMembers = ref([]);
 const passwordForm = ref({ current_password: "", new_password: "", confirm_password: "" });
 const avatarInput = ref(null);
 const avatarUploading = ref(false);
+const aiIndexStarting = ref(false);
 
 const webdavNewPath = ref("");
 const webdavAdding = ref(false);
@@ -113,6 +116,10 @@ watch(
     localSettings.value = {
       thumbnail_generation_mode: "on_demand",
       thumbnail_scan_interval: "1d",
+      ai_enabled: false,
+      ai_provider: "local",
+      ai_remote_url: "",
+      ai_concurrency: 1,
       ...val,
     };
   },
@@ -182,6 +189,16 @@ async function handleAvatarChange(event) {
   } finally {
     avatarUploading.value = false;
     if (avatarInput.value) avatarInput.value.value = "";
+  }
+}
+
+async function startAiIndex() {
+  if (!props.onAiIndex || aiIndexStarting.value) return;
+  aiIndexStarting.value = true;
+  try {
+    await props.onAiIndex();
+  } finally {
+    aiIndexStarting.value = false;
   }
 }
 
@@ -449,6 +466,121 @@ function promptResetPassword(member) {
           <div v-else-if="activeSection === 'appSettings' && isAdmin">
             <div class="flex flex-col gap-4 rounded-xl border p-4"
               :class="isDark ? 'border-stone-700 bg-stone-800/60' : 'border-stone-200 bg-stone-50'">
+              <div class="rounded-xl border p-4"
+                :class="isDark ? 'border-stone-700/80 bg-stone-900/50' : 'border-stone-200 bg-white/80'">
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p class="text-sm font-semibold">{{ t('settings.aiTitle') }}</p>
+                    <p class="mt-1 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
+                      {{ t('settings.aiSubtitle') }}
+                    </p>
+                  </div>
+                  <span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium"
+                    :class="props.aiStatus?.enabled
+                      ? (isDark ? 'bg-emerald-900/60 text-emerald-200' : 'bg-emerald-100 text-emerald-700')
+                      : (isDark ? 'bg-stone-700 text-stone-300' : 'bg-stone-200 text-stone-600')">
+                    {{ props.aiStatus?.enabled ? t('settings.aiEnabled') : t('settings.aiDisabled') }}
+                  </span>
+                </div>
+                <div class="mt-4 grid gap-3 md:grid-cols-2">
+                  <div>
+                    <span class="block text-[11px] font-medium uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiProvider') }}</span>
+                    <p class="mt-1 text-sm">{{ props.aiStatus?.provider?.kind || '-' }}</p>
+                  </div>
+                  <div>
+                    <span class="block text-[11px] font-medium uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiBackend') }}</span>
+                    <p class="mt-1 text-sm break-all">{{ props.aiStatus?.provider?.backend || '-' }}</p>
+                  </div>
+                  <div>
+                    <span class="block text-[11px] font-medium uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiHealth') }}</span>
+                    <p class="mt-1 text-sm">{{ props.aiStatus?.provider?.healthy ? t('settings.aiHealthy') : t('settings.aiUnavailable') }}</p>
+                  </div>
+                  <div>
+                    <span class="block text-[11px] font-medium uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiGeneration') }}</span>
+                    <p class="mt-1 text-sm">{{ props.aiStatus?.owner_index?.current_generation || '-' }}</p>
+                  </div>
+                  <div>
+                    <span class="block text-[11px] font-medium uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiConcurrency') }}</span>
+                    <p class="mt-1 text-sm">{{ props.aiStatus?.limits?.concurrency ?? '-' }}</p>
+                  </div>
+                  <div>
+                    <span class="block text-[11px] font-medium uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiIndexState') }}</span>
+                    <p class="mt-1 text-sm">{{ props.aiStatus?.owner_index?.state || '-' }}</p>
+                  </div>
+                </div>
+                <div class="mt-4 grid gap-2 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
+                  <div class="flex flex-wrap items-center gap-3 pb-1">
+                    <button
+                      class="rounded-lg px-3 py-1.5 text-xs font-medium transition"
+                      :disabled="aiIndexStarting"
+                      :class="isDark ? 'bg-sky-700 text-white hover:bg-sky-600 disabled:opacity-60' : 'bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-60'"
+                      @click="startAiIndex">
+                      {{ aiIndexStarting ? t('settings.aiStartingIndex') : t('settings.aiStartIndex') }}
+                    </button>
+                    <span>{{ t('settings.aiStartIndexHint') }}</span>
+                  </div>
+                  <p>{{ t('settings.aiCapabilityImage') }}: {{ props.aiStatus?.capabilities?.image_search ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiCapabilityText') }}: {{ props.aiStatus?.capabilities?.text_search ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiCapabilityDuplicates') }}: {{ props.aiStatus?.capabilities?.duplicates ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiCapabilityFaces') }}: {{ props.aiStatus?.capabilities?.faces ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiIndexRoot') }}: {{ props.aiStatus?.owner_index?.root_exists ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiIndexManifest') }}: {{ props.aiStatus?.owner_index?.manifest_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiPhotosMeta') }}: {{ props.aiStatus?.owner_index?.photos_meta_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiHashesBin') }}: {{ props.aiStatus?.owner_index?.hashes_bin_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiAlbumsTotal') }}: {{ props.aiStatus?.owner_index?.stats?.albums_total ?? '-' }}</p>
+                  <p>{{ t('settings.aiPhotosTotal') }}: {{ props.aiStatus?.owner_index?.stats?.photos_total ?? '-' }}</p>
+                  <p>{{ t('settings.aiPhotosIndexed') }}: {{ props.aiStatus?.owner_index?.stats?.photos_indexed ?? '-' }}</p>
+                  <p>{{ t('settings.aiPhotosReused') }}: {{ props.aiStatus?.owner_index?.stats?.photos_reused ?? '-' }}</p>
+                  <p>{{ t('settings.aiImageEmbeddingsPending') }}: {{ props.aiStatus?.owner_index?.stats?.image_embeddings_pending ?? '-' }}</p>
+                  <p>{{ t('settings.aiDuplicateHashesPending') }}: {{ props.aiStatus?.owner_index?.stats?.duplicate_hashes_pending ?? '-' }}</p>
+                  <p>{{ t('settings.aiFaceEmbeddingsPending') }}: {{ props.aiStatus?.owner_index?.stats?.face_embeddings_pending ?? '-' }}</p>
+                  <p>{{ t('settings.aiSourcesTotal') }}: {{ props.aiStatus?.owner_index?.sources_total ?? '-' }}</p>
+                  <p v-if="props.aiStatus?.provider?.reason">{{ t('settings.aiReason') }}: {{ props.aiStatus.provider.reason }}</p>
+                  <p v-if="props.aiStatus?.provider?.model_root">{{ t('settings.aiModelRoot') }}: {{ props.aiStatus.provider.model_root }}</p>
+                  <p v-if="props.aiStatus?.provider?.remote_token_configured !== undefined">
+                    {{ t('settings.aiRemoteTokenConfigured') }}:
+                    {{ props.aiStatus.provider.remote_token_configured ? t('settings.aiRemoteTokenYes') : t('settings.aiRemoteTokenNo') }}
+                  </p>
+                </div>
+              </div>
+              <div class="rounded-xl border p-4"
+                :class="isDark ? 'border-stone-700/80 bg-stone-900/50' : 'border-stone-200 bg-white/80'">
+                <p class="text-sm font-semibold">{{ t('settings.aiControlsTitle') }}</p>
+                <p class="mt-1 mb-4 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiControlsHint') }}</p>
+                <div class="grid gap-4 md:grid-cols-2">
+                  <div class="flex items-center gap-3">
+                    <label class="relative inline-flex cursor-pointer items-center">
+                      <input type="checkbox" v-model="localSettings.ai_enabled" class="peer sr-only" />
+                      <div class="peer h-5 w-9 rounded-full after:absolute after:left-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:transition-all peer-checked:after:translate-x-full"
+                        :class="isDark
+                          ? 'bg-stone-700 after:bg-stone-400 peer-checked:bg-amber-600 peer-checked:after:bg-white'
+                          : 'bg-stone-300 after:bg-white peer-checked:bg-amber-500 peer-checked:after:bg-white'"></div>
+                    </label>
+                    <span class="text-sm" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ t('settings.aiEnabledToggle') }}</span>
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.aiProviderSelect') }}</label>
+                    <select v-model="localSettings.ai_provider"
+                      class="w-full rounded-lg border px-3 py-2 text-sm"
+                      :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'">
+                      <option value="local">{{ t('settings.aiProviderLocal') }}</option>
+                      <option value="remote">{{ t('settings.aiProviderRemote') }}</option>
+                    </select>
+                  </div>
+                  <div v-if="localSettings.ai_provider === 'remote'" class="md:col-span-2">
+                    <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.aiRemoteUrl') }}</label>
+                    <input v-model="localSettings.ai_remote_url" type="url" placeholder="https://ai.example.com"
+                      class="w-full rounded-lg border px-3 py-2 text-sm"
+                      :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.aiConcurrency') }}</label>
+                    <input v-model.number="localSettings.ai_concurrency" type="number" min="1" max="16" placeholder="1"
+                      class="w-full rounded-lg border px-3 py-2 text-sm"
+                      :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                  </div>
+                </div>
+              </div>
               <div>
                 <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.siteName') }}</label>
                 <input v-model="localSettings.site_name" type="text" placeholder="Album"

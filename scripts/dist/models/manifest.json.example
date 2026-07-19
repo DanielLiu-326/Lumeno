@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "revision": "siglip2-base-patch32-256+scrfd-2.5g+arcface-r50-w600k",
+  "image_text": {
+    "id": "google/siglip2-base-patch32-256",
+    "revision": "siglip2-base-patch32-256",
+    "format": "safetensors",
+    "file": "siglip2-base-p32-256.safetensors",
+    "sha256": "REPLACE_AFTER_CONVERT",
+    "dimension": 768,
+    "input_size": [
+      256,
+      256
+    ]
+  },
+  "face_detector": {
+    "id": "insightface/scrfd_2.5g",
+    "revision": "scrfd-2.5g",
+    "format": "safetensors",
+    "file": "scrfd-2.5g.safetensors",
+    "sha256": "REPLACE_AFTER_CONVERT",
+    "dimension": 5,
+    "input_size": [
+      640,
+      640
+    ]
+  },
+  "face_embedder": {
+    "id": "insightface/w600k_r50",
+    "revision": "arcface-r50-w600k",
+    "format": "safetensors",
+    "file": "arcface-r50.safetensors",
+    "sha256": "REPLACE_AFTER_CONVERT",
+    "dimension": 512,
+    "input_size": [
+      112,
+      112
+    ]
+  },
+  "tokenizer": {
+    "file": "siglip2-tokenizer.json",
+    "sha256": "REPLACE_AFTER_CONVERT",
+    "max_length": 64
+  },
+  "notes": "SigLIP 2: follow upstream HF / NVIDIA Open Model redistribution terms. InsightFace buffalo/ArcFace weights are typically non-commercial research; do not bundle them in public release tarballs by default."
+}

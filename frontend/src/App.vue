@@ -186,6 +186,8 @@ watch(
       await app.refreshAlbums();
     } else if (tab === "dashboard") {
       await app.refreshDashboard();
+    } else if (tab === "settings") {
+      await app.refreshAiStatus();
     }
   },
 );
@@ -214,7 +216,7 @@ async function openDashboardAlbum(album) {
       :is-dark="isDark"
       :username="app.currentUser"
       :avatar="app.userAvatar"
-      @switch-tab="(tab) => (activeTab = tab)"
+      @switch-tab="(tab) => { activeTab = tab; }"
     />
 
     <Transition
@@ -482,7 +484,18 @@ async function openDashboardAlbum(album) {
               :shared-albums="app.sharedAlbums"
               :current-album="app.currentAlbum"
               :current-user="app.currentUser"
+              :album-view-mode="app.albumViewMode"
               :album-photos="app.albumPhotos"
+              :duplicate-groups="app.albumDuplicateGroups"
+              :duplicate-total="app.albumDuplicateTotal"
+              :similar-results="app.aiSimilarResults"
+              :similar-query="app.aiSimilarQuery"
+              :similar-loading="app.aiSimilarLoading"
+              :album-people="app.albumPeople"
+              :album-people-loading="app.albumPeopleLoading"
+              :selected-person="app.selectedPerson"
+              :person-photos="app.personPhotos"
+              :person-photos-loading="app.personPhotosLoading"
               :available-tags="app.albumAvailableTags"
               :available-cameras="app.albumAvailableCameras"
               :available-lenses="app.albumAvailableLenses"
@@ -507,6 +520,17 @@ async function openDashboardAlbum(album) {
               @delete-album="app.deleteAlbum"
               @delete-photos="app.deleteAlbumPhotos"
               @share-album="app.shareAlbum"
+              @show-duplicates="app.showAlbumDuplicates"
+              @show-photos="app.showAlbumPhotos"
+              @find-similar="app.findSimilarPhotos"
+              @search-text="app.searchAlbumByText"
+              @filter-person="app.filterAlbumByPerson"
+              @refresh-album-people="() => app.refreshPeopleForAlbum()"
+              @select-person="app.selectPerson"
+              @back-to-people="app.backToPeople"
+              @patch-person="(id, updates) => app.patchPerson(id, updates)"
+              @merge-people="app.mergePeople"
+              @split-person="app.splitPerson"
               @unshare-album="app.unshareAlbum"
               @apply-filters="app.refreshAlbumPhotos"
               @update-sort="(s) => { app.albumSort = s; app.refreshAlbumPhotos(); }"
@@ -528,12 +552,14 @@ async function openDashboardAlbum(album) {
               :is-dark="isDark"
               :members="app.members"
               :settings="app.settings"
+              :ai-status="app.aiStatus"
               :is-admin="app.isAdmin"
               :current-user="app.currentUser"
               :current-locale="app.userLocale"
               :user-avatar="app.userAvatar"
               :on-update-password="app.updatePassword"
               :on-upload-avatar="app.uploadAvatar"
+              :on-ai-index="app.queueAiIndex"
               :user-role="app.userRole"
               :webdav-shares="app.webdavShares"
               :on-webdav-update="app.updateWebdavShare"

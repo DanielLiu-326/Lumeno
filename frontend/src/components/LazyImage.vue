@@ -21,6 +21,7 @@ import { enqueue, loadedUrls } from "../utils/imageThrottle.js";
 const props = defineProps({
   src: { type: String, required: true },
   imgClass: { type: String, default: "" },
+  imgStyle: { type: [Object, String], default: null },
   alt: { type: String, default: "" },
 });
 
@@ -163,6 +164,7 @@ watch(
     v-bind="displaySrc ? { src: displaySrc } : {}"
     :alt="alt"
     :class="imgClass"
+    :style="imgStyle || undefined"
     decoding="async"
     fetchpriority="low"
     @error="onError"

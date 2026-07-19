@@ -31,3 +31,19 @@ kamadak-exif = "0.6"
 rust-i18n = "3.1.2"
 dav-server = { version = "0.11.0", features = ["localfs"] }
 quick-xml = "0.37"
+burn = { version = "0.21.0", default-features = false, features = ["std", "flex", "store", "dispatch", "vulkan"] }
+burn-store = "0.21"
+half = "2"
+rayon = "1.12.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+[features]
+# Optional NVIDIA CUDA (needs CUDA toolkit at build time). Vulkan GPU is always compiled in.
+default = []
+cuda = ["burn/cuda"]
+
+[build-dependencies]
+burn-onnx = "0.21"
+sha2 = "0.11.0"
+

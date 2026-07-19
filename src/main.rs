@@ -1,10 +1,11 @@
 #![feature(normalize_lexically)]
 #![feature(trait_alias)]
 #![feature(generic_atomic)]
+#![recursion_limit = "256"]
 
 use axum::extract::{DefaultBodyLimit, Path};
 use axum::middleware;
-use axum::routing::post;
+use axum::routing::{patch, post};
 use axum::{Extension, Router, routing::get};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -14,18 +15,26 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 mod backend;
 
+use backend::ai::{
+    api_ai_duplicates, api_ai_index, api_ai_people, api_ai_people_merge, api_ai_people_patch,
+    api_ai_people_photos, api_ai_people_split, api_ai_search_similar, api_ai_search_text,
+    api_ai_status,
+};
 use backend::album::{
     api_albums_collections, api_albums_copy_photo, api_albums_create, api_albums_date_histogram,
     api_albums_delete, api_albums_delete_photos, api_albums_export, api_albums_import,
-    api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_rebuild_index,
+    api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_photos_query,
+    api_albums_rebuild_index,
     api_albums_share, api_albums_unshare, api_albums_update, api_albums_upload, api_daily_picks,
-    api_dashboard, api_darktable_preview, api_has_xmp, api_on_this_day, api_thumbnail,
+    api_darktable_preview, api_dashboard, api_has_xmp, api_on_this_day, api_thumbnail,
     spawn_thumbnail_prewarmer,
 };
 use backend::auth::{
     Role, SessionManager, UserManager, api_login, api_logout, api_register, api_whoami,
 };
-use backend::common::{AppState, ConcurrencyLimiter, RateLimiter, security_headers, spawn_cache_gc};
+use backend::common::{
+    AppState, ConcurrencyLimiter, RateLimiter, security_headers, spawn_cache_gc,
+};
 use backend::files::{
     api_copy_files, api_delete_files, api_download_file, api_get_file_list, api_move_files,
     api_new_folder, api_rename_file, api_upload, api_upload_feed, web_egui_file, web_file,
@@ -34,8 +43,7 @@ use backend::settings::{
     SettingsManager, api_admin_reset_password, api_admin_users_delete, api_admin_users_get,
     api_admin_users_update, api_avatar_get, api_avatar_upload, api_password_update,
     api_preferences_get, api_preferences_update, api_settings_get, api_settings_update,
-    api_thumbnail_scan_now, api_webdav_handler, api_webdav_shares_get,
-    api_webdav_shares_update,
+    api_thumbnail_scan_now, api_webdav_handler, api_webdav_shares_get, api_webdav_shares_update,
 };
 use backend::tasks::{
     TaskManager, api_cancel_task, api_clear_finished_tasks, api_get_task_list, api_get_task_status,
@@ -71,6 +79,8 @@ async fn main() {
     let settings_manager = Arc::new(SettingsManager::new(settings_file));
     let thumbnail_limiter = ConcurrencyLimiter::for_thumbnails(&settings_manager).await;
     let darktable_limiter = ConcurrencyLimiter::for_darktable(&settings_manager).await;
+    let ai_limiter = ConcurrencyLimiter::for_ai(&settings_manager).await;
+    let ai_service = backend::ai::AiService::new(&settings_manager, &data_path).await;
     let app_state = Arc::new(AppState {
         started_at: std::time::Instant::now(),
         data_path,
@@ -86,6 +96,8 @@ async fn main() {
         trust_proxy_headers,
         thumbnail_limiter,
         darktable_limiter,
+        ai_limiter,
+        ai_service,
     });
 
     // Bootstrap an admin user on first run.
@@ -145,7 +157,10 @@ async fn main() {
         .route("/api/albums/delete", post(api_albums_delete))
         .route("/api/albums/import", post(api_albums_import))
         .route("/api/albums/upload", post(api_albums_upload))
-        .route("/api/albums/photos", get(api_albums_photos))
+        .route(
+            "/api/albums/photos",
+            get(api_albums_photos).post(api_albums_photos_query),
+        )
         .route("/api/albums/collections", get(api_albums_collections))
         .route("/api/albums/date_histogram", get(api_albums_date_histogram))
         .route("/api/albums/photo_meta", post(api_albums_photo_meta))
@@ -163,6 +178,22 @@ async fn main() {
         .route("/api/on-this-day", get(api_on_this_day))
         .route("/api/daily-picks", get(api_daily_picks))
         .route("/api/dashboard", get(api_dashboard))
+        .route("/api/ai/status", get(api_ai_status))
+        .route("/api/ai/index", post(api_ai_index))
+        .route("/api/ai/duplicates", get(api_ai_duplicates))
+        .route("/api/ai/search/similar", post(api_ai_search_similar))
+        .route("/api/ai/search/text", post(api_ai_search_text))
+        .route("/api/ai/people", get(api_ai_people))
+        .route("/api/ai/people/merge", post(api_ai_people_merge))
+        .route("/api/ai/people/split", post(api_ai_people_split))
+        .route(
+            "/api/ai/people/{person_id}",
+            patch(api_ai_people_patch),
+        )
+        .route(
+            "/api/ai/people/{person_id}/photos",
+            get(api_ai_people_photos),
+        )
         .route(
             "/api/settings",
             get(api_settings_get).post(api_settings_update),

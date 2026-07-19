@@ -2,6 +2,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "v
 import { formatSize, formatTime, progressPercent, statusLabel, statusTone } from "../utils/format";
 import { locale, setLocale, t } from "../i18n/index.js";
 import { compareRelativePaths, encodePath, joinPath, prettyPath } from "../utils/path";
+import { partitionFilterClauses } from "../utils/filterDefs.js";
 
 const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 100;
@@ -45,22 +46,22 @@ export function useAlbumApp() {
     const albums = ref([]);
     const currentAlbum = ref("");
     const uploadCancelled = ref(false);
+    const albumViewMode = ref("photos");
     const albumPhotos = ref([]);
     const albumPhotoOffset = ref(0);
     const albumPhotoTotal = ref(0);
+    const albumDuplicateGroups = ref([]);
+    const albumDuplicateTotal = ref(0);
+    const aiSimilarResults = ref([]);
+    const aiSimilarQuery = ref(null);
+    const aiSimilarLoading = ref(false);
     const albumAvailableTags = ref([]);
     const albumAvailableCameras = ref([]);
     const albumAvailableLenses = ref([]);
     const albumAvailableFormats = ref([]);
     const albumFilters = reactive({
-        from: "",
-        to: "",
-        tags: "",
-        ratings: [],
-        colorLabels: [],
-        formats: null,  // null = no constraint; string[] = allowed extensions
-        cameras: null,  // null = no constraint; string[] = allowed cameras
-        lenses: null,   // null = no constraint; string[] = allowed lenses
+        /** Logical filter clauses sent to POST /api/albums/photos */
+        clauses: [],
     });
     const albumSort = ref([]);
     const dateHistogram = ref([]);
@@ -76,6 +77,13 @@ export function useAlbumApp() {
     const userAvatar = ref(null);
     const members = ref([]);
     const settings = ref({});
+    const aiStatus = ref(null);
+    const people = ref([]);
+    const peopleTotal = ref(0);
+    const peopleLoading = ref(false);
+    const selectedPerson = ref(null);
+    const personPhotos = ref([]);
+    const personPhotosLoading = ref(false);
     const webdavShares = ref([]);
     const dashboard = ref(null);
     const dashboardLoading = ref(false);
@@ -224,6 +232,7 @@ export function useAlbumApp() {
             await refreshTasks();
             await refreshAlbums();
             await refreshSettings();
+            await refreshAiStatus();
             await refreshMembers();
             await refreshWebdavShares();
             await refreshDashboard();
@@ -867,14 +876,281 @@ export function useAlbumApp() {
         }
     }
 
+    function albumFiltersHaveConstraints({ includeAiText = true } = {}) {
+        const { aiText, metadata } = partitionFilterClauses(albumFilters.clauses);
+        if (metadata.length > 0) return true;
+        if (includeAiText && aiText.length > 0) return true;
+        return false;
+    }
+
+    async function fetchAlbumPhotosPage({ offset = 0, limit = DEFAULT_PAGE_SIZE, filters = null } = {}) {
+        const body = {
+            album: currentAlbum.value,
+            filters: filters ?? albumFilters.clauses ?? [],
+            offset,
+            limit,
+        };
+        if (albumSort.value.length > 0) {
+            body.sort = albumSort.value.map((s) => `${s.field}:${s.dir}`).join(",");
+        }
+        const payload = await apiFetch("/api/albums/photos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        return payload.data || { photos: [], total_count: 0 };
+    }
+
+    /** Paths matching current metadata filters (excludes AI text). null = no restriction. */
+    async function fetchFilteredPhotoPaths() {
+        if (!loggedIn.value || !currentAlbum.value) return null;
+        const { metadata } = partitionFilterClauses(albumFilters.clauses);
+        if (metadata.length === 0) return null;
+
+        const data = await fetchAlbumPhotosPage({ offset: 0, limit: 0, filters: metadata });
+        const photos = data.photos || [];
+        return photos.map((photo) => photo.path).filter(Boolean);
+    }
+
+    function mapAiSearchResults(results) {
+        return (results || []).map((item) => ({
+            ...item,
+            name: item.name || String(item.path || "").split("/").pop() || item.path,
+            datetime: item.date || "",
+            tags: item.tags || [],
+            rating: item.rating || 0,
+            color_label: item.color_label || [],
+        }));
+    }
+
     async function refreshAlbumPhotos() {
         albumPhotoOffset.value = 0;
         albumPhotos.value = [];
         albumPhotoTotal.value = 0;
+
+        const { aiText, metadata } = partitionFilterClauses(albumFilters.clauses);
+        if (aiText.length > 0) {
+            const primary = aiText[0];
+            await applyAiTextFilterToPhotos(
+                String(primary.value?.q || "").trim(),
+                Number(primary.value?.minScore) || 0,
+                metadata,
+            );
+            return;
+        }
         await loadMoreAlbumPhotos();
     }
 
+    async function applyAiTextFilterToPhotos(text, minScore = 0, metadataFilters = null) {
+        if (!loggedIn.value || !currentAlbum.value || !text) return;
+        busy.albums = true;
+        aiSimilarLoading.value = true;
+        try {
+            let paths = null;
+            try {
+                const filters = metadataFilters ?? partitionFilterClauses(albumFilters.clauses).metadata;
+                if (filters.length > 0) {
+                    const data = await fetchAlbumPhotosPage({ offset: 0, limit: 0, filters });
+                    paths = (data.photos || []).map((p) => p.path).filter(Boolean);
+                }
+            } catch {
+                paths = null;
+            }
+            if (Array.isArray(paths) && paths.length === 0) {
+                albumPhotos.value = [];
+                albumPhotoTotal.value = 0;
+                return;
+            }
+            const body = {
+                text,
+                album: currentAlbum.value,
+                scope: "current_album",
+                limit: 200,
+                min_score: Number(minScore) || 0,
+            };
+            if (Array.isArray(paths)) body.paths = paths;
+            const payload = await apiFetch("/api/ai/search/text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            const results = mapAiSearchResults(payload.data?.results || []);
+            albumPhotos.value = results;
+            albumPhotoTotal.value = results.length;
+            albumPhotoOffset.value = results.length;
+            albumViewMode.value = "photos";
+        } catch (error) {
+            albumPhotos.value = [];
+            albumPhotoTotal.value = 0;
+            setMessage(error.message, "error");
+        } finally {
+            busy.albums = false;
+            aiSimilarLoading.value = false;
+        }
+    }
+
+    async function refreshAlbumDuplicates() {
+        if (!loggedIn.value || !currentAlbum.value) {
+            albumDuplicateGroups.value = [];
+            albumDuplicateTotal.value = 0;
+            return;
+        }
+
+        busy.albums = true;
+        try {
+            const params = new URLSearchParams();
+            params.set("album", currentAlbum.value);
+            params.set("kind", "all");
+            params.set("max_distance", "8");
+            params.set("offset", "0");
+            params.set("limit", "100");
+            const payload = await apiFetch(`/api/ai/duplicates?${params.toString()}`);
+            const data = payload.data || {};
+            albumDuplicateGroups.value = data.groups || [];
+            albumDuplicateTotal.value = data.total || 0;
+        } catch (error) {
+            albumDuplicateGroups.value = [];
+            albumDuplicateTotal.value = 0;
+            setMessage(error.message, "error");
+        } finally {
+            busy.albums = false;
+        }
+    }
+
+    async function showAlbumPhotos() {
+        albumViewMode.value = "photos";
+        aiSimilarResults.value = [];
+        aiSimilarQuery.value = null;
+        if (currentAlbum.value && albumPhotos.value.length === 0) {
+            await refreshAlbumPhotos();
+        }
+    }
+
+    async function showAlbumDuplicates() {
+        albumViewMode.value = "duplicates";
+        aiSimilarResults.value = [];
+        aiSimilarQuery.value = null;
+        await refreshAlbumDuplicates();
+    }
+
+    async function findSimilarPhotos(photo) {
+        if (!loggedIn.value || !currentAlbum.value || !photo?.path) {
+            return;
+        }
+
+        aiSimilarLoading.value = true;
+        albumViewMode.value = "similar";
+        aiSimilarResults.value = [];
+        aiSimilarQuery.value = {
+            album: currentAlbum.value,
+            path: photo.path,
+            name: photo.name || String(photo.path).split("/").pop() || photo.path,
+            scope: "current_album",
+        };
+
+        try {
+            let paths = null;
+            try {
+                paths = await fetchFilteredPhotoPaths();
+            } catch {
+                paths = null;
+            }
+            const body = {
+                album: currentAlbum.value,
+                path: photo.path,
+                scope: "current_album",
+                limit: 60,
+            };
+            if (Array.isArray(paths)) body.paths = paths;
+            const payload = await apiFetch("/api/ai/search/similar", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            const data = payload.data || {};
+            aiSimilarResults.value = mapAiSearchResults(data.results || []);
+            aiSimilarQuery.value = {
+                ...(aiSimilarQuery.value || {}),
+                ...(data.query || {}),
+                total: data.total ?? aiSimilarResults.value.length,
+            };
+        } catch (error) {
+            aiSimilarResults.value = [];
+            setMessage(error.message, "error");
+            albumViewMode.value = "photos";
+        } finally {
+            aiSimilarLoading.value = false;
+        }
+    }
+
+    async function searchAlbumByText(textOrOptions) {
+        const options = typeof textOrOptions === "object" && textOrOptions !== null
+            ? textOrOptions
+            : { text: textOrOptions };
+        const text = String(options.text || "").trim();
+        // Album AI tools always search within the current album only.
+        const searchScope = "current_album";
+        const limit = Math.max(1, Math.min(200, Number(options.limit) || 60));
+        const minScore = options.minScore ?? options.min_score;
+
+        if (!loggedIn.value || !currentAlbum.value || !text) {
+            return;
+        }
+
+        aiSimilarLoading.value = true;
+        albumViewMode.value = "text";
+        aiSimilarResults.value = [];
+        aiSimilarQuery.value = {
+            text,
+            album: currentAlbum.value,
+            scope: searchScope,
+            limit,
+            min_score: minScore,
+        };
+
+        try {
+            let paths = null;
+            try {
+                paths = await fetchFilteredPhotoPaths();
+            } catch {
+                paths = null;
+            }
+            const body = {
+                text,
+                album: currentAlbum.value,
+                scope: searchScope,
+                limit,
+            };
+            if (minScore !== undefined && minScore !== null && minScore !== "") {
+                body.min_score = Number(minScore);
+            }
+            if (Array.isArray(paths)) body.paths = paths;
+            const payload = await apiFetch("/api/ai/search/text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            const data = payload.data || {};
+            aiSimilarResults.value = mapAiSearchResults(data.results || []);
+            aiSimilarQuery.value = {
+                ...(aiSimilarQuery.value || {}),
+                ...(data.query || {}),
+                total: data.total ?? aiSimilarResults.value.length,
+            };
+        } catch (error) {
+            aiSimilarResults.value = [];
+            setMessage(error.message, "error");
+            albumViewMode.value = "photos";
+        } finally {
+            aiSimilarLoading.value = false;
+        }
+    }
+
     async function loadMoreAlbumPhotos() {
+        const { aiText } = partitionFilterClauses(albumFilters.clauses);
+        if (aiText.length > 0) {
+            return;
+        }
         if (!loggedIn.value || !currentAlbum.value) {
             if (albumPhotoOffset.value === 0) {
                 albumPhotos.value = [];
@@ -888,68 +1164,19 @@ export function useAlbumApp() {
         if (isInitial) busy.albums = true;
         loadingMore.photos = true;
         try {
-            const params = new URLSearchParams();
-            params.set("album", currentAlbum.value);
-            params.set("offset", albumPhotoOffset.value.toString());
-            params.set("limit", DEFAULT_PAGE_SIZE.toString());
-            if (albumFilters.from) {
-                params.set("from", albumFilters.from);
-            }
-            if (albumFilters.to) {
-                params.set("to", albumFilters.to);
-            }
-            if (albumFilters.tags) {
-                params.set("tags", albumFilters.tags);
-            }
-            if (albumFilters.ratings.length > 0) {
-                params.set("ratings", albumFilters.ratings.join(","));
-            }
-            if (albumFilters.colorLabels.length > 0) {
-                params.set("color_label", albumFilters.colorLabels.join(","));
-            }
-            if (albumFilters.formats !== null) {
-                if (albumFilters.formats.length === 0) {
-                    // Contradictory format constraint — no photos can match
-                    albumPhotos.value = [];
-                    albumPhotoTotal.value = 0;
-                    return;
-                }
-                params.set("formats", albumFilters.formats.join(","));
-            }
-            if (albumFilters.cameras !== null) {
-                if (albumFilters.cameras.length === 0) {
-                    albumPhotos.value = [];
-                    albumPhotoTotal.value = 0;
-                    return;
-                }
-                params.set("cameras", albumFilters.cameras.join(","));
-            }
-            if (albumFilters.lenses !== null) {
-                if (albumFilters.lenses.length === 0) {
-                    albumPhotos.value = [];
-                    albumPhotoTotal.value = 0;
-                    return;
-                }
-                params.set("lenses", albumFilters.lenses.join(","));
-            }
-            if (albumSort.value.length > 0) {
-                params.set("sort", albumSort.value.map(s => `${s.field}:${s.dir}`).join(","));
-            }
-            const payload = await apiFetch(`/api/albums/photos?${params.toString()}`);
-            const data = payload.data || { photos: [], available_tags: [], available_cameras: [], available_lenses: [], total_count: 0 };
-
+            const data = await fetchAlbumPhotosPage({
+                offset: albumPhotoOffset.value,
+                limit: DEFAULT_PAGE_SIZE,
+            });
             const newPhotos = data.photos || [];
             if (albumPhotoOffset.value === 0) {
                 albumPhotos.value = newPhotos;
-            } else {
-                albumPhotos.value.push(...newPhotos);
-            }
-
-            if (albumPhotoOffset.value === 0) {
                 albumAvailableTags.value = data.available_tags || [];
                 albumAvailableCameras.value = data.available_cameras || [];
                 albumAvailableLenses.value = data.available_lenses || [];
                 albumAvailableFormats.value = data.available_formats || [];
+            } else {
+                albumPhotos.value.push(...newPhotos);
             }
             albumPhotoTotal.value = data.total_count || 0;
             albumPhotoOffset.value += newPhotos.length;
@@ -961,35 +1188,17 @@ export function useAlbumApp() {
     }
 
     async function loadAllRemainingAlbumPhotos() {
+        const { aiText } = partitionFilterClauses(albumFilters.clauses);
+        if (aiText.length > 0) return;
         if (!loggedIn.value || !currentAlbum.value) return;
         if (loadingMore.photos) return;
         if (albumPhotoOffset.value >= albumPhotoTotal.value) return;
         loadingMore.photos = true;
         try {
-            const params = new URLSearchParams();
-            params.set("album", currentAlbum.value);
-            params.set("offset", albumPhotoOffset.value.toString());
-            params.set("limit", "0"); // unlimited — load all remaining at once
-            if (albumFilters.from) params.set("from", albumFilters.from);
-            if (albumFilters.to) params.set("to", albumFilters.to);
-            if (albumFilters.tags) params.set("tags", albumFilters.tags);
-            if (albumFilters.ratings.length > 0) params.set("ratings", albumFilters.ratings.join(","));
-            if (albumFilters.colorLabels.length > 0) params.set("color_label", albumFilters.colorLabels.join(","));
-            if (albumFilters.formats !== null) {
-                if (albumFilters.formats.length === 0) { albumPhotos.value = []; albumPhotoTotal.value = 0; return; }
-                params.set("formats", albumFilters.formats.join(","));
-            }
-            if (albumFilters.cameras !== null) {
-                if (albumFilters.cameras.length === 0) { albumPhotos.value = []; albumPhotoTotal.value = 0; return; }
-                params.set("cameras", albumFilters.cameras.join(","));
-            }
-            if (albumFilters.lenses !== null) {
-                if (albumFilters.lenses.length === 0) { albumPhotos.value = []; albumPhotoTotal.value = 0; return; }
-                params.set("lenses", albumFilters.lenses.join(","));
-            }
-            if (albumSort.value.length > 0) params.set("sort", albumSort.value.map(s => `${s.field}:${s.dir}`).join(","));
-            const payload = await apiFetch(`/api/albums/photos?${params.toString()}`);
-            const data = payload.data || { photos: [], total_count: 0 };
+            const data = await fetchAlbumPhotosPage({
+                offset: albumPhotoOffset.value,
+                limit: 0,
+            });
             const newPhotos = data.photos || [];
             albumPhotos.value.push(...newPhotos);
             albumPhotoTotal.value = data.total_count || albumPhotoTotal.value;
@@ -1037,20 +1246,23 @@ export function useAlbumApp() {
 
     async function selectAlbum(dirName) {
         currentAlbum.value = dirName;
+        albumViewMode.value = "photos";
+        albumDuplicateGroups.value = [];
+        albumDuplicateTotal.value = 0;
+        aiSimilarResults.value = [];
+        aiSimilarQuery.value = null;
         selectedCollectionId.value = "all";
         // Reset filters when switching albums
-        albumFilters.from = "";
-        albumFilters.to = "";
-        albumFilters.tags = "";
-        albumFilters.ratings = [];
-        albumFilters.colorLabels = [];
-        albumFilters.formats = null;
-        albumFilters.cameras = null;
-        albumFilters.lenses = null;
+        albumFilters.clauses = [];
         // Wait for FilterSidebar's watcher to compile saved filters into albumFilters
         // before triggering the photo refresh.
         await nextTick();
-        await Promise.all([refreshAlbumPhotos(), fetchDateHistogram(), fetchCollections()]);
+        await Promise.all([
+            refreshAlbumPhotos(),
+            fetchDateHistogram(),
+            fetchCollections(),
+            refreshPeopleForAlbum(dirName),
+        ]);
     }
 
     async function importLocalToAlbum(files) {
@@ -1266,6 +1478,20 @@ export function useAlbumApp() {
         }
     }
 
+    async function refreshAiStatus() {
+        if (!loggedIn.value) {
+            aiStatus.value = null;
+            return;
+        }
+
+        try {
+            const payload = await apiFetch("/api/ai/status");
+            aiStatus.value = payload.data || null;
+        } catch {
+            aiStatus.value = null;
+        }
+    }
+
     async function refreshWebdavShares() {
         try {
             const payload = await apiFetch("/api/webdav/shares");
@@ -1321,6 +1547,7 @@ export function useAlbumApp() {
                 body: JSON.stringify({ settings: updates }),
             });
             settings.value = payload.data || {};
+            await refreshAiStatus();
             setMessage(payload.message || t("msg.settingsSaved"));
         } catch (error) {
             setMessage(error.message, "error");
@@ -1334,6 +1561,174 @@ export function useAlbumApp() {
             });
             setMessage(payload.message || t("settings.thumbnailScanStarted"));
             await refreshTasks();
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
+    async function queueAiIndex() {
+        try {
+            const payload = await apiFetch("/api/ai/index", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    mode: "incremental",
+                    features: ["image", "duplicates", "faces"],
+                }),
+            });
+            setMessage(payload.message || t("settings.aiStartIndex"));
+            await refreshTasks();
+            await refreshAiStatus();
+            return payload.data || null;
+        } catch (error) {
+            setMessage(error.message, "error");
+            return null;
+        }
+    }
+
+    async function refreshPeople(includeHidden = false) {
+        if (!loggedIn.value) {
+            people.value = [];
+            peopleTotal.value = 0;
+            return;
+        }
+        peopleLoading.value = true;
+        try {
+            const params = new URLSearchParams();
+            params.set("include_hidden", includeHidden ? "true" : "false");
+            params.set("offset", "0");
+            params.set("limit", "200");
+            const payload = await apiFetch(`/api/ai/people?${params.toString()}`);
+            const data = payload.data || {};
+            people.value = data.people || [];
+            peopleTotal.value = data.total_count ?? people.value.length;
+        } catch (error) {
+            people.value = [];
+            peopleTotal.value = 0;
+            setMessage(error.message, "error");
+        } finally {
+            peopleLoading.value = false;
+        }
+    }
+
+    const albumPeople = ref([]);
+    const albumPeopleLoading = ref(false);
+
+    async function refreshPeopleForAlbum(albumName = currentAlbum.value) {
+        if (!loggedIn.value || !albumName) {
+            albumPeople.value = [];
+            return;
+        }
+        albumPeopleLoading.value = true;
+        try {
+            const params = new URLSearchParams();
+            params.set("album", albumName);
+            params.set("include_hidden", "false");
+            params.set("offset", "0");
+            params.set("limit", "200");
+            const payload = await apiFetch(`/api/ai/people?${params.toString()}`);
+            const data = payload.data || {};
+            albumPeople.value = data.people || [];
+        } catch (error) {
+            albumPeople.value = [];
+        } finally {
+            albumPeopleLoading.value = false;
+        }
+    }
+
+    async function filterAlbumByPerson(person) {
+        const personId = person?.id || person;
+        if (!personId || !currentAlbum.value) return;
+        albumViewMode.value = "photos";
+        aiSimilarResults.value = [];
+        aiSimilarQuery.value = null;
+        const rest = (albumFilters.clauses || []).filter((c) => c.type !== "person");
+        albumFilters.clauses = [
+            ...rest,
+            {
+                type: "person",
+                logic: "and",
+                enabled: true,
+                value: { personIds: [String(personId)] },
+            },
+        ];
+        await refreshAlbumPhotos();
+    }
+
+    async function selectPerson(person) {
+        if (!person?.id) return;
+        selectedPerson.value = person;
+        personPhotosLoading.value = true;
+        personPhotos.value = [];
+        try {
+            const params = new URLSearchParams();
+            params.set("offset", "0");
+            params.set("limit", "200");
+            const payload = await apiFetch(`/api/ai/people/${encodeURIComponent(person.id)}/photos?${params.toString()}`);
+            const data = payload.data || {};
+            personPhotos.value = data.photos || data.results || [];
+        } catch (error) {
+            personPhotos.value = [];
+            setMessage(error.message, "error");
+        } finally {
+            personPhotosLoading.value = false;
+        }
+    }
+
+    function backToPeople() {
+        selectedPerson.value = null;
+        personPhotos.value = [];
+    }
+
+    async function patchPerson(personId, updates) {
+        try {
+            const payload = await apiFetch(`/api/ai/people/${encodeURIComponent(personId)}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(updates),
+            });
+            const updated = payload.data?.person || payload.data || updates;
+            people.value = people.value.map((person) =>
+                person.id === personId ? { ...person, ...updated } : person,
+            );
+            albumPeople.value = albumPeople.value.map((person) =>
+                person.id === personId ? { ...person, ...updated } : person,
+            );
+            if (selectedPerson.value?.id === personId) {
+                selectedPerson.value = { ...selectedPerson.value, ...updated };
+            }
+            setMessage(payload.message || t("msg.settingsSaved"));
+            await refreshPeopleForAlbum();
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
+    async function mergePeople(body) {
+        try {
+            const payload = await apiFetch("/api/ai/people/merge", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            setMessage(payload.message || t("people.mergeDone"));
+            backToPeople();
+            await Promise.all([refreshPeople(), refreshPeopleForAlbum()]);
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
+    async function splitPerson(body) {
+        try {
+            const payload = await apiFetch("/api/ai/people/split", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            setMessage(payload.message || t("people.splitDone"));
+            backToPeople();
+            await Promise.all([refreshPeople(), refreshPeopleForAlbum()]);
         } catch (error) {
             setMessage(error.message, "error");
         }
@@ -1446,6 +1841,15 @@ export function useAlbumApp() {
         setLocale(userLocale.value);
         members.value = [];
         settings.value = {};
+        aiStatus.value = null;
+        aiSimilarResults.value = [];
+        aiSimilarQuery.value = null;
+        aiSimilarLoading.value = false;
+        people.value = [];
+        peopleTotal.value = 0;
+        selectedPerson.value = null;
+        personPhotos.value = [];
+        albumViewMode.value = "photos";
         dashboard.value = null;
         dashboardError.value = "";
         stopTaskPolling();
@@ -1509,6 +1913,7 @@ export function useAlbumApp() {
         await refreshTasks();
         await refreshAlbums();
         await refreshSettings();
+        await refreshAiStatus();
         await refreshPreferences();
         await refreshMembers();
         await refreshWebdavShares();
@@ -1545,11 +1950,17 @@ export function useAlbumApp() {
         albumAvailableCameras,
         albumAvailableLenses,
         albumAvailableFormats,
+        albumDuplicateGroups,
+        albumDuplicateTotal,
+        aiSimilarResults,
+        aiSimilarQuery,
+        aiSimilarLoading,
         albumFilters,
         albumPhotos,
         albumPhotoOffset,
         albumPhotoTotal,
         albumSort,
+        albumViewMode,
         albums,
         dateHistogram,
         loadingMore,
@@ -1599,6 +2010,23 @@ export function useAlbumApp() {
         logout,
         message,
         members,
+        aiStatus,
+        people,
+        peopleTotal,
+        peopleLoading,
+        selectedPerson,
+        personPhotos,
+        personPhotosLoading,
+        refreshPeople,
+        albumPeople,
+        albumPeopleLoading,
+        refreshPeopleForAlbum,
+        filterAlbumByPerson,
+        selectPerson,
+        backToPeople,
+        patchPerson,
+        mergePeople,
+        splitPerson,
         navigateTo,
         openEntry,
         pasteHere,
@@ -1607,7 +2035,9 @@ export function useAlbumApp() {
         promptNewFolder,
         rebuildAlbumIndex,
         refreshAlbumPhotos,
+        refreshAlbumDuplicates,
         refreshAlbums,
+        refreshAiStatus,
         refreshDashboard,
         refreshList,
         register,
@@ -1621,6 +2051,10 @@ export function useAlbumApp() {
         setSelection,
         setMessage,
         shareAlbum,
+        showAlbumDuplicates,
+        showAlbumPhotos,
+        findSimilarPhotos,
+        searchAlbumByText,
         sharedAlbums,
         collections,
         selectedCollectionId,
@@ -1639,6 +2073,7 @@ export function useAlbumApp() {
         updatePreferences,
         updateSettings,
         scanThumbnailsNow,
+        queueAiIndex,
         updateWebdavShare,
         uploadAvatar,
         uploadFiles,

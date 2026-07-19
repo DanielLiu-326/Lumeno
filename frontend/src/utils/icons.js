@@ -68,6 +68,41 @@ export const IconSparkles = icon([
   "M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z",
 ]);
 
+// Classic magnifying glass (ring + handle, no plus in the center)
+export const IconSearch = icon([
+  { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" },
+]);
+
+// Magic wand for AI tools
+export const IconWand = defineComponent({
+  inheritAttrs: false,
+  render() {
+    return h(
+      "svg",
+      {
+        xmlns: "http://www.w3.org/2000/svg",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.5",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        ...this.$attrs,
+      },
+      [
+        h("path", { d: "M15 4V2" }),
+        h("path", { d: "M15 16v-2" }),
+        h("path", { d: "M8 9h2" }),
+        h("path", { d: "M20 9h2" }),
+        h("path", { d: "m17.8 11.8 1.2 1.2" }),
+        h("path", { d: "m17.8 6.2 1.2-1.2" }),
+        h("path", { d: "m3 21 9-9" }),
+        h("path", { d: "M12.2 11.8 6.2 17.8" }),
+      ],
+    );
+  },
+});
+
 export const IconLogout = icon([
   { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" },
 ]);

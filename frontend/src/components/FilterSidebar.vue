@@ -1,8 +1,8 @@
 <script setup>
 import { ref, computed, watch, onMounted } from "vue";
-import { IconClose, IconRefresh, IconPlus, IconImage } from "../utils/icons";
+import { IconClose, IconRefresh, IconPlus, IconImage, IconSort } from "../utils/icons";
 import { t } from "../i18n/index.js";
-import { FILTER_REGISTRY, FILTER_DEF_MAP } from "../utils/filterDefs.js";
+import { FILTER_REGISTRY, FILTER_DEF_MAP, buildFilterClauses } from "../utils/filterDefs.js";
 
 // ────── Props ──────────────────────────────────────────────────────────────
 const props = defineProps({
@@ -16,11 +16,51 @@ const props = defineProps({
   availableFormats: { type: Array, default: () => [] },
   dateHistogram: { type: Array, default: () => [] },
   filters: { type: Object, required: true },
+  sort: { type: Array, default: () => [] },
+  availablePeople: { type: Array, default: () => [] },
   currentUser: { type: String, default: "" },
   currentAlbum: { type: String, default: "" },
 });
 
-const emit = defineEmits(["apply", "select-collection", "close"]);
+const emit = defineEmits(["apply", "select-collection", "close", "update-sort"]);
+
+const SORT_FIELDS = [
+  { key: "date", label: () => t("albums.sortDate") },
+  { key: "name", label: () => t("albums.sortName") },
+  { key: "size", label: () => t("albums.sortSize") },
+  { key: "rating", label: () => t("albums.sortRating") },
+  { key: "camera", label: () => t("albums.sortCamera") },
+  { key: "lens", label: () => t("albums.sortLens") },
+];
+
+function addSortLevel() {
+  const used = props.sort.map((s) => s.field);
+  const next = SORT_FIELDS.find((f) => !used.includes(f.key));
+  if (!next) return;
+  emit("update-sort", [...props.sort, { field: next.key, dir: "desc" }]);
+}
+
+function removeSortLevel(index) {
+  const next = [...props.sort];
+  next.splice(index, 1);
+  emit("update-sort", next);
+}
+
+function setSortField(index, field) {
+  const next = props.sort.map((level, i) => (i === index ? { ...level, field } : level));
+  emit("update-sort", next);
+}
+
+function toggleSortDir(index) {
+  const next = props.sort.map((level, i) =>
+    i === index ? { ...level, dir: level.dir === "asc" ? "desc" : "asc" } : level,
+  );
+  emit("update-sort", next);
+}
+
+function clearSort() {
+  emit("update-sort", []);
+}
 
 // ────── Sidebar resizing (PC only) ─────────────────────────────────────────
 const isResizing = ref(false);
@@ -152,6 +192,7 @@ const avail = computed(() => ({
   availableCameras: props.availableCameras,
   availableLenses:  props.availableLenses,
   availableTags:    props.availableTags,
+  availablePeople:  props.availablePeople,
   dateHistogram:    props.dateHistogram,
 }));
 
@@ -192,6 +233,33 @@ function saveFilters() {
 
 watch(() => props.currentAlbum, loadFilters, { immediate: true });
 watch(filterItems, saveFilters, { deep: true });
+
+// Keep person filter item in sync when AI tools apply a person filter externally.
+watch(
+  () => props.filters?.clauses,
+  (clauses) => {
+    const personClause = (clauses || []).find((c) => c.type === "person" && c.enabled);
+    const ids = personClause?.value?.personIds;
+    if (!Array.isArray(ids) || ids.length === 0) return;
+    const existing = filterItems.value.find((item) => item.type === "person");
+    if (existing) {
+      const current = existing.value?.personIds || [];
+      if (current.length === ids.length && current.every((id, i) => id === ids[i])) return;
+      existing.value = { personIds: [...ids] };
+      existing.enabled = true;
+      existing.logic = personClause.logic || "and";
+      return;
+    }
+    filterItems.value.push({
+      id: uid(),
+      type: "person",
+      logic: personClause.logic || "and",
+      enabled: true,
+      value: { personIds: [...ids] },
+    });
+  },
+  { deep: true },
+);
 
 // ── Filter item operations ───────────────────────────────────────────
 
@@ -256,44 +324,16 @@ function logicClass(logic) {
 // ── Compile + apply ──────────────────────────────────────────────────
 
 function compileFilters() {
-  const cf   = collectionFilter.value;
-  const avail = {
-    availableFormats: props.availableFormats,
-    availableCameras: props.availableCameras,
-    availableLenses:  props.availableLenses,
+  return {
+    clauses: buildFilterClauses(filterItems.value, collectionFilter.value),
   };
-
-  // Default result — all fields at "no constraint" initial state
-  const result = {
-    from: "", to: "", tags: "", ratings: [], colorLabels: [],
-    formats: null, cameras: null, lenses: null,
-  };
-
-  // Partition enabled items by logic
-  const and    = filterItems.value.filter((f) => f.enabled && f.logic === "and");
-  const or     = filterItems.value.filter((f) => f.enabled && f.logic === "or");
-  const andNot = filterItems.value.filter((f) => f.enabled && f.logic === "and_not");
-
-  // Each registered filter definition compiles its own fields
-  for (const def of FILTER_REGISTRY) {
-    const partial = def.compile(
-      and.filter((f) => f.type === def.key),
-      or.filter((f) => f.type === def.key),
-      andNot.filter((f) => f.type === def.key),
-      cf,
-      avail,
-    );
-    Object.assign(result, partial);
-  }
-
-  return result;
 }
 
 // Update albumFilters without triggering a refresh (used during album-change
 // so selectAlbum's deferred refresh reads the correct compiled values).
 function compileAndUpdate() {
   const compiled = compileFilters();
-  Object.assign(props.filters, compiled);
+  props.filters.clauses = compiled.clauses;
 }
 
 function applyFilters() {
@@ -457,6 +497,64 @@ onMounted(() => {
 
           </template>
         </template>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════
+         SECTION: SORT
+         ═══════════════════════════════════════ -->
+    <div class="shrink-0 border-b px-3 py-2.5" :class="isDark ? 'border-stone-700/60' : 'border-stone-200/60'">
+      <div class="mb-2 flex items-center gap-1">
+        <IconSort class="h-3 w-3" :class="isDark ? 'text-stone-500' : 'text-stone-400'" />
+        <p class="flex-1 text-[10px] font-bold uppercase tracking-wider" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+          {{ t("albums.sort") }}
+        </p>
+        <button
+          class="rounded px-1.5 py-0.5 text-[10px] font-medium transition"
+          :class="isDark ? 'text-stone-500 hover:bg-stone-800 hover:text-stone-300' : 'text-stone-400 hover:bg-stone-200 hover:text-stone-600'"
+          @click="clearSort"
+        >
+          {{ t("albums.clear") }}
+        </button>
+      </div>
+      <div class="flex flex-col gap-1.5">
+        <div v-for="(level, idx) in sort" :key="idx" class="flex items-center gap-1.5">
+          <select
+            :value="level.field"
+            class="min-w-0 flex-1 rounded-lg border px-2 py-1.5 text-xs"
+            :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'"
+            @change="setSortField(idx, $event.target.value)"
+          >
+            <option
+              v-for="f in SORT_FIELDS"
+              :key="f.key"
+              :value="f.key"
+              :disabled="sort.some((s, i) => i !== idx && s.field === f.key)"
+            >{{ f.label() }}</option>
+          </select>
+          <button
+            class="rounded-lg border px-2 py-1.5 text-xs font-medium transition"
+            :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-200 hover:bg-stone-700' : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-100'"
+            @click="toggleSortDir(idx)"
+          >
+            {{ level.dir === "asc" ? "↑" : "↓" }}
+          </button>
+          <button
+            class="rounded-lg p-1.5 text-xs transition"
+            :class="isDark ? 'text-rose-400 hover:bg-rose-900/30' : 'text-rose-500 hover:bg-rose-100'"
+            @click="removeSortLevel(idx)"
+          >
+            <IconClose class="h-3 w-3" />
+          </button>
+        </div>
+        <button
+          v-if="sort.length < SORT_FIELDS.length"
+          class="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition"
+          :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+          @click="addSortLevel"
+        >
+          <IconPlus class="h-3 w-3" />{{ t("albums.addSortLevel") }}
+        </button>
       </div>
     </div>
 

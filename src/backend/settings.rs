@@ -129,6 +129,76 @@ impl SettingsManager {
             .unwrap_or(1)
     }
 
+    pub async fn ai_enabled(&self) -> bool {
+        self.settings
+            .lock()
+            .await
+            .get("ai_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    pub async fn ai_provider(&self) -> String {
+        Self::ai_provider_from(&*self.settings.lock().await)
+    }
+
+    pub fn ai_provider_from(settings: &Value) -> String {
+        match settings
+            .get("ai_provider")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or("local")
+        {
+            "remote" => "remote".to_string(),
+            _ => "local".to_string(),
+        }
+    }
+
+    pub async fn ai_batch_size(&self) -> usize {
+        Self::ai_batch_size_from(&*self.settings.lock().await)
+    }
+
+    pub fn ai_batch_size_from(settings: &Value) -> usize {
+        settings
+            .get("ai_batch_size")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).clamp(1, 256))
+            .unwrap_or(32)
+    }
+
+    pub async fn ai_similarity_threshold(&self) -> f32 {
+        Self::ai_similarity_threshold_from(&*self.settings.lock().await)
+    }
+
+    pub fn ai_similarity_threshold_from(settings: &Value) -> f32 {
+        settings
+            .get("ai_similarity_threshold")
+            .and_then(|v| v.as_f64())
+            .map(|n| (n as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.35)
+    }
+
+    pub async fn ai_remote_url(&self) -> Option<String> {
+        Self::remote_ai_url_from(self, &*self.settings.lock().await)
+    }
+
+    pub fn ai_concurrency_from(settings: &Value) -> usize {
+        settings
+            .get("ai_concurrency")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).max(1).min(16))
+            .unwrap_or(1)
+    }
+
+    pub fn remote_ai_url_from(&self, settings: &Value) -> Option<String> {
+        settings
+            .get("ai_remote_url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
     pub async fn background_thumbnail_generation(&self) -> bool {
         Self::background_thumbnail_generation_from(&*self.settings.lock().await)
     }
@@ -177,6 +247,47 @@ impl SettingsManager {
             let _ = std::fs::write(&path, data);
         });
     }
+
+    pub fn clamp_ai_settings(settings: &mut Value) {
+        let Some(obj) = settings.as_object_mut() else {
+            return;
+        };
+        if let Some(value) = obj.get_mut("ai_concurrency") {
+            if let Some(n) = value.as_u64() {
+                *value = json!((n as usize).clamp(1, 16));
+            }
+        }
+        if let Some(value) = obj.get_mut("ai_batch_size") {
+            if let Some(n) = value.as_u64() {
+                *value = json!((n as usize).clamp(1, 256));
+            }
+        }
+        if let Some(value) = obj.get_mut("ai_similarity_threshold") {
+            if let Some(n) = value.as_f64() {
+                *value = json!((n as f32).clamp(0.0, 1.0));
+            }
+        }
+        if let Some(value) = obj.get_mut("ai_provider") {
+            if let Some(raw) = value.as_str() {
+                *value = json!(match raw.trim().to_ascii_lowercase().as_str() {
+                    "remote" => "remote",
+                    _ => "local",
+                });
+            }
+        }
+        if let Some(value) = obj.get_mut("ai_remote_url") {
+            if let Some(raw) = value.as_str() {
+                *value = json!(raw.trim());
+            }
+        }
+        if let Some(value) = obj.get_mut("ai_fallback_interim") {
+            if let Some(flag) = value.as_bool() {
+                *value = json!(flag);
+            } else {
+                *value = json!(false);
+            }
+        }
+    }
 }
 
 // ── API: Get settings ────────────────────────────────────────────────────────
@@ -213,7 +324,16 @@ pub async fn api_settings_update(
             "error.admin_only_settings",
         )));
     }
-    cfg.settings_manager.set_many(payload.settings).await;
+    let mut settings = payload.settings;
+    SettingsManager::clamp_ai_settings(&mut settings);
+    if let Err(error) = super::ai::validate_ai_settings_update(&settings) {
+        return Err(AppError::BadRequest(trf(
+            locale.as_str(),
+            "error.bad_request",
+            &[("value", error)],
+        )));
+    }
+    cfg.settings_manager.set_many(settings).await;
     let settings = cfg.settings_manager.get_all().await;
     let message = tr(locale.as_str(), "response.settings_saved");
     Ok(create_response(true, &message, 0, Some(settings)))
@@ -479,6 +599,10 @@ pub async fn api_admin_users_delete(
 
     cfg.user_manager.delete_user(&target).await;
     cfg.session_manager.remove_sessions_for_user(&target).await;
+
+    if let Err(error) = cfg.ai_service.store().purge_owner(&target) {
+        eprintln!("failed to purge ai index for deleted user {target}: {error}");
+    }
 
     // Delete avatar file if present
     if let Some(avatar) = avatar {

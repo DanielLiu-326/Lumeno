@@ -16,6 +16,7 @@ use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify};
 
+use super::ai::AiService;
 use super::auth::{SessionInfo, SessionManager, UserManager, extract_token_from_cookie};
 use super::i18n::{resolve_locale, tr};
 use super::settings::{SettingsChange, SettingsManager};
@@ -123,6 +124,8 @@ pub struct AppState {
     pub trust_proxy_headers: bool,
     pub thumbnail_limiter: Arc<ConcurrencyLimiter>,
     pub darktable_limiter: Arc<ConcurrencyLimiter>,
+    pub ai_limiter: Arc<ConcurrencyLimiter>,
+    pub ai_service: Arc<AiService>,
 }
 
 struct ConcurrencyLimiterState {
@@ -185,6 +188,15 @@ impl ConcurrencyLimiter {
             settings_manager,
             "darktable_concurrency",
             SettingsManager::darktable_concurrency_from,
+        )
+        .await
+    }
+
+    pub async fn for_ai(settings_manager: &Arc<SettingsManager>) -> Arc<Self> {
+        Self::new(
+            settings_manager,
+            "ai_concurrency",
+            SettingsManager::ai_concurrency_from,
         )
         .await
     }

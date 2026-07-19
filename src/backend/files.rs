@@ -182,8 +182,7 @@ impl Task for CopyFiles {
         *base.status.lock().await = TaskStatus::Running;
         for (_idx, (src, dst)) in collected.iter().enumerate() {
             if src.is_file() {
-                *base.current_task.lock().await =
-                    cloud_path(&self.root_path, src.as_path());
+                *base.current_task.lock().await = cloud_path(&self.root_path, src.as_path());
 
                 let effective_dst = if dst.exists() {
                     match self.conflict {
@@ -445,7 +444,9 @@ impl Task for UploadFiles {
             if self.cancel.load(Ordering::Relaxed) {
                 break;
             }
-            self.base.set_cur_task(cloud_path(&self.root_path, FsPath::new(&file_meta.path))).await;
+            self.base
+                .set_cur_task(cloud_path(&self.root_path, FsPath::new(&file_meta.path)))
+                .await;
             let path = std::path::Path::new(&file_meta.path);
             if file_meta.is_dir {
                 if let Err(e) = tokio::fs::create_dir_all(path).await {
@@ -664,7 +665,7 @@ impl Task for DeleteFiles {
                 break;
             }
             base.set_cur_task(cloud_path(&self.root_path, entry.as_path()))
-            .await;
+                .await;
             if entry.is_file() {
                 if let Ok(meta) = tokio::fs::metadata(&entry).await {
                     let size = meta.len();
@@ -973,7 +974,12 @@ pub async fn api_delete_files(
             &[("count", param.paths.len().to_string())],
         )
     };
-    let task = Arc::new(DeleteFiles::new(task_name, username, root_path.clone(), resolved));
+    let task = Arc::new(DeleteFiles::new(
+        task_name,
+        username,
+        root_path.clone(),
+        resolved,
+    ));
     cfg.task_mgr.add_task(task.clone()).await;
     let message = tr(locale.as_str(), "response.delete_task_created");
     Ok(create_response(

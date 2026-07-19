@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod album;
 pub mod auth;
 pub mod common;

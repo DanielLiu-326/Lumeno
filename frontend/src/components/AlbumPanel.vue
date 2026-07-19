@@ -1,16 +1,17 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import {
-  IconFolderAdd, IconRefresh, IconStar, IconStarOff, IconFilter, IconDatabase, IconSort,
+  IconFolderAdd, IconRefresh, IconStar, IconStarOff, IconFilter, IconDatabase,
   IconCamera, IconClose, IconChevronLeft, IconChevronRight, IconExpand,
   IconArrowLeft, IconTrash, IconPencil, IconPlus, IconImage, IconCheck,
-  IconImport, IconZoomIn, IconZoomOut, IconDownload,
+  IconImport, IconZoomIn, IconZoomOut, IconDownload, IconSparkles, IconSearch, IconWand,
 } from "../utils/icons";
 import { t } from "../i18n/index.js";
 import TimelineChart from "./TimelineChart.vue";
 import ImportSourceModal from "./ImportSourceModal.vue";
 import CloudFilePicker from "./CloudFilePicker.vue";
 import FilterSidebar from "./FilterSidebar.vue";
+import AiToolsSidebar from "./AiToolsSidebar.vue";
 import VirtualGrid from "./VirtualGrid.vue";
 import LazyImage from "./LazyImage.vue";
 
@@ -21,7 +22,13 @@ const props = defineProps({
   sharedAlbums: { type: Array, default: () => [] },
   currentAlbum: { type: String, default: "" },
   currentUser: { type: String, default: "" },
+  albumViewMode: { type: String, default: "photos" },
   albumPhotos: { type: Array, required: true },
+  duplicateGroups: { type: Array, default: () => [] },
+  duplicateTotal: { type: Number, default: 0 },
+  similarResults: { type: Array, default: () => [] },
+  similarQuery: { type: Object, default: null },
+  similarLoading: { type: Boolean, default: false },
   availableTags: { type: Array, required: true },
   availableCameras: { type: Array, default: () => [] },
   availableLenses: { type: Array, default: () => [] },
@@ -35,6 +42,11 @@ const props = defineProps({
   loadAllPhotos: { type: Function, default: null },
   collections: { type: Array, default: () => [] },
   selectedCollectionId: { type: String, default: "all" },
+  albumPeople: { type: Array, default: () => [] },
+  albumPeopleLoading: { type: Boolean, default: false },
+  selectedPerson: { type: Object, default: null },
+  personPhotos: { type: Array, default: () => [] },
+  personPhotosLoading: { type: Boolean, default: false },
   onCreateAlbum: { type: Function, default: null },
   onUpdateAlbum: { type: Function, default: null },
   onShareAlbum: { type: Function, default: null },
@@ -49,6 +61,10 @@ const emit = defineEmits([
   "delete-album",
   "share-album",
   "unshare-album",
+  "show-duplicates",
+  "show-photos",
+  "find-similar",
+  "search-text",
   "apply-filters",
   "update-sort",
   "import-selected",
@@ -60,6 +76,13 @@ const emit = defineEmits([
   "load-more-photos",
   "delete-photos",
   "select-collection",
+  "filter-person",
+  "refresh-album-people",
+  "select-person",
+  "back-to-people",
+  "patch-person",
+  "merge-people",
+  "split-person",
 ]);
 
 const importSourceModalOpen = ref(false);
@@ -97,8 +120,10 @@ function handleLocalFileChange(event) {
 
 
 const isMobile = ref(false);
-const filterPanelOpen = ref(false);
-const sortPanelOpen = ref(false);
+const filterSortPanelOpen = ref(false);
+const aiToolsPanelOpen = ref(false);
+const mobileSearchOpen = ref(false);
+const mobileSearchInputRef = ref(null);
 const thumbnailPopoverOpen = ref(false);
 const thumbnailBtnRef = ref(null);
 const thumbnailPopoverStyle = ref({});
@@ -127,6 +152,7 @@ const detailFullscreen = ref(false);
 const detailFullscreenControlsVisible = ref(false);
 const detailDimensions = ref(null);
 const detailImageFallback = ref(false);
+const detailImageEpoch = ref(0);
 const DETAIL_VIEW_PREFERENCES_KEY = "album-detail-view-preferences";
 
 function loadDetailViewPreferences() {
@@ -186,7 +212,7 @@ function updateMobile() {
 }
 onMounted(() => {
   updateMobile();
-  filterPanelOpen.value = !isMobile.value;
+  filterSortPanelOpen.value = !isMobile.value;
   window.addEventListener("resize", updateMobile);
   window.addEventListener("keydown", onDetailKeydown);
 });
@@ -294,6 +320,14 @@ function syncShareDialogAlbum() {
 }
 
 watch(() => props.albums, syncShareDialogAlbum, { deep: true });
+watch(() => props.albumViewMode, (mode) => {
+  if (mode === 'photos') return;
+  selectMode.value = false;
+  selectedPhotoPaths.value = new Set();
+  // Keep filterSortPanelOpen so returning from search restores the panel.
+  mobileSearchOpen.value = false;
+  thumbnailPopoverOpen.value = false;
+});
 
 async function submitShare() {
   const u = shareForm.value.username.trim();
@@ -378,6 +412,56 @@ const currentAlbumCanDelete = computed(() => {
   return currentAlbumObj.value?.can_delete ?? false;
 });
 
+const inDuplicatesView = computed(() => props.albumViewMode === 'duplicates');
+const inSimilarView = computed(() => props.albumViewMode === 'similar');
+const inTextView = computed(() => props.albumViewMode === 'text');
+const inSpecialView = computed(() => inDuplicatesView.value || inSimilarView.value || inTextView.value);
+
+const textSearchInput = ref('');
+
+function submitTextSearch() {
+  const text = textSearchInput.value.trim();
+  if (!text) return;
+  emit('search-text', { text, scope: 'current_album' });
+}
+
+function clearTextSearch() {
+  textSearchInput.value = '';
+  emit('show-photos');
+}
+
+function toggleFilterSortPanel() {
+  filterSortPanelOpen.value = !filterSortPanelOpen.value;
+}
+
+function toggleAiToolsPanel() {
+  aiToolsPanelOpen.value = !aiToolsPanelOpen.value;
+  if (aiToolsPanelOpen.value) {
+    emit("refresh-album-people");
+    if (isMobile.value) {
+      filterSortPanelOpen.value = false;
+      mobileSearchOpen.value = false;
+    }
+  }
+}
+
+async function openMobileSearch() {
+  mobileSearchOpen.value = true;
+  await Promise.resolve();
+  mobileSearchInputRef.value?.focus?.();
+}
+
+function closeMobileSearch() {
+  mobileSearchOpen.value = false;
+}
+
+function onAiSearchText(payload) {
+  if (payload?.text) {
+    textSearchInput.value = payload.text;
+  }
+  emit('search-text', payload);
+}
+
 function enterAlbum(album) {
   emit("select-album", album.dir_name);
 }
@@ -438,58 +522,54 @@ function getAlbumCoverThumbnail(album) {
   return "";
 }
 
+function duplicateDisplayName(photo) {
+  return String(photo?.path || "").split("/").pop() || photo?.path || "";
+}
+
+function openDuplicateDetail(photo) {
+  openDetail({
+    ...photo,
+    name: duplicateDisplayName(photo),
+    datetime: "",
+    date: "",
+    tags: [],
+    rating: 0,
+    color_label: "",
+    width: photo.width || 0,
+    height: photo.height || 0,
+  });
+}
+
+function findSimilarFromDetail() {
+  if (!detailPhoto.value) return;
+  const photo = detailPhoto.value;
+  closeDetail();
+  emit("find-similar", photo);
+}
+
+function openSimilarDetail(photo) {
+  openDetail({
+    ...photo,
+    name: photo.name || duplicateDisplayName(photo),
+    datetime: photo.datetime || photo.date || "",
+    date: photo.date || "",
+    tags: photo.tags || [],
+    rating: photo.rating || 0,
+    color_label: photo.color_label || [],
+    width: photo.width || 0,
+    height: photo.height || 0,
+  });
+}
+
 // ── Filter helpers ──
 const hasActiveFilters = computed(() => {
-  const f = props.filters;
-  return f.from || f.to || f.tags || f.ratings.length > 0
-    || (f.colorLabels && f.colorLabels.length > 0)
-    || f.formats !== null
-    || f.cameras !== null
-    || f.lenses !== null;
+  const f = props.filters || {};
+  return Array.isArray(f.clauses) && f.clauses.length > 0;
 });
 
 const hasActiveSort = computed(() => props.sort.length > 0);
 
 function applyFilters() { emit("apply-filters"); }
-
-// ── Sort helpers ──
-const SORT_FIELDS = [
-  { key: "date", label: () => t("albums.sortDate") },
-  { key: "name", label: () => t("albums.sortName") },
-  { key: "size", label: () => t("albums.sortSize") },
-  { key: "rating", label: () => t("albums.sortRating") },
-  { key: "camera", label: () => t("albums.sortCamera") },
-  { key: "lens", label: () => t("albums.sortLens") },
-];
-
-function addSortLevel() {
-  const used = props.sort.map((s) => s.field);
-  const next = SORT_FIELDS.find((f) => !used.includes(f.key));
-  if (!next) return;
-  emit("update-sort", [...props.sort, { field: next.key, dir: "desc" }]);
-}
-
-function removeSortLevel(index) {
-  const next = [...props.sort];
-  next.splice(index, 1);
-  emit("update-sort", next);
-}
-
-function setSortField(index, field) {
-  const next = [...props.sort];
-  next[index] = { ...next[index], field };
-  emit("update-sort", next);
-}
-
-function toggleSortDir(index) {
-  const next = [...props.sort];
-  next[index] = { ...next[index], dir: next[index].dir === "asc" ? "desc" : "asc" };
-  emit("update-sort", next);
-}
-
-function clearSort() {
-  emit("update-sort", []);
-}
 
 // ── Thumbnail size helpers ──
 const THUMB_GRID_CLASSES = [
@@ -511,8 +591,9 @@ function handlePhotosScrollNearBottom() {
   }
 }
 
-function getThumbnail(path, size = 320) {
-  const ownerParam = currentAlbumOwner.value ? `&owner=${encodeURIComponent(currentAlbumOwner.value)}` : "";
+function getThumbnail(path, size = 320, owner = null) {
+  const resolvedOwner = owner || currentAlbumOwner.value;
+  const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
   return `/api/thumbnail/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
 }
 
@@ -536,17 +617,23 @@ const detailDirty = computed(() => {
   return false;
 });
 
-function openDetail(photo, expanded = detailOriginalPreference.value) {
+function beginDetailImageLoad() {
+  detailImageEpoch.value += 1;
+  detailImageFallback.value = false;
   imageLoading.value = true;
+}
+
+function openDetail(photo, expanded = detailOriginalPreference.value) {
+  beginDetailImageLoad();
   detailPhoto.value = photo;
   detailExpanded.value = expanded;
   detailDimensions.value = photo.width > 0 && photo.height > 0
     ? `${photo.width} * ${photo.height}`
     : null;
-  detailImageFallback.value = false;
   editRating.value = photo.rating || 0;
   editColorLabels.value = colorLabels(photo.color_label);
   editTagsText.value = (photo.tags || []).join(", ");
+  // Restore darktable after XMP check; keep expanded preference immediately.
   darktablePreview.value = false;
   hasXmpSidecar.value = false;
   checkXmpSidecar(photo.path);
@@ -554,6 +641,9 @@ function openDetail(photo, expanded = detailOriginalPreference.value) {
 
 function closeDetail() {
   if (detailDirty.value && !window.confirm(t('msg.unsavedChangesClose'))) return;
+  detailOriginalPreference.value = detailExpanded.value;
+  detailDarktablePreference.value = darktablePreview.value;
+  saveDetailViewPreferences();
   detailPhoto.value = null;
   detailExpanded.value = false;
   detailFullscreen.value = false;
@@ -567,22 +657,21 @@ function closeDetail() {
 function goDetailPrev() {
   if (!hasPrev.value) return;
   if (detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
-  imageLoading.value = true;
   openDetail(props.albumPhotos[detailIndex.value - 1], detailExpanded.value);
 }
 function goDetailNext() {
   if (!hasNext.value) return;
   if (detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
-  imageLoading.value = true;
   openDetail(props.albumPhotos[detailIndex.value + 1], detailExpanded.value);
 }
 function toggleExpanded() {
-  imageLoading.value = true;
+  beginDetailImageLoad();
   detailExpanded.value = !detailExpanded.value;
   detailOriginalPreference.value = detailExpanded.value;
   saveDetailViewPreferences();
 }
 function toggleDetailFullscreen() {
+  beginDetailImageLoad();
   detailFullscreen.value = !detailFullscreen.value;
   if (detailFullscreen.value) showFullscreenControls();
   else hideFullscreenControls();
@@ -630,7 +719,7 @@ function onDetailKeydown(e) {
 }
 function toggleDarktablePreview() {
   if (!hasXmpSidecar.value) return;
-  imageLoading.value = true;
+  beginDetailImageLoad();
   darktablePreview.value = !darktablePreview.value;
   detailDarktablePreference.value = darktablePreview.value;
   saveDetailViewPreferences();
@@ -639,10 +728,11 @@ function onDetailImageLoad() {
   imageLoading.value = false;
 }
 function onDetailImageError() {
+  // Fall back to thumbnail for display only; keep view-original / darktable toggles
+  // so the user can retry. Remount via detailImageEpoch avoids aborted-load false errors.
   if (!detailImageFallback.value) {
     detailImageFallback.value = true;
-    detailExpanded.value = false;
-    darktablePreview.value = false;
+    detailImageEpoch.value += 1;
     imageLoading.value = true;
     return;
   }
@@ -666,9 +756,12 @@ async function checkXmpSidecar(path) {
       const data = await res.json();
       if (!detailPhoto.value || detailPhoto.value.path !== path) return;
       hasXmpSidecar.value = !!data.has_xmp;
-      if (hasXmpSidecar.value && !detailImageFallback.value) {
-        imageLoading.value = true;
-        darktablePreview.value = detailDarktablePreference.value;
+      if (hasXmpSidecar.value) {
+        const wantDarktable = detailDarktablePreference.value;
+        if (wantDarktable !== darktablePreview.value) {
+          beginDetailImageLoad();
+          darktablePreview.value = wantDarktable;
+        }
       }
     } else {
       hasXmpSidecar.value = false;
@@ -683,7 +776,7 @@ function isRawFile(name) {
   const ext = (name || "").split(".").pop().toLowerCase();
   return RAW_EXTS.has(ext);
 }
-function getDetailImageSrc() {
+const detailImageSrc = computed(() => {
   if (!detailPhoto.value) return "";
   const isRaw = isRawFile(detailPhoto.value.name);
   if (detailFullscreen.value) {
@@ -704,7 +797,7 @@ function getDetailImageSrc() {
     return getOriginalUrl(detailPhoto.value.path);
   }
   return getThumbnail(detailPhoto.value.path, 800);
-}
+});
 
 function downloadOriginal() {
   if (!detailPhoto.value) return;
@@ -981,7 +1074,75 @@ function setCoverFromPhoto(photo) {
           </span>
         </h2>
         <div class="flex-1"></div>
-        <button v-if="!isSharedAlbum" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+        <!-- Desktop: full search field -->
+        <div v-if="!inSpecialView && !isMobile" class="flex min-w-0 max-w-xs flex-1 items-center gap-1 lg:max-w-sm">
+          <input
+            v-model="textSearchInput"
+            type="search"
+            :placeholder="t('albums.textSearchPlaceholder')"
+            class="min-w-0 flex-1 rounded-xl border px-2.5 py-1.5 text-xs"
+            :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"
+            @keydown.enter.prevent="submitTextSearch"
+          />
+          <button
+            class="inline-flex shrink-0 items-center rounded-xl px-2 py-1.5 text-xs font-medium transition"
+            :class="isDark ? 'bg-amber-600 text-white hover:bg-amber-500' : 'bg-amber-600 text-white hover:bg-amber-700'"
+            :title="t('albums.textSearch')"
+            @click="submitTextSearch"
+          >
+            <IconSearch class="h-3.5 w-3.5" />
+          </button>
+          <button
+            v-if="textSearchInput"
+            class="inline-flex shrink-0 items-center rounded-xl px-2 py-1.5 text-xs transition"
+            :class="isDark ? 'bg-stone-800 text-stone-300 hover:bg-stone-700' : 'bg-stone-200 text-stone-600 hover:bg-stone-300'"
+            :title="t('albums.clear')"
+            @click="clearTextSearch"
+          >
+            <IconClose class="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <!-- Mobile: collapsed search button / expanded field -->
+        <template v-if="!inSpecialView && isMobile">
+          <button
+            v-if="!mobileSearchOpen"
+            class="inline-flex items-center rounded-xl px-2.5 py-1.5 text-xs font-medium transition"
+            :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+            :title="t('albums.textSearch')"
+            @click="openMobileSearch"
+          >
+            <IconSearch class="h-3.5 w-3.5" />
+          </button>
+          <div v-else class="flex min-w-0 flex-1 items-center gap-1">
+            <input
+              ref="mobileSearchInputRef"
+              v-model="textSearchInput"
+              type="search"
+              :placeholder="t('albums.textSearchPlaceholder')"
+              class="min-w-0 flex-1 rounded-xl border px-2.5 py-1.5 text-xs"
+              :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"
+              @keydown.enter.prevent="submitTextSearch"
+              @keydown.escape.prevent="closeMobileSearch"
+            />
+            <button
+              class="inline-flex shrink-0 items-center rounded-xl px-2 py-1.5 text-xs font-medium transition"
+              :class="isDark ? 'bg-amber-600 text-white hover:bg-amber-500' : 'bg-amber-600 text-white hover:bg-amber-700'"
+              :title="t('albums.textSearch')"
+              @click="submitTextSearch"
+            >
+              <IconSearch class="h-3.5 w-3.5" />
+            </button>
+            <button
+              class="inline-flex shrink-0 items-center rounded-xl px-2 py-1.5 text-xs transition"
+              :class="isDark ? 'bg-stone-800 text-stone-300 hover:bg-stone-700' : 'bg-stone-200 text-stone-600 hover:bg-stone-300'"
+              :title="t('albums.clear')"
+              @click="clearTextSearch(); closeMobileSearch()"
+            >
+              <IconClose class="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </template>
+        <button v-if="!isSharedAlbum && !inSpecialView && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
           :class="isDark ? 'bg-emerald-700 text-white hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'"
           @click="openImportModal">
           <IconImport class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.import') }}</span>
@@ -1004,37 +1165,45 @@ function setCoverFromPhoto(photo) {
           @confirm="handleCloudPickerConfirm"
           @close="cloudPickerOpen = false"
         />
-        <button v-if="currentAlbumCanDelete" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+        <button v-if="currentAlbumCanDelete && !inSpecialView && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
           :class="selectMode
             ? (isDark ? 'bg-sky-600 text-white hover:bg-sky-500' : 'bg-sky-500 text-white hover:bg-sky-600')
             : (isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300')"
           @click="toggleSelectMode">
           <IconCheck class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.select') }}</span>
         </button>
-        <button class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+        <button v-if="!(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
           :class="isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
           @click="emit('rebuild-index')">
           <IconDatabase class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.rebuildIndex') }}</span>
         </button>
-        <button class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="filterPanelOpen
+        <button
+          v-if="inSpecialView"
+          class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+          :class="isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900'"
+          @click="emit('show-photos')"
+        >
+          <IconImage class="h-3.5 w-3.5" />
+          <span class="hidden sm:inline">{{ t('albums.backToPhotos') }}</span>
+        </button>
+        <button v-if="!inSpecialView && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+          :class="filterSortPanelOpen
             ? (isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900')
             : (isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300')"
-          @click="filterPanelOpen = !filterPanelOpen; if (filterPanelOpen) sortPanelOpen = false">
+          @click="toggleFilterSortPanel">
           <IconFilter class="h-3.5 w-3.5" />
-          <span class="hidden sm:inline">{{ t('albums.filters') }}</span>
-          <span v-if="hasActiveFilters" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+          <span class="hidden sm:inline">{{ t('albums.filterAndSort') }}</span>
+          <span v-if="hasActiveFilters || hasActiveSort" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
         </button>
-        <button class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="sortPanelOpen
-            ? (isDark ? 'bg-sky-500/20 text-sky-200' : 'bg-sky-100 text-sky-900')
+        <button v-if="!(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+          :class="aiToolsPanelOpen || inSpecialView
+            ? (isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900')
             : (isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300')"
-          @click="sortPanelOpen = !sortPanelOpen; if (sortPanelOpen) filterPanelOpen = false">
-          <IconSort class="h-3.5 w-3.5" />
-          <span class="hidden sm:inline">{{ t('albums.sort') }}</span>
-          <span v-if="hasActiveSort" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-sky-500"></span>
+          @click="toggleAiToolsPanel">
+          <IconWand class="h-3.5 w-3.5" />
+          <span class="hidden sm:inline">{{ t('albums.aiTools') }}</span>
         </button>
-        <div class="relative">
+        <div v-if="!inSpecialView && !(isMobile && mobileSearchOpen)" class="relative">
           <button ref="thumbnailBtnRef" class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
             :class="thumbnailPopoverOpen
               ? (isDark ? 'bg-violet-500/20 text-violet-200' : 'bg-violet-100 text-violet-900')
@@ -1067,7 +1236,7 @@ function setCoverFromPhoto(photo) {
       </div>
 
       <!-- Selection action bar -->
-      <div v-if="selectMode" class="flex items-center gap-2 border-b px-2.5 py-1.5 md:px-4"
+      <div v-if="selectMode && !inSpecialView" class="flex items-center gap-2 border-b px-2.5 py-1.5 md:px-4"
         :class="isDark ? 'border-stone-700/60 bg-stone-800/80' : 'border-stone-200/60 bg-stone-100/80'">
         <span class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
           {{ t('albums.selectedPhotos', { count: selectedPhotoPaths.size }) }}
@@ -1087,11 +1256,12 @@ function setCoverFromPhoto(photo) {
         </button>
       </div>
 
-      <!-- Main content: filter sidebar (collections + filters) + photo grid -->
+      <!-- Main content: filter/sort sidebar + photo grid + AI tools -->
       <div class="flex min-h-0 flex-1 overflow-hidden">
-        <!-- Desktop filter sidebar stays inside the photo browser layout. -->
+        <!-- Desktop filter/sort sidebar -->
         <FilterSidebar
-          v-if="!isMobile && filterPanelOpen"
+          v-if="!isMobile && filterSortPanelOpen"
+          v-show="!inSpecialView"
           :is-dark="isDark"
           :is-mobile="false"
           :collections="collections"
@@ -1102,27 +1272,30 @@ function setCoverFromPhoto(photo) {
           :available-formats="availableFormats"
           :date-histogram="dateHistogram"
           :filters="filters"
+          :sort="sort"
+          :available-people="albumPeople"
           :current-user="currentUser"
           :current-album="currentAlbum"
           @apply="applyFilters"
+          @update-sort="(s) => emit('update-sort', s)"
           @select-collection="(n) => emit('select-collection', n)"
-          @close="filterPanelOpen = false"
+          @close="filterSortPanelOpen = false"
         />
 
-        <!-- Mobile filter drawer is always teleported outside the page layout. -->
+        <!-- Mobile filter/sort drawer -->
         <teleport to="body">
           <template v-if="isMobile">
             <Transition name="drawer-backdrop" appear>
               <div
-                v-show="filterPanelOpen"
+                v-show="filterSortPanelOpen && !inSpecialView"
                 class="fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm"
                 style="position: fixed; inset: 0; z-index: 90;"
-                @click="filterPanelOpen = false"
+                @click="filterSortPanelOpen = false"
               ></div>
             </Transition>
             <Transition name="mobile-drawer" appear>
               <FilterSidebar
-                v-show="filterPanelOpen"
+                v-show="filterSortPanelOpen && !inSpecialView"
                 style="position: fixed; inset: 0 auto 0 0; z-index: 91; width: min(18rem, 85vw);"
                 :is-dark="isDark"
                 :is-mobile="true"
@@ -1134,79 +1307,122 @@ function setCoverFromPhoto(photo) {
                 :available-formats="availableFormats"
                 :date-histogram="dateHistogram"
                 :filters="filters"
+                :sort="sort"
+                :available-people="albumPeople"
                 :current-user="currentUser"
                 :current-album="currentAlbum"
                 @apply="applyFilters"
+                @update-sort="(s) => emit('update-sort', s)"
                 @select-collection="(n) => emit('select-collection', n)"
-                @close="filterPanelOpen = false"
+                @close="filterSortPanelOpen = false"
               />
             </Transition>
           </template>
         </teleport>
 
-        <!-- Sort panel sidebar -->
-        <teleport to="body" :disabled="!isMobile">
-          <div v-if="sortPanelOpen && isMobile"
-            class="fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm"
-            @click="sortPanelOpen = false"></div>
-          <aside v-if="sortPanelOpen"
-            class="app-scrollbar flex shrink-0 flex-col gap-3 overflow-y-auto border-r p-3"
-            :class="[
-              isDark ? 'border-stone-700/60 bg-stone-900' : 'border-stone-200/60 bg-stone-50',
-              isMobile
-                ? 'fixed inset-y-0 left-0 z-[91] w-[min(18rem,85vw)] shadow-2xl'
-                : 'w-56 bg-opacity-50'
-            ]">
-
-            <!-- Close button (mobile only) -->
-            <div v-if="isMobile" class="flex items-center justify-between">
-              <p class="text-xs font-bold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ t('albums.sort') }}</p>
-              <button class="rounded-full p-1.5 transition"
-                :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
-                @click="sortPanelOpen = false">
-                <IconClose class="h-3.5 w-3.5" />
-              </button>
-            </div>
-
-            <p v-if="!isMobile" class="text-[10px] font-semibold uppercase tracking-wider" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.sort') }}</p>
-
-            <!-- Sort levels -->
-            <div v-for="(level, idx) in sort" :key="idx" class="flex items-center gap-1.5">
-              <select :value="level.field" @change="setSortField(idx, $event.target.value)"
-                class="min-w-0 flex-1 rounded-lg border px-2 py-1.5 text-xs"
-                :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'">
-                <option v-for="f in SORT_FIELDS" :key="f.key" :value="f.key"
-                  :disabled="sort.some((s, i) => i !== idx && s.field === f.key)">{{ f.label() }}</option>
-              </select>
-              <button class="rounded-lg border px-2 py-1.5 text-xs font-medium transition"
-                :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-200 hover:bg-stone-700' : 'border-stone-300 bg-white text-stone-700 hover:bg-stone-100'"
-                @click="toggleSortDir(idx)">
-                {{ level.dir === 'asc' ? '↑' : '↓' }}
-              </button>
-              <button class="rounded-lg p-1.5 text-xs transition"
-                :class="isDark ? 'text-rose-400 hover:bg-rose-900/30' : 'text-rose-500 hover:bg-rose-100'"
-                @click="removeSortLevel(idx)">
-                <IconClose class="h-3 w-3" />
-              </button>
-            </div>
-
-            <button v-if="sort.length < SORT_FIELDS.length"
-              class="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition"
-              :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
-              @click="addSortLevel">
-              <IconPlus class="h-3 w-3" />{{ t('albums.addSortLevel') }}
-            </button>
-
-            <div class="mt-auto flex gap-1.5 pt-2">
-              <button class="flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition"
-                :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
-                @click="clearSort(); if (isMobile) sortPanelOpen = false">{{ t('albums.clear') }}</button>
-            </div>
-          </aside>
-        </teleport>
-
-        <!-- Photo grid -->
+        <!-- Photo grid / duplicate groups -->
         <div class="relative min-h-0 flex-1 overflow-hidden p-2 md:p-3">
+          <div v-if="inDuplicatesView" class="app-scrollbar absolute inset-0 overflow-y-auto p-2 md:p-3">
+            <div v-if="busyAlbums && duplicateGroups.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
+            <div v-else-if="!busyAlbums && duplicateGroups.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noDuplicateGroups') }}</div>
+            <div v-else class="flex flex-col gap-4 md:gap-5">
+              <div class="flex items-center justify-between px-1">
+                <p class="text-xs font-semibold uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.showDuplicates') }}</p>
+                <p class="text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ duplicateTotal }}</p>
+              </div>
+              <section v-for="group in duplicateGroups" :key="group.group_key"
+                class="rounded-2xl border p-3 md:p-4"
+                :class="isDark ? 'border-stone-700 bg-stone-900/70' : 'border-stone-200 bg-white/80'">
+                <div class="mb-3 flex flex-wrap items-center gap-2">
+                  <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                    :class="isDark ? 'bg-amber-900/40 text-amber-200' : 'bg-amber-100 text-amber-800'">
+                    {{ group.kind === 'near' ? t('albums.duplicatesNear') : t('albums.duplicatesExact') }}
+                  </span>
+                  <span class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-700'">
+                    {{ t('albums.duplicateGroupPhotos', { count: group.photo_count }) }}
+                  </span>
+                  <span v-if="group.kind === 'near'" class="truncate text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+                    {{ t('albums.duplicatesDistance', { distance: group.max_hamming_distance }) }}
+                  </span>
+                  <span v-else-if="group.sha256" class="truncate text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+                    {{ group.sha256.slice(0, 16) }}
+                  </span>
+                </div>
+                <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                  <article v-for="photo in group.photos" :key="photo.stable_id"
+                    class="group cursor-pointer rounded-xl border p-1.5 transition hover:shadow-md sm:p-2"
+                    :class="isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
+                    @click="openDuplicateDetail(photo)">
+                    <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
+                      <LazyImage img-class="h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360)" alt="" />
+                    </div>
+                    <p class="mt-1.5 truncate text-xs font-semibold" :title="duplicateDisplayName(photo)">{{ duplicateDisplayName(photo) }}</p>
+                    <p class="truncate text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatSize(photo.size_bytes) }}</p>
+                  </article>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <div v-else-if="inTextView" class="app-scrollbar absolute inset-0 overflow-y-auto p-2 md:p-3">
+            <div class="mb-3 flex flex-wrap items-center gap-2 px-1">
+              <button class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition"
+                :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+                @click="emit('show-photos')">
+                <IconArrowLeft class="h-3.5 w-3.5" />{{ t('albums.backToPhotos') }}
+              </button>
+              <p class="text-xs font-semibold uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.textResults') }}</p>
+              <p v-if="similarQuery?.text" class="truncate text-xs" :class="isDark ? 'text-stone-300' : 'text-stone-600'">"{{ similarQuery.text }}"</p>
+              <p class="text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ similarQuery?.total ?? similarResults.length }}</p>
+            </div>
+            <div v-if="similarLoading" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
+            <div v-else-if="similarResults.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noTextResults') }}</div>
+            <div v-else class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              <article v-for="photo in similarResults" :key="`${photo.owner}:${photo.path}`"
+                class="group cursor-pointer rounded-xl border p-1.5 transition hover:shadow-md sm:p-2"
+                :class="isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
+                @click="openSimilarDetail(photo)">
+                <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
+                  <LazyImage img-class="h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
+                </div>
+                <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
+                <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+                  {{ t('albums.similarScore', { score: Number(photo.score || 0).toFixed(2) }) }}
+                </p>
+              </article>
+            </div>
+          </div>
+
+          <div v-else-if="inSimilarView" class="app-scrollbar absolute inset-0 overflow-y-auto p-2 md:p-3">
+            <div class="mb-3 flex flex-wrap items-center gap-2 px-1">
+              <button class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition"
+                :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+                @click="emit('show-photos')">
+                <IconArrowLeft class="h-3.5 w-3.5" />{{ t('albums.backToPhotos') }}
+              </button>
+              <p class="text-xs font-semibold uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.similarResults') }}</p>
+              <p v-if="similarQuery?.name" class="truncate text-xs" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ similarQuery.name }}</p>
+              <p class="text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ similarQuery?.total ?? similarResults.length }}</p>
+            </div>
+            <div v-if="similarLoading" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
+            <div v-else-if="similarResults.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noSimilarResults') }}</div>
+            <div v-else class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              <article v-for="photo in similarResults" :key="`${photo.owner}:${photo.path}`"
+                class="group cursor-pointer rounded-xl border p-1.5 transition hover:shadow-md sm:p-2"
+                :class="isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
+                @click="openSimilarDetail(photo)">
+                <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
+                  <LazyImage img-class="h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
+                </div>
+                <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
+                <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+                  {{ t('albums.similarScore', { score: Number(photo.score || 0).toFixed(2) }) }}
+                </p>
+              </article>
+            </div>
+          </div>
+
+          <template v-else>
           <div v-if="busyAlbums && albumPhotos.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
           <div v-else-if="!busyAlbums && albumPhotos.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noPhotosFiltered') }}</div>
 
@@ -1267,7 +1483,74 @@ function setCoverFromPhoto(photo) {
             </article>
             </template>
           </VirtualGrid>
+          </template>
         </div>
+
+        <!-- Desktop AI tools sidebar -->
+        <AiToolsSidebar
+          v-if="aiToolsPanelOpen && !isMobile"
+          :is-dark="isDark"
+          :is-mobile="false"
+          :album-view-mode="albumViewMode"
+          :initial-query="textSearchInput"
+          :similar-loading="similarLoading"
+          :people="albumPeople"
+          :people-loading="albumPeopleLoading"
+          :selected-person="selectedPerson"
+          :person-photos="personPhotos"
+          :person-photos-loading="personPhotosLoading"
+          @close="aiToolsPanelOpen = false"
+          @search-text="onAiSearchText"
+          @show-duplicates="emit('show-duplicates')"
+          @show-photos="emit('show-photos')"
+          @filter-person="(person) => emit('filter-person', person)"
+          @refresh-people="emit('refresh-album-people')"
+          @select-person="(person) => emit('select-person', person)"
+          @back-to-people="emit('back-to-people')"
+          @patch-person="(id, updates) => emit('patch-person', id, updates)"
+          @merge-people="(body) => emit('merge-people', body)"
+          @split-person="(body) => emit('split-person', body)"
+        />
+
+        <!-- Mobile AI tools drawer (from right) -->
+        <teleport to="body">
+          <template v-if="isMobile">
+            <Transition name="drawer-backdrop" appear>
+              <div
+                v-show="aiToolsPanelOpen"
+                class="fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm"
+                @click="aiToolsPanelOpen = false"
+              ></div>
+            </Transition>
+            <Transition name="mobile-drawer-right" appear>
+              <AiToolsSidebar
+                v-show="aiToolsPanelOpen"
+                style="position: fixed; inset: 0 0 0 auto; z-index: 91; width: min(20rem, 90vw);"
+                :is-dark="isDark"
+                :is-mobile="true"
+                :album-view-mode="albumViewMode"
+                :initial-query="textSearchInput"
+                :similar-loading="similarLoading"
+                :people="albumPeople"
+                :people-loading="albumPeopleLoading"
+                :selected-person="selectedPerson"
+                :person-photos="personPhotos"
+                :person-photos-loading="personPhotosLoading"
+                @close="aiToolsPanelOpen = false"
+                @search-text="onAiSearchText"
+                @show-duplicates="emit('show-duplicates')"
+                @show-photos="emit('show-photos')"
+                @filter-person="(person) => emit('filter-person', person)"
+                @refresh-people="emit('refresh-album-people')"
+                @select-person="(person) => emit('select-person', person)"
+                @back-to-people="emit('back-to-people')"
+                @patch-person="(id, updates) => emit('patch-person', id, updates)"
+                @merge-people="(body) => emit('merge-people', body)"
+                @split-person="(body) => emit('split-person', body)"
+              />
+            </Transition>
+          </template>
+        </teleport>
       </div>
     </div>
     </Transition>
@@ -1481,7 +1764,8 @@ function setCoverFromPhoto(photo) {
                   <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
                 </svg>
               </div>
-              <img :src="getDetailImageSrc()"
+              <img :key="detailImageEpoch"
+                :src="detailImageSrc"
                 class="rounded-xl object-contain transition-opacity"
                 :class="[
                   detailFullscreen ? 'h-full max-h-full w-full max-w-full rounded-none' : (detailExpanded ? 'max-h-64 sm:max-h-[60vh] md:max-h-full' : 'max-h-48 sm:max-h-72 md:max-h-[60vh]'),
@@ -1612,6 +1896,13 @@ function setCoverFromPhoto(photo) {
                   :class="isDark ? 'bg-sky-900/60 text-sky-200 hover:bg-sky-800' : 'bg-sky-100 text-sky-700 hover:bg-sky-200'"
                   @click="openAddToAlbumModal(detailPhoto)">
                   <IconImage class="h-3.5 w-3.5" />{{ t('detail.addToAlbum') }}
+                </button>
+                <button
+                  class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
+                  :class="isDark ? 'bg-violet-900/60 text-violet-200 hover:bg-violet-800' : 'bg-violet-100 text-violet-700 hover:bg-violet-200'"
+                  :title="t('detail.findSimilar')"
+                  @click="findSimilarFromDetail">
+                  <IconSparkles class="h-3.5 w-3.5" />{{ t('detail.findSimilar') }}
                 </button>
                 <button v-if="currentAlbumCanDelete"
                   class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
@@ -1778,6 +2069,16 @@ function setCoverFromPhoto(photo) {
   .mobile-drawer-leave-to {
     transform: translateX(-100%);
   }
+
+  .mobile-drawer-right-enter-active,
+  .mobile-drawer-right-leave-active {
+    transition: transform 220ms ease-out;
+  }
+
+  .mobile-drawer-right-enter-from,
+  .mobile-drawer-right-leave-to {
+    transform: translateX(100%);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1786,7 +2087,9 @@ function setCoverFromPhoto(photo) {
   .drawer-backdrop-enter-active,
   .drawer-backdrop-leave-active,
   .mobile-drawer-enter-active,
-  .mobile-drawer-leave-active {
+  .mobile-drawer-leave-active,
+  .mobile-drawer-right-enter-active,
+  .mobile-drawer-right-leave-active {
     transition: none;
   }
 }
