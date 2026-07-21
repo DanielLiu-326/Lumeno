@@ -4,7 +4,12 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
+use image::DynamicImage;
 use image::imageops::FilterType;
+
+use crate::backend::album::decoder::{
+    create_decoder, DecodeOptions, DecoderCreateOptions,
+};
 
 use super::models::AiIndexedPhotoRecord;
 
@@ -32,11 +37,38 @@ pub(crate) struct AiDuplicateGroup {
 }
 
 pub(crate) fn compute_photo_phash(path: &Path) -> Result<u64, String> {
+    let decoder = create_decoder(DecoderCreateOptions::auto())
+        .map_err(|error| format!("create decoder failed: {error}"))?;
+    let bytes = std::fs::read(path).map_err(|error| format!("read photo failed: {error}"))?;
+    let image = decoder
+        .decode_bytes(&bytes, DecodeOptions::new())
+        .map_err(|error| format!("decode photo for perceptual hash failed: {error}"))?;
+    Ok(compute_photo_phash_image(&image))
+}
+
+/// Prefer an existing preview/thumbnail for pHash (32×32 sample). Falls back to original.
+pub(crate) fn compute_photo_phash_preferring_preview(
+    original: &Path,
+    preview: Option<&Path>,
+) -> Result<u64, String> {
+    if let Some(preview) = preview
+        && preview.exists()
+    {
+        let decoder = create_decoder(DecoderCreateOptions::auto())
+            .map_err(|error| format!("create decoder failed: {error}"))?;
+        if let Ok(bytes) = std::fs::read(preview)
+            && let Ok(image) = decoder.decode_bytes(&bytes, DecodeOptions::raw_pixels())
+        {
+            return Ok(compute_photo_phash_image(&image));
+        }
+    }
+    compute_photo_phash(original)
+}
+
+fn compute_photo_phash_image(image: &DynamicImage) -> u64 {
     const SAMPLE_SIZE: usize = 32;
     const HASH_SIZE: usize = 8;
 
-    let image = image::open(path)
-        .map_err(|error| format!("decode photo for perceptual hash failed: {error}"))?;
     let grayscale = image
         .grayscale()
         .resize_exact(SAMPLE_SIZE as u32, SAMPLE_SIZE as u32, FilterType::Triangle)
@@ -76,9 +108,10 @@ pub(crate) fn compute_photo_phash(path: &Path) -> Result<u64, String> {
             hash |= 1_u64 << index;
         }
     }
-    Ok(hash)
+    hash
 }
 
+#[allow(dead_code)] // exact duplicate path temporarily disabled
 pub(crate) fn compute_photo_sha256(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("open photo for sha256 failed: {error}"))?;
@@ -100,6 +133,24 @@ pub(crate) fn compute_photo_sha256(path: &Path) -> Result<String, String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>())
+}
+
+/// Perceptual hash for near-duplicate detection.
+/// Exact (SHA256) duplicate checks are disabled for now — full-file hashing is too costly.
+pub(crate) fn compute_duplicate_hash_pair(
+    photo_path: &Path,
+    preview: Option<&Path>,
+) -> (
+    String,
+    Option<String>,
+    Option<u64>,
+    bool,
+    Option<String>,
+) {
+    match compute_photo_phash_preferring_preview(photo_path, preview) {
+        Ok(phash) => ("ready".to_string(), None, Some(phash), true, None),
+        Err(error) => ("error".to_string(), None, None, false, Some(error)),
+    }
 }
 
 pub(crate) fn decode_sha256_hex(value: &str) -> Option<[u8; 32]> {
@@ -213,6 +264,7 @@ fn sort_duplicate_photos(photos: &mut [AiDuplicatePhotoItem]) {
     });
 }
 
+#[allow(dead_code)] // exact duplicate path temporarily disabled
 pub(crate) fn build_exact_duplicate_groups(records: &[AiIndexedPhotoRecord]) -> Vec<AiDuplicateGroup> {
     let mut grouped = HashMap::<String, Vec<AiDuplicatePhotoItem>>::new();
     for record in records {
@@ -266,7 +318,16 @@ pub(crate) fn build_near_duplicate_groups(
             root.search(*phash, max_distance, &mut matches);
             for matched_index in matches {
                 let matched_record = candidates[matched_index].0;
-                if record.duplicate_sha256_hex != matched_record.duplicate_sha256_hex {
+                // Exact SHA256 grouping is disabled; only skip merge when both still
+                // carry the same non-empty digest from an older index.
+                let same_exact = matches!(
+                    (
+                        record.duplicate_sha256_hex.as_deref(),
+                        matched_record.duplicate_sha256_hex.as_deref()
+                    ),
+                    (Some(left), Some(right)) if left == right
+                );
+                if !same_exact {
                     union_find.union(index, matched_index);
                 }
             }

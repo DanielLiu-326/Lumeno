@@ -45,8 +45,12 @@ function albumCover(album) {
   return `/api/thumbnail/${encodeURIComponent(album.cover)}?size=320${owner}`;
 }
 
+function albumTitle(item) {
+  return item?.album_name || item?.name || item?.dir_name || "";
+}
+
 function openAlbum(item) {
-  const album = item?.album;
+  const album = item?.album || item?.dir_name;
   if (album) emit("select-album", album);
 }
 </script>
@@ -111,7 +115,7 @@ function openAlbum(item) {
                 <button v-for="photo in data.recent_photos" :key="`${photo.owner}:${photo.path}`"
                   class="group relative aspect-square overflow-hidden rounded-md bg-stone-200" @click="openAlbum(photo)">
                   <img :src="thumbUrl(photo)" alt="" loading="lazy" class="h-full w-full object-cover transition duration-300 group-hover:scale-105" />
-                  <span class="absolute inset-x-0 bottom-0 truncate bg-black/60 px-2 py-1 text-left text-[10px] text-white">{{ photo.album_name }}</span>
+                  <span class="absolute inset-x-0 bottom-0 truncate bg-black/60 px-2 py-1 text-left text-[10px] text-white">{{ albumTitle(photo) }}</span>
                 </button>
               </div>
               <p v-else class="py-10 text-center text-sm" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t("dashboard.noPhotos") }}</p>
@@ -126,7 +130,7 @@ function openAlbum(item) {
                     <img v-if="albumCover(album)" :src="albumCover(album)" alt="" class="h-full w-full object-cover" />
                   </div>
                   <div class="min-w-0">
-                    <p class="truncate text-sm font-semibold">{{ album.name }}</p>
+                    <p class="truncate text-sm font-semibold">{{ albumTitle(album) }}</p>
                     <p class="mt-1 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t("dashboard.photoCount", { count: album.photo_count }) }}</p>
                   </div>
                 </button>
@@ -158,6 +162,10 @@ function openAlbum(item) {
                   <div class="flex items-center justify-between gap-2">
                     <p class="min-w-0 truncate text-sm font-medium">{{ task.name }}</p>
                     <span class="shrink-0 rounded px-2 py-0.5 text-[10px]" :class="statusTone(task.status)">{{ statusLabel(task.status) }}</span>
+                  </div>
+                  <div class="mt-1 flex min-w-0 items-center justify-between gap-2">
+                    <p class="min-w-0 truncate text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'" :title="task.current_task">{{ task.current_task || "—" }}</p>
+                    <span class="shrink-0 text-[11px] font-medium tabular-nums" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ progressPercent(task) }}%</span>
                   </div>
                   <div class="mt-2 h-1.5 overflow-hidden rounded-full" :class="isDark ? 'bg-stone-700' : 'bg-stone-200'">
                     <div class="h-full bg-amber-600" :style="{ width: `${progressPercent(task)}%` }"></div>

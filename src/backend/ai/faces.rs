@@ -1,6 +1,10 @@
 use image::{DynamicImage, GenericImageView, RgbImage};
 use std::path::Path;
 
+use crate::backend::album::decoder::{
+    create_decoder, DecodeOptions, DecoderCreateOptions,
+};
+
 use super::embedding::{compute_visual_embedding_rgb, l2_normalize};
 
 pub const FACE_DETECTOR_REVISION: &str = "face-heuristic-v1";
@@ -281,8 +285,16 @@ fn quality_score_for_crop(crop: &RgbImage, detection_score: f32) -> f32 {
 }
 
 pub fn detect_and_embed_faces(path: &Path) -> Result<Vec<DetectedFace>, String> {
-    let image = image::open(path)
+    let decoder = create_decoder(DecoderCreateOptions::auto())
+        .map_err(|error| format!("create decoder failed: {error}"))?;
+    let bytes = std::fs::read(path).map_err(|error| format!("read photo failed: {error}"))?;
+    let image = decoder
+        .decode_bytes(&bytes, DecodeOptions::new())
         .map_err(|error| format!("decode photo for face detection failed: {error}"))?;
+    detect_and_embed_faces_from_image(&image)
+}
+
+pub fn detect_and_embed_faces_from_image(image: &DynamicImage) -> Result<Vec<DetectedFace>, String> {
     let (orig_w, orig_h) = image.dimensions();
     if orig_w == 0 || orig_h == 0 {
         return Ok(Vec::new());

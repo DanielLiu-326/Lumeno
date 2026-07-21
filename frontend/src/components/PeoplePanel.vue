@@ -246,7 +246,7 @@ function photoThumb(path, owner) {
             <FaceAvatar
               v-if="person.cover?.path"
               :cover="person.cover"
-              :size="360"
+              :size="128"
               img-class="transition group-hover:scale-105"
             />
             <div v-else class="flex h-full w-full items-center justify-center" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -332,7 +332,7 @@ function photoThumb(path, owner) {
                   :path="face.path"
                   :owner="face.owner"
                   :face-box="face.box"
-                  :size="240"
+                  :size="100"
                 />
               </div>
               <span

@@ -1,0 +1,30 @@
+# Intel iGPU (Vulkan) deployment.
+# Host needs: vulkan-intel / mesa, and /dev/dri accessible.
+# Image must include mesa-vulkan-drivers (or equivalent ICD).
+#
+#   docker compose up -d
+#   docker compose exec lumeno vulkaninfo --summary
+
+services:
+  lumeno:
+    image: lumeno:latest
+    # build:
+    #   context: .
+    #   dockerfile: DockerFile
+    ports:
+      - "3000:3000"
+    environment:
+      LUMENO_AI_DEVICE: vulkan
+      TRUST_PROXY: "1"
+      # BOOTSTRAP_ADMIN_USER: admin
+      # BOOTSTRAP_ADMIN_PASSWORD: changeme
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - ./dist/data:/app/dist/data
+      - ./dist/models:/app/dist/models:ro
+    working_dir: /app
+    restart: unless-stopped

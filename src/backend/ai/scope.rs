@@ -255,6 +255,7 @@ mod tests {
             owner: owner.to_string(),
             album: album.to_string(),
             source_key: album.to_string(),
+            cache_id: album.to_string(),
             path: path.to_string(),
             stable_key: stable_key.clone(),
             stable_id: stable_key,

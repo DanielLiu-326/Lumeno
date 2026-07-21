@@ -10,7 +10,7 @@ use tokenizers::Tokenizer;
 
 use super::backend::{AiBackend, AiDevice, selected_ai_device};
 use super::manifest::ModelArtifactSpec;
-use super::preprocess::prepare_siglip_image;
+use super::preprocess::prepare_siglip_tensor;
 use crate::backend::ai::embedding::{SIGLIP2_EMBEDDING_DIM, l2_normalize};
 
 pub const SIGLIP2_IMAGE_SIZE: u32 = 256;
@@ -114,10 +114,7 @@ impl Siglip2Runtime {
 
     #[cfg(ai_onnx_generated)]
     fn embed_image_one(&self, image: &image::DynamicImage) -> Result<Vec<f32>, String> {
-        let size = SIGLIP2_IMAGE_SIZE as usize;
-        let (_, _, chw) = prepare_siglip_image(image, SIGLIP2_IMAGE_SIZE);
-        let tensor = Tensor::<AiBackend, 1>::from_floats(chw.as_slice(), &self.device)
-            .reshape([1, 3, size, size]);
+        let tensor = prepare_siglip_tensor(image, SIGLIP2_IMAGE_SIZE, &self.device);
         let output = catch_unwind(AssertUnwindSafe(|| self.vision.forward(tensor))).map_err(
             |_| {
                 "siglip2 vision forward panicked (check input size 256x256, batch=1)".to_string()

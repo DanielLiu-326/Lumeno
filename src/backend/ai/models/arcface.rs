@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::backend::{AiBackend, AiDevice, selected_ai_device};
 use super::manifest::ModelArtifactSpec;
-use super::preprocess::prepare_arcface_crop;
+use super::preprocess::prepare_arcface_tensor;
 use crate::backend::ai::embedding::{ARCFACE_EMBEDDING_DIM, l2_normalize};
 
 pub const ARCFACE_INPUT_SIZE: u32 = 112;
@@ -53,10 +53,7 @@ impl ArcFaceRuntime {
         }
         #[cfg(ai_onnx_generated)]
         {
-            let (_, _, chw) = prepare_arcface_crop(crop);
-            let size = ARCFACE_INPUT_SIZE as usize;
-            let tensor = Tensor::<AiBackend, 1>::from_floats(chw.as_slice(), &self.device)
-                .reshape([1, 3, size, size]);
+            let tensor = prepare_arcface_tensor(crop, &self.device);
             let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.model.forward(tensor)
             }))

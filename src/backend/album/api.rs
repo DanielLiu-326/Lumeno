@@ -33,7 +33,7 @@ use crate::backend::tasks::{Task, TaskBase, TaskStatus};
 use super::helpers::*;
 use super::media::{
     ensure_thumbnail_cached, find_xmp_sidecar, is_image_path, is_raw_path,
-    resolve_photo_owner_root, DarktableClient,
+    resolve_photo_owner_root,
 };
 use super::types::*;
 
@@ -67,7 +67,7 @@ pub async fn api_albums_list(
         };
         if meta.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("__") {
+            if is_user_visible_album_dir(&name) {
                 album_names.push(name);
             }
         }
@@ -77,12 +77,11 @@ pub async fn api_albums_list(
     let mut albums = Vec::new();
     for dir_name in &album_names {
         let album_dir = albums_dir.join(dir_name);
+        let cache = ensure_album_cache_id(album_dir.as_path())
+            .await
+            .unwrap_or_default();
         let meta = read_album_meta(album_dir.as_path()).await;
-        let display_name = if meta.name.is_empty() {
-            dir_name.clone()
-        } else {
-            meta.name.clone()
-        };
+        let display_name = album_display_name(&meta, dir_name);
         let index = load_or_queue_album_index(
             cfg.as_ref(),
             &username,
@@ -98,6 +97,7 @@ pub async fn api_albums_list(
         albums.push(json!({
             "dir_name": dir_name,
             "name": display_name,
+            "cache": cache,
             "cover": meta.cover,
             "description": meta.description,
             "photo_count": photo_count,
@@ -142,6 +142,7 @@ pub async fn api_albums_create(
         .map_err(|e| AppError::Unknown(format!("create album dir failed: {e}")))?;
     let meta = AlbumMeta {
         name: name.clone(),
+        cache: new_album_cache_id(),
         cover: String::new(),
         description: payload.description.clone().unwrap_or_default(),
         ..Default::default()
@@ -158,7 +159,7 @@ pub async fn api_albums_update(
     Extension(cfg): Extension<Arc<AppState>>,
     payload: Json<UpdateAlbumPayload>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(root_path) = cfg.get_root_path(&token).await else {
+    let Some((username, root_path)) = cfg.get_session_and_root(&token).await else {
         return Err(AppError::unauthorized(locale.as_str()));
     };
     let Some(dir_name) = sanitize_album_name(&payload.dir_name) else {
@@ -167,7 +168,8 @@ pub async fn api_albums_update(
             "error.invalid_album_identifier",
         )));
     };
-    let album_dir = albums_root(root_path.as_path()).join(&dir_name);
+    let albums = albums_root(root_path.as_path());
+    let mut album_dir = albums.join(&dir_name);
     if !album_dir.exists() {
         return Err(AppError::NotFound(trf(
             locale.as_str(),
@@ -175,19 +177,91 @@ pub async fn api_albums_update(
             &[("value", dir_name.clone())],
         )));
     }
+
+    // Pin cache id before any directory rename so the index file stays put.
+    let cache_id = ensure_album_cache_id(album_dir.as_path()).await?;
     let mut meta = read_album_meta(album_dir.as_path()).await;
-    if let Some(name) = &payload.name {
-        meta.name = name.trim().to_string();
+    if meta.cache.is_empty() {
+        meta.cache = cache_id.clone();
     }
+
+    let mut effective_dir = dir_name.clone();
+
+    // Changing the album name also renames the folder; cache pointer stays.
+    if let Some(raw_name) = payload.name.as_ref() {
+        let trimmed = raw_name.trim().to_string();
+        let Some(new_dir) = sanitize_album_name(&trimmed) else {
+            return Err(AppError::BadRequest(tr(
+                locale.as_str(),
+                "error.invalid_album_name",
+            )));
+        };
+        meta.name = trimmed;
+        if new_dir != dir_name {
+            let dest = albums.join(&new_dir);
+            if dest.exists() {
+                return Err(AppError::BadRequest(trf(
+                    locale.as_str(),
+                    "error.album_dir_exists",
+                    &[("value", new_dir.clone())],
+                )));
+            }
+            tokio::fs::rename(&album_dir, &dest)
+                .await
+                .map_err(|e| AppError::Unknown(format!("rename album dir failed: {e}")))?;
+            album_dir = dest;
+            effective_dir = new_dir;
+            let old_prefix = format!("albums/{dir_name}/");
+            let new_prefix = format!("albums/{effective_dir}/");
+            if let Some(rest) = meta.cover.strip_prefix(&old_prefix) {
+                meta.cover = format!("{new_prefix}{rest}");
+            }
+            let index_path = album_index_path(cfg.data_path.as_path(), &username, &meta.cache);
+            if index_path.exists() {
+                if let Ok(raw) = tokio::fs::read_to_string(&index_path).await {
+                    if let Ok(mut index) = serde_json::from_str::<AlbumIndex>(&raw) {
+                        for entry in &mut index.entries {
+                            if let Some(rest) = entry.path.strip_prefix(&old_prefix) {
+                                entry.path = format!("{new_prefix}{rest}");
+                            }
+                        }
+                        if let Ok(data) = serde_json::to_string(&index) {
+                            let _ = tokio::fs::write(&index_path, data).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(cover) = &payload.cover {
-        meta.cover = cover.trim().to_string();
+        let cover = cover.trim().to_string();
+        meta.cover = if effective_dir != dir_name {
+            let old_prefix = format!("albums/{dir_name}/");
+            let new_prefix = format!("albums/{effective_dir}/");
+            cover
+                .strip_prefix(&old_prefix)
+                .map(|rest| format!("{new_prefix}{rest}"))
+                .unwrap_or(cover)
+        } else {
+            cover
+        };
     }
     if let Some(desc) = &payload.description {
         meta.description = desc.clone();
     }
     write_album_meta(album_dir.as_path(), &meta).await?;
     let message = tr(locale.as_str(), "response.album_updated");
-    Ok(create_response(true, &message, 0, None))
+    Ok(create_response(
+        true,
+        &message,
+        0,
+        Some(json!({
+            "dir_name": effective_dir,
+            "cache": meta.cache,
+            "name": meta.name,
+        })),
+    ))
 }
 
 #[named]
@@ -214,11 +288,19 @@ pub async fn api_albums_delete(
             &[("value", dir_name.clone())],
         )));
     }
+    let cache_id = ensure_album_cache_id(album_dir.as_path())
+        .await
+        .unwrap_or_else(|_| dir_name.clone());
     tokio::fs::remove_dir_all(&album_dir)
         .await
         .map_err(|e| AppError::Unknown(format!("delete album dir failed: {e}")))?;
-    let index_path = album_index_path(cfg.data_path.as_path(), &username, &dir_name);
+    let index_path = album_index_path(cfg.data_path.as_path(), &username, &cache_id);
     let _ = tokio::fs::remove_file(&index_path).await;
+    // Legacy indexes keyed by directory name before meta.cache existed.
+    if cache_id != dir_name {
+        let legacy = album_index_path(cfg.data_path.as_path(), &username, &dir_name);
+        let _ = tokio::fs::remove_file(&legacy).await;
+    }
     let message = tr(locale.as_str(), "response.album_deleted");
     Ok(create_response(true, &message, 0, None))
 }
@@ -1091,8 +1173,12 @@ pub async fn api_albums_photo_meta(
         .strip_prefix("albums/")
         .and_then(|rest| rest.split('/').next())
     {
-        let index_path = album_index_path(cfg.data_path.as_path(), &index_owner, album_name);
-        if index_path.exists() {
+        let album_dir = albums_root(root_path.as_path()).join(album_name);
+        if let Ok(index_path) =
+            album_index_path_for_dir(cfg.data_path.as_path(), &index_owner, album_dir.as_path())
+                .await
+            && index_path.exists()
+        {
             if let Ok(raw) = tokio::fs::read_to_string(&index_path).await {
                 if let Ok(mut index) = serde_json::from_str::<AlbumIndex>(&raw) {
                     if let Some(entry) = index.entries.iter_mut().find(|e| e.path == photo_rel) {
@@ -1224,14 +1310,19 @@ pub async fn api_albums_delete_photos(
     cleanup_empty_dirs(&album_dir).await;
 
     // Rebuild the index
-    let index = rebuild_album_index(
+    let Some(index) = rebuild_album_index(
         cfg.data_path.as_path(),
         resolved.root_path.as_path(),
         &resolved.owner,
         &resolved.album_name,
         None,
+        None,
+        None,
     )
-    .await?;
+    .await?
+    else {
+        return Err(AppError::Unknown("album index rebuild cancelled".into()));
+    };
 
     let _ = crate::backend::ai::queue_owner_ai_index(
         cfg.clone(),
@@ -1370,6 +1461,8 @@ pub async fn api_albums_copy_photo(
         &target.owner,
         &target.album_name,
         None,
+        None,
+        None,
     )
     .await?;
 
@@ -1502,6 +1595,7 @@ pub(crate) async fn resolve_album_access(
 
 // ── Dashboard helpers ────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub(crate) struct AlbumSource {
     dir_name: String,
     owner: String,
@@ -1516,38 +1610,61 @@ pub(crate) struct AiAlbumScanTarget {
     pub owner: String,
     pub album_name: String,
     pub album_dir: PathBuf,
+    /// Stable `AlbumMeta.cache` used as AI embedding subdirectory.
+    pub cache_id: String,
+}
+
+async fn push_visible_album_source(
+    sources: &mut Vec<AlbumSource>,
+    owner: &str,
+    owner_root: PathBuf,
+    album_dir: &FsPath,
+    dir_name: String,
+    require_share_for: Option<&str>,
+) {
+    if !is_user_visible_album_dir(&dir_name) {
+        return;
+    }
+    let meta = read_album_meta(album_dir).await;
+    if let Some(viewer) = require_share_for {
+        if !meta.shares.iter().any(|share| share.username == viewer) {
+            return;
+        }
+    }
+    sources.push(AlbumSource {
+        dir_name: dir_name.clone(),
+        owner: owner.to_string(),
+        owner_root,
+        display_name: album_display_name(&meta, &dir_name),
+        cover: meta.cover,
+        description: meta.description,
+    });
 }
 
 /// Gather every album accessible by `username`: own albums + albums shared to them.
+/// Hidden system dirs (`__*`, e.g. `__uploading`) are excluded — same口径 as album list.
 pub(crate) async fn collect_accessible_album_sources(cfg: &AppState, username: &str) -> Vec<AlbumSource> {
     let mut sources = Vec::new();
     let user_root = cfg.user_root_path(username);
 
-    // Own albums
     let albums_dir = albums_root(&user_root);
     if let Ok(mut entries) = tokio::fs::read_dir(&albums_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             if entry.metadata().await.map(|m| m.is_dir()).unwrap_or(false) {
                 let dir_name = entry.file_name().to_string_lossy().to_string();
-                let meta = read_album_meta(&entry.path()).await;
-                let display_name = if meta.name.is_empty() {
-                    dir_name.clone()
-                } else {
-                    meta.name
-                };
-                sources.push(AlbumSource {
+                push_visible_album_source(
+                    &mut sources,
+                    username,
+                    user_root.clone(),
+                    &entry.path(),
                     dir_name,
-                    owner: username.to_string(),
-                    owner_root: user_root.clone(),
-                    display_name,
-                    cover: meta.cover,
-                    description: meta.description,
-                });
+                    None,
+                )
+                .await;
             }
         }
     }
 
-    // Shared albums (from other users)
     let all_users = cfg.user_manager.list_usernames().await;
     for owner in &all_users {
         if owner == username {
@@ -1559,29 +1676,58 @@ pub(crate) async fn collect_accessible_album_sources(cfg: &AppState, username: &
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if entry.metadata().await.map(|m| m.is_dir()).unwrap_or(false) {
                     let dir_name = entry.file_name().to_string_lossy().to_string();
-                    let meta = read_album_meta(&entry.path()).await;
-                    if !meta.shares.iter().any(|s| s.username == username) {
-                        continue;
-                    }
-                    let display_name = if meta.name.is_empty() {
-                        dir_name.clone()
-                    } else {
-                        meta.name
-                    };
-                    sources.push(AlbumSource {
+                    push_visible_album_source(
+                        &mut sources,
+                        owner,
+                        owner_root.clone(),
+                        &entry.path(),
                         dir_name,
-                        owner: owner.clone(),
-                        owner_root: owner_root.clone(),
-                        display_name,
-                        cover: meta.cover,
-                        description: meta.description,
-                    });
+                        Some(username),
+                    )
+                    .await;
                 }
             }
         }
     }
 
     sources
+}
+
+fn enrich_photo_value(entry: &AlbumPhotoItem, viewer: &str, source: &AlbumSource) -> Value {
+    let album_key = album_access_key(viewer, &source.owner, &source.dir_name);
+    let mut photo = serde_json::to_value(entry).unwrap_or_default();
+    if let Some(object) = photo.as_object_mut() {
+        object.insert("album".to_string(), json!(&album_key));
+        object.insert("album_name".to_string(), json!(&source.display_name));
+        object.insert("owner".to_string(), json!(&source.owner));
+    }
+    photo
+}
+
+async fn load_accessible_album_indexes(
+    cfg: &AppState,
+    viewer: &str,
+    sources: &[AlbumSource],
+    locale: &str,
+) -> Result<Vec<(AlbumSource, AlbumIndex)>, AppError> {
+    let mut out = Vec::with_capacity(sources.len());
+    for source in sources {
+        let index = load_or_queue_album_index(
+            cfg,
+            viewer,
+            &source.owner_root,
+            &source.owner,
+            &source.dir_name,
+            locale,
+        )
+        .await?
+        .unwrap_or(AlbumIndex {
+            version: 2,
+            entries: Vec::new(),
+        });
+        out.push((source.clone(), index));
+    }
+    Ok(out)
 }
 
 pub(crate) async fn collect_accessible_ai_scan_targets(
@@ -1601,23 +1747,29 @@ pub(crate) async fn collect_accessible_ai_scan_targets(
                 &[("value", album_input.to_string())],
             )));
         }
+        let cache_id = ensure_album_cache_id(album_dir.as_path()).await?;
         return Ok(vec![AiAlbumScanTarget {
             owner: resolved.owner,
             album_name: resolved.album_name,
             album_dir,
+            cache_id,
         }]);
     }
 
-    Ok(collect_accessible_album_sources(cfg, username)
-        .await
-        .into_iter()
-        .filter(|source| source.dir_name != "__uploading")
-        .map(|source| AiAlbumScanTarget {
+    let mut targets = Vec::new();
+    for source in collect_accessible_album_sources(cfg, username).await {
+        let album_dir = albums_root(&source.owner_root).join(&source.dir_name);
+        let cache_id = ensure_album_cache_id(album_dir.as_path())
+            .await
+            .unwrap_or_else(|_| source.dir_name.clone());
+        targets.push(AiAlbumScanTarget {
             owner: source.owner,
-            album_name: source.dir_name.clone(),
-            album_dir: albums_root(&source.owner_root).join(source.dir_name),
-        })
-        .collect())
+            album_name: source.dir_name,
+            album_dir,
+            cache_id,
+        });
+    }
+    Ok(targets)
 }
 
 pub async fn api_dashboard(
@@ -1645,26 +1797,16 @@ pub async fn api_dashboard(
     let mut photos = Vec::<Value>::new();
     let mut albums = Vec::<(String, Value)>::new();
 
-    for source in sources {
-        let album_key = if source.owner == username {
-            source.dir_name.clone()
-        } else {
-            format!("{}/{}", source.owner, source.dir_name)
-        };
-        let index = load_or_queue_album_index(
-            cfg.as_ref(),
-            &username,
-            &source.owner_root,
-            &source.owner,
-            &source.dir_name,
-            locale.as_str(),
-        )
-        .await?
-        .unwrap_or(AlbumIndex {
-            version: 2,
-            entries: Vec::new(),
-        });
+    let indexed = load_accessible_album_indexes(
+        cfg.as_ref(),
+        &username,
+        &sources,
+        locale.as_str(),
+    )
+    .await?;
 
+    for (source, index) in indexed {
+        let album_key = album_access_key(&username, &source.owner, &source.dir_name);
         accessible_photo_count += index.entries.len();
         total_bytes += index.entries.iter().map(|entry| entry.size).sum::<u64>();
         dated_photo_count += index
@@ -1684,7 +1826,7 @@ pub async fn api_dashboard(
             latest_date.clone(),
             json!({
                 "album": album_key,
-                "dir_name": source.dir_name,
+                "dir_name": album_key,
                 "name": source.display_name,
                 "owner": source.owner,
                 "cover": source.cover,
@@ -1694,14 +1836,8 @@ pub async fn api_dashboard(
             }),
         ));
 
-        for entry in index.entries {
-            let mut photo = serde_json::to_value(entry).unwrap_or_default();
-            if let Some(object) = photo.as_object_mut() {
-                object.insert("album".to_string(), json!(&album_key));
-                object.insert("album_name".to_string(), json!(&source.display_name));
-                object.insert("owner".to_string(), json!(&source.owner));
-            }
-            photos.push(photo);
+        for entry in &index.entries {
+            photos.push(enrich_photo_value(entry, &username, &source));
         }
     }
 
@@ -1851,50 +1987,30 @@ pub async fn api_on_this_day(
     let today_md = format!("{:02}-{:02}", now.month(), now.day());
 
     let sources = collect_accessible_album_sources(&cfg, &username).await;
+    let indexed = load_accessible_album_indexes(
+        cfg.as_ref(),
+        &username,
+        &sources,
+        locale.as_str(),
+    )
+    .await?;
     let mut by_year: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
-    for src in sources {
-        let Ok(Some(index)) = load_or_queue_album_index(
-            cfg.as_ref(),
-            &username,
-            &src.owner_root,
-            &src.owner,
-            &src.dir_name,
-            locale.as_str(),
-        )
-        .await
-        else {
-            continue;
-        };
-
-        // album key: "dir_name" for own, "owner/dir_name" for shared
-        let album_key = if src.owner == username {
-            src.dir_name.clone()
-        } else {
-            format!("{}/{}", src.owner, src.dir_name)
-        };
-
+    for (src, index) in indexed {
         for entry in &index.entries {
-            let mut entry_val = serde_json::to_value(entry).unwrap_or_default();
-            let date_str = entry_val
-                .get("date")
-                .and_then(|d| d.as_str())
-                .unwrap_or("")
-                .to_string();
+            let date_str = entry.date.as_str();
             if date_str.len() != 10 {
                 continue;
             }
-            let entry_md = &date_str[5..]; // "MM-DD"
+            let entry_md = &date_str[5..];
             if entry_md != today_md {
                 continue;
             }
             let year = date_str[..4].to_string();
-            if let Some(obj) = entry_val.as_object_mut() {
-                obj.insert("album".to_string(), json!(&album_key));
-                obj.insert("album_name".to_string(), json!(&src.display_name));
-                obj.insert("owner".to_string(), json!(&src.owner));
-            }
-            by_year.entry(year).or_default().push(entry_val);
+            by_year
+                .entry(year)
+                .or_default()
+                .push(enrich_photo_value(entry, &username, &src));
         }
     }
 
@@ -1926,34 +2042,18 @@ pub async fn api_daily_picks(
 
     let today = Local::now().format("%Y-%m-%d").to_string();
     let sources = collect_accessible_album_sources(&cfg, &username).await;
+    let indexed = load_accessible_album_indexes(
+        cfg.as_ref(),
+        &username,
+        &sources,
+        locale.as_str(),
+    )
+    .await?;
 
     let mut all_photos: Vec<Value> = Vec::new();
-    for src in sources {
-        let Ok(Some(index)) = load_or_queue_album_index(
-            cfg.as_ref(),
-            &username,
-            &src.owner_root,
-            &src.owner,
-            &src.dir_name,
-            locale.as_str(),
-        )
-        .await
-        else {
-            continue;
-        };
-        let album_key = if src.owner == username {
-            src.dir_name.clone()
-        } else {
-            format!("{}/{}", src.owner, src.dir_name)
-        };
+    for (src, index) in indexed {
         for entry in &index.entries {
-            let mut item = serde_json::to_value(entry).unwrap_or_default();
-            if let Some(obj) = item.as_object_mut() {
-                obj.insert("album".to_string(), json!(&album_key));
-                obj.insert("album_name".to_string(), json!(&src.display_name));
-                obj.insert("owner".to_string(), json!(&src.owner));
-            }
-            all_photos.push(item);
+            all_photos.push(enrich_photo_value(entry, &username, &src));
         }
     }
 
@@ -2013,20 +2113,18 @@ pub(crate) async fn collect_shared_albums(cfg: &AppState, username: &str, locale
                 continue;
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
+            if !is_user_visible_album_dir(&dir_name) {
+                continue;
+            }
             let meta = read_album_meta(&entry.path()).await;
             let Some(share) = meta.shares.iter().find(|s| s.username == username) else {
                 continue;
             };
-            let display_name = if meta.name.is_empty() {
-                dir_name.clone()
-            } else {
-                meta.name.clone()
-            };
             candidates.push(Candidate {
                 owner: owner.clone(),
                 owner_root: owner_root.clone(),
-                dir_name,
-                display_name,
+                dir_name: dir_name.clone(),
+                display_name: album_display_name(&meta, &dir_name),
                 cover: meta.cover,
                 description: meta.description,
                 can_write: share.can_write,
@@ -2046,7 +2144,7 @@ pub(crate) async fn collect_shared_albums(cfg: &AppState, username: &str, locale
                 .flatten();
         let photo_count = index.map(|i| i.entries.len()).unwrap_or(0);
         shared_albums.push(json!({
-            "dir_name": format!("{}/{}", c.owner, c.dir_name),
+            "dir_name": album_access_key(username, &c.owner, &c.dir_name),
             "name": c.display_name,
             "cover": c.cover,
             "description": c.description,
@@ -2319,6 +2417,7 @@ pub async fn api_albums_upload(
                         &[rel.to_string_lossy().to_string()],
                         true,
                         conflict_action,
+                        None,
                         None,
                     )
                     .await;

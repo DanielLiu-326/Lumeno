@@ -4,10 +4,17 @@
 //! 1. CUDA (if built with `--features cuda`)
 //! 2. Vulkan GPU (wgpu)
 //! 3. Flex CPU
+//!
+//! Vulkan memory uses a tight CubeCL `Custom` pool: exclusive pages capped well
+//! below full VRAM, with short `dealloc_period` so idle pages return quickly.
 
+use burn::backend::wgpu::{
+    MemoryConfiguration, RuntimeOptions, WgpuDevice, graphics::Vulkan, init_setup,
+};
 use burn::prelude::*;
 use burn::Dispatch;
 use burn::DispatchDevice;
+use cubecl_runtime::memory_management::{MemoryPoolOptions, PoolType};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::OnceLock;
 
@@ -45,10 +52,14 @@ fn select_ai_device() -> AiDeviceChoice {
     }
 
     if matches!(prefer.as_str(), "auto" | "gpu" | "vulkan") {
-        candidates.push((
-            DispatchDevice::Vulkan(burn::backend::wgpu::WgpuDevice::DefaultDevice),
-            "vulkan",
-        ));
+        // Must configure CubeCL before the first Vulkan tensor touch, otherwise the
+        // default SubSlices allocator wins for the process lifetime.
+        let wgpu_device = WgpuDevice::DefaultDevice;
+        if init_vulkan_tight_memory(&wgpu_device) {
+            candidates.push((DispatchDevice::Vulkan(wgpu_device), "vulkan"));
+        } else {
+            eprintln!("[ai] vulkan tight-memory init failed; skipping vulkan backend");
+        }
     }
 
     for (device, label) in candidates {
@@ -68,6 +79,55 @@ fn select_ai_device() -> AiDeviceChoice {
         eprintln!("[ai] using CPU Flex for local inference");
     }
     cpu_choice()
+}
+
+/// Exclusive-page buckets capped below full VRAM, with aggressive reclaim.
+///
+/// Max alloc (~1.5 GiB) still fits SigLIP text weights (~1.1 GiB) while preventing
+/// the default SubSlices habit of growing toward heap/4 on large cards.
+fn tight_memory_config() -> MemoryConfiguration {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const MAX_ALLOC: u64 = 1536 * MB;
+    const MIN_BUCKET: u64 = 32 * KB;
+    // Reclaim unused pages after this many subsequent allocs in the parent allocator.
+    const DEALLOC_PERIOD: u64 = 50;
+
+    let mut sizes = Vec::new();
+    let mut size = MIN_BUCKET;
+    while size < MAX_ALLOC {
+        sizes.push(size);
+        let next = size.saturating_mul(2);
+        if next <= size {
+            break;
+        }
+        size = next;
+    }
+    sizes.push(MAX_ALLOC);
+
+    MemoryConfiguration::Custom {
+        pool_options: sizes
+            .into_iter()
+            .map(|max_alloc_size| MemoryPoolOptions {
+                pool_type: PoolType::ExclusivePages { max_alloc_size },
+                dealloc_period: Some(DEALLOC_PERIOD),
+            })
+            .collect(),
+    }
+}
+
+fn init_vulkan_tight_memory(device: &WgpuDevice) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        let _ = init_setup::<Vulkan>(
+            device,
+            RuntimeOptions {
+                memory_config: tight_memory_config(),
+                tasks_max: 1,
+            },
+        );
+        eprintln!("[ai] vulkan memory strategy=tight (ExclusivePages + reclaim)");
+    }))
+    .is_ok()
 }
 
 fn cpu_choice() -> AiDeviceChoice {

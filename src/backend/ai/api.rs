@@ -12,7 +12,7 @@ use super::super::album::collect_accessible_ai_scan_targets;
 use super::super::auth::Role;
 use super::super::common::{AppError, AppState, Token, create_response};
 use super::super::i18n::{RequestLocale, tr, trf};
-use super::duplicate::{build_exact_duplicate_groups, build_near_duplicate_groups};
+use super::duplicate::build_near_duplicate_groups;
 use super::models::NormalizedAiIndexRequest;
 use super::people::{
     MAX_PERSON_NAME_LEN, merge_people, split_person, update_person,
@@ -377,9 +377,7 @@ pub async fn api_ai_duplicates(
     }
 
     let mut groups = Vec::new();
-    if matches!(kind, "exact" | "all") {
-        groups.extend(build_exact_duplicate_groups(&records));
-    }
+    // Exact (SHA256) duplicate groups are temporarily disabled.
     if matches!(kind, "near" | "all") {
         groups.extend(build_near_duplicate_groups(&records, max_distance));
     }
@@ -629,7 +627,12 @@ pub async fn api_ai_search_similar(
             if record.image_embedding_state != "ready" {
                 continue;
             }
-            let Some(vector) = loaded.embeddings.get(&stable_key).cloned() else {
+            let Some(vector) = loaded
+                .embeddings
+                .get(&record.embedding_key())
+                .or_else(|| loaded.embeddings.get(&stable_key))
+                .cloned()
+            else {
                 continue;
             };
             candidates.push((record, vector));
@@ -768,7 +771,11 @@ pub async fn api_ai_search_text(
                 }
             }
             let embedding = if record.image_embedding_state == "ready" {
-                loaded.embeddings.get(&stable_key).cloned()
+                loaded
+                    .embeddings
+                    .get(&record.embedding_key())
+                    .or_else(|| loaded.embeddings.get(&stable_key))
+                    .cloned()
             } else {
                 None
             };
@@ -1088,27 +1095,38 @@ pub async fn api_ai_people_patch(
     let provider_health = inference.health().await;
     let name = payload.name.as_deref();
     let hidden = payload.hidden;
+    let person_id_trimmed = person_id.trim().to_string();
     cfg.ai_service
         .store()
         .commit_people_mutation(
             owner,
             inference.capabilities(),
             &provider_health,
-            |people, _assignments| {
-                update_person(people, person_id.trim(), name, hidden)
+            |people, assignments| {
+                update_person(people, assignments, person_id_trimmed.as_str(), name, hidden)
                     .map_err(|error| error.to_string())
             },
         )
         .map_err(AppError::BadRequest)?;
 
+    let person = cfg
+        .ai_service
+        .store()
+        .load_current_index(owner)
+        .and_then(|index| index.people.get(person_id_trimmed.as_str()).cloned());
     let message = tr(locale.as_str(), "response.success");
     Ok(create_response(
         true,
         &message,
         0,
         Some(json!({
-            "person_id": person_id.trim(),
+            "person_id": person_id_trimmed,
             "updated": true,
+            "person": person.map(|person| json!({
+                "id": person.id,
+                "name": person.name,
+                "hidden": person.hidden,
+            })),
         })),
     ))
 }

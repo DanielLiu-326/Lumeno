@@ -64,7 +64,7 @@ function togglePerson(person) {
       @click="togglePerson(person)"
     >
       <div class="h-8 w-8 shrink-0 overflow-hidden rounded-full" :class="isDark ? 'bg-stone-800' : 'bg-stone-200'">
-        <FaceAvatar v-if="person.cover?.path" :cover="person.cover" :size="120" />
+        <FaceAvatar v-if="person.cover?.path" :cover="person.cover" :size="32" />
       </div>
       <div class="min-w-0 flex-1">
         <p class="truncate text-xs font-medium">{{ personLabel(person) }}</p>

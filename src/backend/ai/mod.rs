@@ -17,7 +17,8 @@ pub use api::{
 pub use models::{AiGenerationStats, OwnerIndexStatus};
 pub use provider::{
     AiCapabilities, AiInferenceProvider, AiItemError, AiProviderHealth, AiProviderKind,
-    build_provider_from_settings, validate_ai_settings_update, validate_remote_url,
+    PipelineProgressTx, build_provider_from_settings, progress_channel,
+    validate_ai_settings_update, validate_remote_url,
 };
 pub use store::FileAiIndexStore;
 pub use tasks::queue_owner_ai_index;
@@ -46,10 +47,7 @@ pub struct AiService {
 
 impl AiService {
     pub async fn new(settings_manager: &Arc<SettingsManager>, data_path: &Path) -> Arc<Self> {
-        let store = Arc::new(FileAiIndexStore::new(
-            data_path.join("config"),
-            vec![data_path.join("config").join("ai"), data_path.join("ai")],
-        ));
+        let store = Arc::new(FileAiIndexStore::new(data_path.join("cache").join("ai")));
         let settings = settings_manager.get_all().await;
         let models_root = data_path
             .parent()
@@ -68,6 +66,7 @@ impl AiService {
                 "ai_provider",
                 "ai_remote_url",
                 "ai_batch_size",
+                "ai_cpu_threads",
                 "ai_enabled",
             ];
             if !change
@@ -120,11 +119,12 @@ impl AiService {
     pub(crate) async fn bootstrap_owner_index(
         &self,
         owner: &str,
+        cache_id: &str,
         request: &NormalizedAiIndexRequest,
         provider_health: &AiProviderHealth,
         indexed_albums: &[AiIndexedAlbumSummary],
         indexed_photos: &mut [AiIndexedPhotoRecord],
-        embeddings: &[Option<Vec<f32>>],
+        embeddings: &std::collections::HashMap<String, Vec<f32>>,
         faces: &mut [AiFaceRecord],
         face_embeddings: &[Option<Vec<f32>>],
         people: &[PersonRecord],
@@ -132,8 +132,9 @@ impl AiService {
         photos_total: usize,
     ) -> Result<String, String> {
         let provider = self.provider().await;
-        self.store.write_generation_manifest(
+        let generation_id = self.store.write_generation_manifest(
             owner,
+            cache_id,
             request,
             provider.capabilities(),
             provider_health,
@@ -142,10 +143,19 @@ impl AiService {
             embeddings,
             faces,
             face_embeddings,
-            people,
-            assignments,
             photos_total,
-        )
+        )?;
+        Ok(generation_id)
+    }
+
+    pub(crate) async fn bootstrap_people_index(
+        &self,
+        owner: &str,
+        people: &[PersonRecord],
+        assignments: &[FaceAssignment],
+    ) -> Result<String, String> {
+        self.store
+            .write_people_generation(owner, people, assignments)
     }
 
     pub(crate) fn search_similar_in_records(

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::arcface::ArcFaceRuntime;
 use super::manifest::{ManifestError, ModelManifest, VerifiedModelManifest};
-use super::preprocess::align_face_112;
+use super::preprocess::align_face_112_rgb;
 use super::scrfd::ScrfdRuntime;
 use super::siglip2::Siglip2Runtime;
 use crate::backend::ai::faces::{DetectedFace, normalize_box_xywh, normalize_landmarks};
@@ -93,14 +93,23 @@ impl LocalModelRuntime {
     ) -> Result<Vec<DetectedFace>, String> {
         let detections = self.scrfd.detect(image)?;
         let (img_w, img_h) = image.dimensions();
+        let owned;
+        let rgb = match image {
+            DynamicImage::ImageRgb8(rgb) => rgb,
+            other => {
+                owned = other.to_rgb8();
+                &owned
+            }
+        };
+
+        // Align on CPU (112×112 sample). Uploading the full photo as f32 NCHW for
+        // GPU warp blows VRAM on large images; ArcFace only needs the tiny crop.
         let mut faces = Vec::with_capacity(detections.len());
         for det in detections {
-            // Alignment needs absolute pixel landmarks from SCRFD.
-            let crop = align_face_112(image, det.landmarks)?;
+            let crop = align_face_112_rgb(rgb, det.landmarks)?;
             let embedding = self.arcface.embed_crop(&crop)?;
             let area = det.box_xywh[2] * det.box_xywh[3];
             faces.push(DetectedFace {
-                // Persist / API contract: normalized [0,1] boxes (UI face crops).
                 box_xywh: normalize_box_xywh(det.box_xywh, img_w, img_h),
                 landmarks: normalize_landmarks(det.landmarks, img_w, img_h),
                 detection_score: det.score,

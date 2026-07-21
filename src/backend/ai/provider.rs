@@ -5,12 +5,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::backend::album::decoder::{
+    create_decoder, DecodeOptions, DecoderCreateOptions, ImageDecoder,
+};
 use super::embedding::{
     TEXT_HASH_REVISION, VISUAL_EMBED_REVISION, compute_text_hash_embedding,
-    compute_visual_embeddings_rgb_batch,
 };
-use super::faces::{DetectedFace, FACE_DETECTOR_REVISION, detect_and_embed_faces};
+use super::faces::{
+    DetectedFace, FACE_DETECTOR_REVISION, detect_and_embed_faces_from_image,
+};
+use super::models::backend::selected_ai_device;
 use super::models::runtime::LocalModelRuntime;
+
+#[path = "pipeline.rs"]
+mod pipeline;
+
+pub use pipeline::PipelineProgressTx;
+pub use pipeline::{PipelineProgressRx, progress_channel};
+use pipeline::{PipelineConfig, run_image_pipeline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProviderKind {
@@ -110,6 +122,26 @@ pub trait AiInferenceProvider: Send + Sync {
         &self,
         paths: &[PathBuf],
     ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String>;
+
+    async fn detect_and_embed_faces_progress(
+        &self,
+        paths: &[PathBuf],
+        progress: Option<PipelineProgressTx>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
+        let _ = (progress, cancel);
+        self.detect_and_embed_faces(paths).await
+    }
+
+    async fn embed_images_progress(
+        &self,
+        paths: &[PathBuf],
+        progress: Option<PipelineProgressTx>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
+        let _ = (progress, cancel);
+        self.embed_images(paths).await
+    }
 }
 
 enum LocalInferenceMode {
@@ -122,29 +154,50 @@ pub struct LocalBurnProvider {
     model_root: PathBuf,
     capabilities: AiCapabilities,
     revision: Option<String>,
-    batch_size: usize,
+    /// GPU infer batch size (`ai_batch_size`).
+    gpu_batch_size: usize,
+    /// Max concurrent CPU decode workers (`ai_cpu_threads`).
+    cpu_threads: usize,
+    decoder: Arc<dyn ImageDecoder>,
+    decode_apply_exif: bool,
     mode: LocalInferenceMode,
     fallback_interim: bool,
 }
 
 impl LocalBurnProvider {
     pub fn new(model_root: PathBuf, batch_size: usize) -> Self {
-        Self::with_options(model_root, batch_size, false)
+        Self::with_options(
+            model_root,
+            batch_size,
+            crate::backend::settings::SettingsManager::default_ai_cpu_threads(),
+            false,
+        )
     }
 
     pub fn with_interim_fallback(model_root: PathBuf, batch_size: usize) -> Self {
-        Self::with_options(model_root, batch_size, true)
+        Self::with_options(
+            model_root,
+            batch_size,
+            crate::backend::settings::SettingsManager::default_ai_cpu_threads(),
+            true,
+        )
     }
 
-    pub fn with_options(model_root: PathBuf, batch_size: usize, fallback_interim: bool) -> Self {
-        let batch_size = batch_size.clamp(1, 64);
+    pub fn with_options(
+        model_root: PathBuf,
+        batch_size: usize,
+        cpu_threads: usize,
+        fallback_interim: bool,
+    ) -> Self {
+        // `gpu_batch_size`: infer consumer batch; `cpu_threads`: decode worker pool.
+        let gpu_batch_size = batch_size.clamp(1, 64);
+        let cpu_threads = cpu_threads.max(1);
+        let decode_apply_exif = true;
         match LocalModelRuntime::try_load(&model_root) {
             Ok(runtime) => {
                 let image_dim = runtime.info.image_dim;
                 let face_dim = runtime.info.face_dim;
                 let revision = runtime.info.revision.clone();
-                // burn-onnx graphs are exported at batch=1; keep provider batch at 1.
-                let batch_size = 1;
                 Self {
                     model_root,
                     capabilities: AiCapabilities {
@@ -152,12 +205,18 @@ impl LocalBurnProvider {
                         text_search: true,
                         duplicates: true,
                         faces: true,
-                        max_batch_size: Some(batch_size),
+                        max_batch_size: Some(gpu_batch_size),
                         image_embedding_dimension: Some(image_dim),
                         face_embedding_dimension: Some(face_dim),
                     },
                     revision: Some(revision),
-                    batch_size,
+                    gpu_batch_size,
+                    cpu_threads,
+                    decoder: Arc::from(
+                        create_decoder(DecoderCreateOptions::auto())
+                            .expect("ai inference decoder"),
+                    ),
+                    decode_apply_exif,
                     mode: LocalInferenceMode::Real(runtime),
                     fallback_interim,
                 }
@@ -169,14 +228,19 @@ impl LocalBurnProvider {
                     text_search: true,
                     duplicates: true,
                     faces: true,
-                    max_batch_size: Some(batch_size),
+                    max_batch_size: Some(gpu_batch_size),
                     image_embedding_dimension: Some(super::embedding::INTERIM_EMBEDDING_DIM),
                     face_embedding_dimension: Some(super::embedding::INTERIM_EMBEDDING_DIM),
                 },
                 revision: Some(format!(
                     "{VISUAL_EMBED_REVISION}+{TEXT_HASH_REVISION}+{FACE_DETECTOR_REVISION}"
                 )),
-                batch_size,
+                gpu_batch_size,
+                cpu_threads,
+                decoder: Arc::from(
+                    create_decoder(DecoderCreateOptions::auto()).expect("auto decoder"),
+                ),
+                decode_apply_exif,
                 mode: LocalInferenceMode::Interim,
                 fallback_interim,
             },
@@ -188,12 +252,17 @@ impl LocalBurnProvider {
                     text_search: false,
                     duplicates: true,
                     faces: false,
-                    max_batch_size: Some(batch_size),
+                    max_batch_size: Some(gpu_batch_size),
                     image_embedding_dimension: None,
                     face_embedding_dimension: None,
                 },
                 revision: None,
-                batch_size,
+                gpu_batch_size,
+                cpu_threads,
+                decoder: Arc::from(
+                    create_decoder(DecoderCreateOptions::auto()).expect("auto decoder"),
+                ),
+                decode_apply_exif,
                 mode: LocalInferenceMode::Unavailable(error),
                 fallback_interim,
             },
@@ -215,6 +284,82 @@ impl LocalBurnProvider {
         }
     }
 
+    fn pipeline_config(&self) -> PipelineConfig {
+        PipelineConfig {
+            decode_parallelism: self.cpu_threads,
+            gpu_batch_size: self.gpu_batch_size,
+        }
+    }
+
+    async fn run_real_pipeline<R, F>(
+        &self,
+        paths: &[PathBuf],
+        infer_fn: F,
+        progress: Option<PipelineProgressTx>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<R>, String>
+    where
+        R: Send + 'static,
+        F: Fn(Result<image::DynamicImage, AiItemError>) -> R + Send + Sync + 'static,
+    {
+        run_image_pipeline(
+            paths,
+            self.pipeline_config(),
+            Arc::clone(&self.decoder),
+            self.decode_apply_exif,
+            infer_fn,
+            progress,
+            cancel,
+        )
+        .await
+    }
+
+    async fn run_interim_embed_pipeline(
+        &self,
+        paths: &[PathBuf],
+        progress: Option<PipelineProgressTx>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
+        self.run_real_pipeline(
+            paths,
+            |decoded| match decoded {
+                Ok(image) => compute_visual_embedding_from_prepared(&image.to_rgb8()).map_err(
+                    |message| AiItemError {
+                        code: "invalid_output".to_string(),
+                        message,
+                    },
+                ),
+                Err(error) => Err(error),
+            },
+            progress,
+            cancel,
+        )
+        .await
+    }
+
+    async fn run_interim_face_pipeline(
+        &self,
+        paths: &[PathBuf],
+        progress: Option<PipelineProgressTx>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
+        self.run_real_pipeline(
+            paths,
+            |decoded| match decoded {
+                Ok(image) => detect_and_embed_faces_from_image(&image).map_err(|message| {
+                    AiItemError {
+                        code: "provider_rejected".to_string(),
+                        message,
+                    }
+                }),
+                Err(error) => Err(error),
+            },
+            progress,
+            cancel,
+        )
+        .await
+    }
+
     fn unavailable_error(&self) -> AiItemError {
         let message = match &self.mode {
             LocalInferenceMode::Unavailable(reason) => reason.clone(),
@@ -226,208 +371,6 @@ impl LocalBurnProvider {
         }
     }
 
-    fn embed_images_blocking(
-        &self,
-        paths: &[PathBuf],
-    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        match &self.mode {
-            LocalInferenceMode::Unavailable(_) => Ok(paths
-                .iter()
-                .map(|_| Err(self.unavailable_error()))
-                .collect()),
-            LocalInferenceMode::Real(runtime) => {
-                let runtime = Arc::clone(runtime);
-                let mut results = Vec::with_capacity(paths.len());
-                for chunk in paths.chunks(self.batch_size.max(1)) {
-                    let mut opened = Vec::with_capacity(chunk.len());
-                    let mut open_errors: Vec<Option<AiItemError>> =
-                        Vec::with_capacity(chunk.len());
-                    for path in chunk {
-                        match image::open(path) {
-                            Ok(image) => {
-                                open_errors.push(None);
-                                opened.push(image);
-                            }
-                            Err(error) => {
-                                open_errors.push(Some(AiItemError {
-                                    code: "decode_failed".to_string(),
-                                    message: error.to_string(),
-                                }));
-                            }
-                        }
-                    }
-                    let batch_vectors = if opened.is_empty() {
-                        Vec::new()
-                    } else {
-                        match runtime.embed_images(&opened) {
-                            Ok(vectors) => vectors.into_iter().map(Ok).collect::<Vec<_>>(),
-                            Err(message) => opened
-                                .iter()
-                                .map(|_| {
-                                    Err(AiItemError {
-                                        code: "provider_rejected".to_string(),
-                                        message: message.clone(),
-                                    })
-                                })
-                                .collect(),
-                        }
-                    };
-                    let mut batch_iter = batch_vectors.into_iter();
-                    for open_error in open_errors {
-                        if let Some(error) = open_error {
-                            results.push(Err(error));
-                            continue;
-                        }
-                        results.push(batch_iter.next().unwrap_or_else(|| {
-                            Err(AiItemError {
-                                code: "provider_rejected".to_string(),
-                                message: "missing batch embedding".to_string(),
-                            })
-                        }));
-                    }
-                }
-                Ok(results)
-            }
-            LocalInferenceMode::Interim => self.embed_images_interim(paths),
-        }
-    }
-
-    fn embed_images_interim(
-        &self,
-        paths: &[PathBuf],
-    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        let mut results = Vec::with_capacity(paths.len());
-        for chunk in paths.chunks(self.batch_size.max(1)) {
-            let mut opened = Vec::with_capacity(chunk.len());
-            let mut open_errors: Vec<Option<AiItemError>> = Vec::with_capacity(chunk.len());
-            for path in chunk {
-                match image::open(path) {
-                    Ok(image) => {
-                        open_errors.push(None);
-                        opened.push(image.to_rgb8());
-                    }
-                    Err(error) => {
-                        open_errors.push(Some(AiItemError {
-                            code: "decode_failed".to_string(),
-                            message: error.to_string(),
-                        }));
-                    }
-                }
-            }
-
-            let mut batch_vectors = Vec::new();
-            if !opened.is_empty() {
-                let refs = opened.iter().collect::<Vec<_>>();
-                match compute_visual_embeddings_rgb_batch(&refs) {
-                    Ok(vectors) => batch_vectors = vectors,
-                    Err(_) => {
-                        for rgb in &opened {
-                            match compute_visual_embedding_from_prepared(rgb) {
-                                Ok(vector) => batch_vectors.push(vector),
-                                Err(_) => batch_vectors.push(Vec::new()),
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut batch_iter = batch_vectors.into_iter();
-            for open_error in open_errors {
-                if let Some(error) = open_error {
-                    results.push(Err(error));
-                    continue;
-                }
-                match batch_iter.next() {
-                    Some(vector) if !vector.is_empty() => results.push(Ok(vector)),
-                    Some(_) => results.push(Err(AiItemError {
-                        code: "invalid_output".to_string(),
-                        message: "empty embedding".to_string(),
-                    })),
-                    None => results.push(Err(AiItemError {
-                        code: "provider_rejected".to_string(),
-                        message: "missing batch embedding".to_string(),
-                    })),
-                }
-            }
-        }
-        Ok(results)
-    }
-
-    fn embed_texts_blocking(
-        &self,
-        texts: &[String],
-    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        match &self.mode {
-            LocalInferenceMode::Unavailable(_) => Ok(texts
-                .iter()
-                .map(|_| Err(self.unavailable_error()))
-                .collect()),
-            LocalInferenceMode::Real(runtime) => match runtime.embed_texts(texts) {
-                Ok(vectors) => Ok(vectors.into_iter().map(Ok).collect()),
-                Err(message) => Ok(texts
-                    .iter()
-                    .map(|_| {
-                        Err(AiItemError {
-                            code: "provider_rejected".to_string(),
-                            message: message.clone(),
-                        })
-                    })
-                    .collect()),
-            },
-            LocalInferenceMode::Interim => Ok(texts
-                .iter()
-                .map(|text| {
-                    compute_text_hash_embedding(text).map_err(|message| AiItemError {
-                        code: "invalid_output".to_string(),
-                        message,
-                    })
-                })
-                .collect()),
-        }
-    }
-
-    fn detect_faces_blocking(
-        &self,
-        paths: &[PathBuf],
-    ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
-        match &self.mode {
-            LocalInferenceMode::Unavailable(_) => Ok(paths
-                .iter()
-                .map(|_| Err(self.unavailable_error()))
-                .collect()),
-            LocalInferenceMode::Real(runtime) => {
-                use rayon::prelude::*;
-                let runtime = Arc::clone(runtime);
-                Ok(paths
-                    .par_iter()
-                    .map(|path| {
-                        let image = image::open(path).map_err(|error| AiItemError {
-                            code: "decode_failed".to_string(),
-                            message: error.to_string(),
-                        })?;
-                        runtime
-                            .detect_and_embed_faces(&image)
-                            .map_err(|message| AiItemError {
-                                code: "provider_rejected".to_string(),
-                                message,
-                            })
-                    })
-                    .collect())
-            }
-            LocalInferenceMode::Interim => {
-                use rayon::prelude::*;
-                Ok(paths
-                    .par_iter()
-                    .map(|path| {
-                        detect_and_embed_faces(path.as_path()).map_err(|message| AiItemError {
-                            code: "provider_rejected".to_string(),
-                            message,
-                        })
-                    })
-                    .collect())
-            }
-        }
-    }
 }
 
 fn compute_visual_embedding_from_prepared(rgb: &image::RgbImage) -> Result<Vec<f32>, String> {
@@ -480,103 +423,131 @@ impl AiInferenceProvider for LocalBurnProvider {
         &self,
         paths: &[PathBuf],
     ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        let paths = paths.to_vec();
-        let batch_size = self.batch_size;
-        let model_root = self.model_root.clone();
-        let fallback_interim = self.fallback_interim;
-        let mode_hint = match &self.mode {
-            LocalInferenceMode::Real(runtime) => LocalModeHint::Real(Arc::clone(runtime)),
-            LocalInferenceMode::Interim => LocalModeHint::Interim,
-            LocalInferenceMode::Unavailable(error) => LocalModeHint::Unavailable(error.clone()),
-        };
-        tokio::task::spawn_blocking(move || {
-            let provider = LocalBurnProvider {
-                model_root,
-                capabilities: AiCapabilities::default(),
-                revision: None,
-                batch_size,
-                mode: match mode_hint {
-                    LocalModeHint::Real(runtime) => LocalInferenceMode::Real(runtime),
-                    LocalModeHint::Interim => LocalInferenceMode::Interim,
-                    LocalModeHint::Unavailable(error) => LocalInferenceMode::Unavailable(error),
-                },
-                fallback_interim,
-            };
-            provider.embed_images_blocking(&paths)
-        })
-        .await
-        .map_err(|error| format!("embed_images join failed: {error}"))?
+        self.embed_images_progress(paths, None, None).await
+    }
+
+    async fn embed_images_progress(
+        &self,
+        paths: &[PathBuf],
+        progress: Option<PipelineProgressTx>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
+        match &self.mode {
+            LocalInferenceMode::Unavailable(_) => Ok(paths
+                .iter()
+                .map(|_| Err(self.unavailable_error()))
+                .collect()),
+            LocalInferenceMode::Interim => {
+                self.run_interim_embed_pipeline(paths, progress, cancel)
+                    .await
+            }
+            LocalInferenceMode::Real(runtime) => {
+                let runtime = Arc::clone(runtime);
+                self.run_real_pipeline(
+                    paths,
+                    move |decoded| match decoded {
+                        Ok(image) => runtime
+                            .embed_images(std::slice::from_ref(&image))
+                            .and_then(|mut vectors| {
+                                vectors.pop().ok_or_else(|| {
+                                    "missing embedding for decoded image".to_string()
+                                })
+                            })
+                            .map_err(|message| AiItemError {
+                                code: "provider_rejected".to_string(),
+                                message,
+                            }),
+                        Err(error) => Err(error),
+                    },
+                    progress,
+                    cancel,
+                )
+                .await
+            }
+        }
     }
 
     async fn embed_texts(
         &self,
         texts: &[String],
     ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        let texts = texts.to_vec();
-        let batch_size = self.batch_size;
-        let model_root = self.model_root.clone();
-        let fallback_interim = self.fallback_interim;
-        let mode_hint = match &self.mode {
-            LocalInferenceMode::Real(runtime) => LocalModeHint::Real(Arc::clone(runtime)),
-            LocalInferenceMode::Interim => LocalModeHint::Interim,
-            LocalInferenceMode::Unavailable(error) => LocalModeHint::Unavailable(error.clone()),
-        };
-        tokio::task::spawn_blocking(move || {
-            let provider = LocalBurnProvider {
-                model_root,
-                capabilities: AiCapabilities::default(),
-                revision: None,
-                batch_size,
-                mode: match mode_hint {
-                    LocalModeHint::Real(runtime) => LocalInferenceMode::Real(runtime),
-                    LocalModeHint::Interim => LocalInferenceMode::Interim,
-                    LocalModeHint::Unavailable(error) => LocalInferenceMode::Unavailable(error),
-                },
-                fallback_interim,
-            };
-            provider.embed_texts_blocking(&texts)
-        })
-        .await
-        .map_err(|error| format!("embed_texts join failed: {error}"))?
+        match &self.mode {
+            LocalInferenceMode::Unavailable(_) => Ok(texts
+                .iter()
+                .map(|_| Err(self.unavailable_error()))
+                .collect()),
+            LocalInferenceMode::Interim => Ok(texts
+                .iter()
+                .map(|text| {
+                    compute_text_hash_embedding(text).map_err(|message| AiItemError {
+                        code: "invalid_output".to_string(),
+                        message,
+                    })
+                })
+                .collect()),
+            LocalInferenceMode::Real(runtime) => {
+                let runtime = Arc::clone(runtime);
+                let texts = texts.to_vec();
+                tokio::task::spawn_blocking(move || match runtime.embed_texts(&texts) {
+                    Ok(vectors) => Ok(vectors.into_iter().map(Ok).collect()),
+                    Err(message) => Ok(texts
+                        .iter()
+                        .map(|_| {
+                            Err(AiItemError {
+                                code: "provider_rejected".to_string(),
+                                message: message.clone(),
+                            })
+                        })
+                        .collect()),
+                })
+                .await
+                .map_err(|error| format!("embed_texts join failed: {error}"))?
+            }
+        }
     }
 
     async fn detect_and_embed_faces(
         &self,
         paths: &[PathBuf],
     ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
-        let paths = paths.to_vec();
-        let batch_size = self.batch_size;
-        let model_root = self.model_root.clone();
-        let fallback_interim = self.fallback_interim;
-        let mode_hint = match &self.mode {
-            LocalInferenceMode::Real(runtime) => LocalModeHint::Real(Arc::clone(runtime)),
-            LocalInferenceMode::Interim => LocalModeHint::Interim,
-            LocalInferenceMode::Unavailable(error) => LocalModeHint::Unavailable(error.clone()),
-        };
-        tokio::task::spawn_blocking(move || {
-            let provider = LocalBurnProvider {
-                model_root,
-                capabilities: AiCapabilities::default(),
-                revision: None,
-                batch_size,
-                mode: match mode_hint {
-                    LocalModeHint::Real(runtime) => LocalInferenceMode::Real(runtime),
-                    LocalModeHint::Interim => LocalInferenceMode::Interim,
-                    LocalModeHint::Unavailable(error) => LocalInferenceMode::Unavailable(error),
-                },
-                fallback_interim,
-            };
-            provider.detect_faces_blocking(&paths)
-        })
-        .await
-        .map_err(|error| format!("detect_and_embed_faces join failed: {error}"))?
+        self.detect_and_embed_faces_progress(paths, None, None).await
     }
-}
 
-enum LocalModeHint {
-    Real(Arc<LocalModelRuntime>),
-    Interim,
-    Unavailable(String),
+    async fn detect_and_embed_faces_progress(
+        &self,
+        paths: &[PathBuf],
+        progress: Option<PipelineProgressTx>,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
+        match &self.mode {
+            LocalInferenceMode::Unavailable(_) => Ok(paths
+                .iter()
+                .map(|_| Err(self.unavailable_error()))
+                .collect()),
+            LocalInferenceMode::Interim => {
+                self.run_interim_face_pipeline(paths, progress, cancel)
+                    .await
+            }
+            LocalInferenceMode::Real(runtime) => {
+                let runtime = Arc::clone(runtime);
+                self.run_real_pipeline(
+                    paths,
+                    move |decoded| match decoded {
+                        Ok(image) => runtime.detect_and_embed_faces(&image).map_err(|message| {
+                            AiItemError {
+                                code: "provider_rejected".to_string(),
+                                message,
+                            }
+                        }),
+                        Err(error) => Err(error),
+                    },
+                    progress,
+                    cancel,
+                )
+                .await
+            }
+        }
+    }
 }
 
 
@@ -949,7 +920,8 @@ pub async fn build_provider_from_settings(
         .get("ai_batch_size")
         .and_then(|value| value.as_u64())
         .map(|value| value as usize)
-        .unwrap_or(4);
+        .unwrap_or(64);
+    let cpu_threads = crate::backend::settings::SettingsManager::ai_cpu_threads_from(settings);
     match AiProviderKind::from_settings(settings) {
         AiProviderKind::Local => {
             let fallback_interim = settings
@@ -959,6 +931,7 @@ pub async fn build_provider_from_settings(
             Arc::new(LocalBurnProvider::with_options(
                 models_root,
                 batch_size,
+                cpu_threads,
                 fallback_interim,
             ))
         }

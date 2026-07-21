@@ -163,7 +163,28 @@ impl SettingsManager {
             .get("ai_batch_size")
             .and_then(|v| v.as_u64())
             .map(|n| (n as usize).clamp(1, 256))
-            .unwrap_or(32)
+            .unwrap_or(64)
+    }
+
+    /// Default AI CPU worker threads: available logical cores minus one (at least 1).
+    pub fn default_ai_cpu_threads() -> usize {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .saturating_sub(1)
+            .max(1)
+    }
+
+    pub async fn ai_cpu_threads(&self) -> usize {
+        Self::ai_cpu_threads_from(&*self.settings.lock().await)
+    }
+
+    pub fn ai_cpu_threads_from(settings: &Value) -> usize {
+        settings
+            .get("ai_cpu_threads")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).clamp(1, 64))
+            .unwrap_or_else(Self::default_ai_cpu_threads)
     }
 
     pub async fn ai_similarity_threshold(&self) -> f32 {
@@ -260,6 +281,11 @@ impl SettingsManager {
         if let Some(value) = obj.get_mut("ai_batch_size") {
             if let Some(n) = value.as_u64() {
                 *value = json!((n as usize).clamp(1, 256));
+            }
+        }
+        if let Some(value) = obj.get_mut("ai_cpu_threads") {
+            if let Some(n) = value.as_u64() {
+                *value = json!((n as usize).clamp(1, 64));
             }
         }
         if let Some(value) = obj.get_mut("ai_similarity_threshold") {

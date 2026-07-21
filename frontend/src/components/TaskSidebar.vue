@@ -18,7 +18,7 @@ defineProps({
   },
 });
 
-defineEmits(["clear-finished", "cancel-task"]);
+defineEmits(["clear-finished", "cancel-task", "pause-task", "resume-task"]);
 </script>
 
 <template>
@@ -59,7 +59,17 @@ defineEmits(["clear-finished", "cancel-task"]);
           <strong class="min-w-0 truncate text-sm text-stone-900" :title="task.name">{{ task.name }}</strong>
           <div class="flex shrink-0 items-center gap-2">
             <button
-              v-if="task.cancellable && (task.status === 0 || task.status === 1)"
+              v-if="task.pausable && task.status === 1"
+              class="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-medium text-amber-800 transition hover:bg-amber-200"
+              @click="$emit('pause-task', task.id)"
+            >{{ t("tasks.pause") }}</button>
+            <button
+              v-if="task.pausable && task.status === 2"
+              class="rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-medium text-emerald-800 transition hover:bg-emerald-200"
+              @click="$emit('resume-task', task.id)"
+            >{{ t("tasks.resume") }}</button>
+            <button
+              v-if="task.cancellable && (task.status === 0 || task.status === 1 || task.status === 2)"
               class="rounded-full bg-rose-100 px-2.5 py-1 text-[11px] font-medium text-rose-700 transition hover:bg-rose-200"
               @click="$emit('cancel-task', task.id)"
             >{{ t("tasks.cancel") }}</button>
@@ -69,7 +79,10 @@ defineEmits(["clear-finished", "cancel-task"]);
           </div>
         </div>
 
-  <p class="truncate text-sm text-stone-500" :title="task.current_task">{{ task.current_task || t("tasks.waitingForUpdate") }}</p>
+        <div class="flex min-w-0 items-center justify-between gap-3">
+          <p class="min-w-0 truncate text-sm text-stone-500" :title="task.current_task">{{ task.current_task || t("tasks.waitingForUpdate") }}</p>
+          <span class="shrink-0 text-sm font-medium tabular-nums text-stone-600">{{ progressPercent(task) }}%</span>
+        </div>
 
         <div class="mt-3 h-2.5 overflow-hidden rounded-full bg-stone-200">
           <div

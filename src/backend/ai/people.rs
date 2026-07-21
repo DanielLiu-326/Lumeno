@@ -169,6 +169,7 @@ fn normalize_person_name(name: &str) -> Result<String, String> {
 
 pub fn update_person(
     people: &mut [PersonRecord],
+    assignments: &mut [FaceAssignment],
     person_id: &str,
     name: Option<&str>,
     hidden: Option<bool>,
@@ -179,6 +180,12 @@ pub fn update_person(
         .ok_or_else(|| format!("person {person_id} not found"))?;
     if let Some(name) = name {
         person.name = normalize_person_name(name)?;
+        // Naming is a manual pin: preserve these faces across reclustering.
+        for assignment in assignments.iter_mut() {
+            if assignment.person_id == person_id {
+                assignment.source = AssignmentSource::ManualName;
+            }
+        }
     }
     if let Some(hidden) = hidden {
         person.hidden = hidden;
@@ -383,5 +390,48 @@ mod tests {
             assignment.face_id == "a" && assignment.person_id == "p1"
         }));
         assert!(assignments.iter().any(|assignment| assignment.face_id == "b"));
+    }
+
+    #[test]
+    fn rename_pins_assignments_as_manual_name() {
+        let mut people = vec![PersonRecord {
+            id: "p1".to_string(),
+            name: String::new(),
+            hidden: false,
+            cover_face_id: Some("a".to_string()),
+        }];
+        let mut assignments = vec![
+            FaceAssignment {
+                face_id: "a".to_string(),
+                person_id: "p1".to_string(),
+                source: AssignmentSource::Automatic,
+            },
+            FaceAssignment {
+                face_id: "b".to_string(),
+                person_id: "p1".to_string(),
+                source: AssignmentSource::Automatic,
+            },
+        ];
+        update_person(&mut people, &mut assignments, "p1", Some("Alice"), None).unwrap();
+        assert_eq!(people[0].name, "Alice");
+        assert!(assignments.iter().all(|a| a.source == AssignmentSource::ManualName));
+
+        let faces = vec![
+            ClusterFace {
+                face_id: "a".to_string(),
+                embedding: unit_vector(1.0, 0.0),
+            },
+            ClusterFace {
+                face_id: "b".to_string(),
+                embedding: unit_vector(0.99, 0.01),
+            },
+        ];
+        let (people, assignments) =
+            rebuild_people_assignments(&faces, people, assignments, 0.2, 2);
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].id, "p1");
+        assert_eq!(people[0].name, "Alice");
+        assert_eq!(assignments.len(), 2);
+        assert!(assignments.iter().all(|a| a.person_id == "p1"));
     }
 }

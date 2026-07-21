@@ -26,6 +26,10 @@ sha2 = "0.11.0"
 hmac = "0.13.0"
 multer = "3.1.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "ico", "webp"] }
+libheif-rs = { version = "2.7", default-features = false, features = ["v1_17", "image"] }
+# Vendored rsraw-sys ships LibRaw 0.22.2 (S5 MkII / GH6 RW2, etc.).
+# crates.io rsraw-sys still vendors 0.21.3 which demosaics those as noise.
+rsraw = "0.1.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 kamadak-exif = "0.6"
 rust-i18n = "3.1.2"
@@ -33,6 +37,8 @@ dav-server = { version = "0.11.0", features = ["localfs"] }
 quick-xml = "0.37"
 burn = { version = "0.21.0", default-features = false, features = ["std", "flex", "store", "dispatch", "vulkan"] }
 burn-store = "0.21"
+# Direct dep so we can build a Custom CubeCL memory pool (tight VRAM).
+cubecl-runtime = "0.10"
 half = "2"
 rayon = "1.12.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
@@ -47,3 +53,5 @@ cuda = ["burn/cuda"]
 burn-onnx = "0.21"
 sha2 = "0.11.0"
 
+[patch.crates-io]
+rsraw-sys = { path = "vendor/rsraw-sys" }

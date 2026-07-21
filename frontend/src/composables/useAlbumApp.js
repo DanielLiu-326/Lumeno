@@ -119,6 +119,10 @@ export function useAlbumApp() {
     // ──────────────────────────────────────────────────────────────────────
 
     let taskTimer = null;
+    const taskListExpanded = ref(false);
+
+    const TASK_POLL_MS_EXPANDED = 500;
+    const TASK_POLL_MS_COLLAPSED = 2000;
 
     const breadcrumbParts = computed(() => {
         if (!currentPath.value) {
@@ -751,6 +755,30 @@ export function useAlbumApp() {
         }
     }
 
+    async function pauseTask(taskId) {
+        try {
+            await apiFetch(`/api/pause_task/${taskId}`, {
+                method: "POST",
+            });
+            setMessage(t("msg.taskPaused"));
+            await refreshTasks();
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
+    async function resumeTask(taskId) {
+        try {
+            await apiFetch(`/api/resume_task/${taskId}`, {
+                method: "POST",
+            });
+            setMessage(t("msg.taskResumed"));
+            await refreshTasks();
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
     async function refreshAlbums() {
         if (!loggedIn.value) {
             return;
@@ -802,13 +830,20 @@ export function useAlbumApp() {
             if (name !== undefined) body.name = name;
             if (cover !== undefined) body.cover = cover;
             if (description !== undefined) body.description = description;
-            await apiFetch("/api/albums/update", {
+            const payload = await apiFetch("/api/albums/update", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
             });
+            const nextDir = payload?.data?.dir_name;
+            if (nextDir && currentAlbum.value === dirName && nextDir !== dirName) {
+                currentAlbum.value = nextDir;
+            }
             setMessage(t("msg.albumUpdated"));
             await refreshAlbums();
+            if (nextDir && currentAlbum.value === nextDir) {
+                await refreshAlbumPhotos();
+            }
             return true;
         } catch (error) {
             setMessage(error.message, "error");
@@ -1687,15 +1722,23 @@ export function useAlbumApp() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(updates),
             });
-            const updated = payload.data?.person || payload.data || updates;
+            // Prefer explicit request fields; API may also return the saved person.
+            // Do not spread payload.data wholesale — it contains person_id/updated metadata.
+            const fromApi = payload.data?.person && typeof payload.data.person === "object"
+                ? payload.data.person
+                : {};
+            const patched = {
+                ...(updates && typeof updates === "object" ? updates : {}),
+                ...fromApi,
+            };
             people.value = people.value.map((person) =>
-                person.id === personId ? { ...person, ...updated } : person,
+                person.id === personId ? { ...person, ...patched } : person,
             );
             albumPeople.value = albumPeople.value.map((person) =>
-                person.id === personId ? { ...person, ...updated } : person,
+                person.id === personId ? { ...person, ...patched } : person,
             );
             if (selectedPerson.value?.id === personId) {
-                selectedPerson.value = { ...selectedPerson.value, ...updated };
+                selectedPerson.value = { ...selectedPerson.value, ...patched };
             }
             setMessage(payload.message || t("msg.settingsSaved"));
             await refreshPeopleForAlbum();
@@ -1924,9 +1967,26 @@ export function useAlbumApp() {
 
     function ensureTaskPolling() {
         stopTaskPolling();
+        const intervalMs = taskListExpanded.value
+            ? TASK_POLL_MS_EXPANDED
+            : TASK_POLL_MS_COLLAPSED;
         taskTimer = window.setInterval(() => {
             refreshTasks();
-        }, 2500);
+        }, intervalMs);
+    }
+
+    function setTaskListExpanded(open) {
+        const next = Boolean(open);
+        if (taskListExpanded.value === next) {
+            return;
+        }
+        taskListExpanded.value = next;
+        if (taskTimer !== null) {
+            ensureTaskPolling();
+            if (next) {
+                refreshTasks();
+            }
+        }
     }
 
     function stopTaskPolling() {
@@ -1969,6 +2029,8 @@ export function useAlbumApp() {
         busy,
         cancelClipboard,
         cancelTask,
+        pauseTask,
+        resumeTask,
         canGoUp,
         clearFinishedTasks,
         clearSelection,
@@ -2062,6 +2124,7 @@ export function useAlbumApp() {
         statusLabel,
         statusTone,
         tasks,
+        setTaskListExpanded,
         toggleSelectAll,
         toggleSelection,
         unshareAlbum,

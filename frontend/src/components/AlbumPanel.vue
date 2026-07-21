@@ -779,23 +779,26 @@ function isRawFile(name) {
 const detailImageSrc = computed(() => {
   if (!detailPhoto.value) return "";
   const isRaw = isRawFile(detailPhoto.value.name);
-  if (detailFullscreen.value) {
-    return isRaw
-      ? getDarktablePreviewUrl(detailPhoto.value.path, 0)
-      : getOriginalUrl(detailPhoto.value.path);
-  }
-  if (detailImageFallback.value) return getThumbnail(detailPhoto.value.path, 800);
+
+  // Explicit darktable toggle (requires XMP): always use darktable_preview.
   if (darktablePreview.value && hasXmpSidecar.value) {
-    // Darktable preview with XMP: full res when expanded, 1600 otherwise
-    return getDarktablePreviewUrl(detailPhoto.value.path, detailExpanded.value ? 0 : 1600);
+    const size = detailFullscreen.value || detailExpanded.value ? 0 : 1600;
+    return getDarktablePreviewUrl(detailPhoto.value.path, size);
   }
-  if (detailExpanded.value) {
+
+  if (detailImageFallback.value) {
+    return getThumbnail(detailPhoto.value.path, 800);
+  }
+
+  // Non-darktable: JPEG/etc can use original; RAW goes through /api/thumbnail (LibRaw/lumeno).
+  // size=0 requests full-resolution decode (same as darktable_preview).
+  if (detailFullscreen.value || detailExpanded.value) {
     if (isRaw) {
-      // RAW full-res conversion via darktable (no XMP, size=0 = original resolution)
-      return getDarktablePreviewUrl(detailPhoto.value.path, 0);
+      return getThumbnail(detailPhoto.value.path, 0);
     }
     return getOriginalUrl(detailPhoto.value.path);
   }
+
   return getThumbnail(detailPhoto.value.path, 800);
 });
 

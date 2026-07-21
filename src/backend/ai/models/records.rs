@@ -46,6 +46,9 @@ pub(crate) struct AiIndexedAlbumSummary {
     pub(crate) owner: String,
     pub(crate) album: String,
     pub(crate) source_key: String,
+    /// `AlbumMeta.cache` — AI embedding subdirectory key (stable across album renames).
+    #[serde(default)]
+    pub(crate) cache_id: String,
     pub(crate) photo_count: usize,
 }
 
@@ -96,6 +99,9 @@ pub(crate) struct AiIndexedPhotoRecord {
     pub(crate) owner: String,
     pub(crate) album: String,
     pub(crate) source_key: String,
+    /// `AlbumMeta.cache` — AI embedding subdirectory key (stable across album renames).
+    #[serde(default)]
+    pub(crate) cache_id: String,
     pub(crate) path: String,
     pub(crate) stable_key: String,
     pub(crate) stable_id: String,
@@ -172,5 +178,21 @@ pub(crate) fn default_ai_scan_state() -> String {
 
 pub(crate) fn default_ai_pending_state() -> String {
     "pending".to_string()
+}
+
+impl AiIndexedPhotoRecord {
+    /// Path relative to the album root (forward slashes).
+    pub(crate) fn album_relative_path(&self) -> String {
+        let prefix = format!("albums/{}/", self.album);
+        self.path
+            .strip_prefix(&prefix)
+            .unwrap_or(self.path.as_str())
+            .replace('\\', "/")
+    }
+
+    /// Stable embedding map key: `{cache_id}/{album_relative_path}`.
+    pub(crate) fn embedding_key(&self) -> String {
+        format!("{}/{}", self.cache_id, self.album_relative_path())
+    }
 }
 

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use super::backend::{AiBackend, AiDevice, selected_ai_device};
 use super::manifest::ModelArtifactSpec;
-use super::preprocess::prepare_scrfd_image;
+use super::preprocess::prepare_scrfd_tensor;
 
 pub const SCRFD_INPUT_SIZE: u32 = 640;
 pub const SCRFD_REVISION: &str = "scrfd-buffalo";
@@ -63,10 +63,8 @@ impl ScrfdRuntime {
         }
         #[cfg(ai_onnx_generated)]
         {
-            let (chw, det_scale, _orig_w, _orig_h) = prepare_scrfd_image(image, SCRFD_INPUT_SIZE);
-            let size = SCRFD_INPUT_SIZE as usize;
-            let tensor = Tensor::<AiBackend, 1>::from_floats(chw.as_slice(), &self.device)
-                .reshape([1, 3, size, size]);
+            let (tensor, det_scale, _orig_w, _orig_h) =
+                prepare_scrfd_tensor(image, SCRFD_INPUT_SIZE, &self.device);
             let outputs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.model.forward(tensor)
             }))
@@ -103,44 +101,50 @@ fn decode_scrfd_outputs(
     nms_threshold: f32,
 ) -> Result<Vec<ScrfdDetection>, String> {
     // burn-onnx / ONNX order: score×3, bbox×3, kps×3 for strides 8,16,32.
-    let score_tensors = [outputs.0, outputs.1, outputs.2];
-    let bbox_tensors = [outputs.3, outputs.4, outputs.5];
-    let kps_tensors = [outputs.6, outputs.7, outputs.8];
+    // Take ownership (no .clone) so GPU buffers free as soon as downloaded.
+    let stride_outputs = [
+        (FEAT_STRIDES[0], outputs.0, outputs.3, outputs.6),
+        (FEAT_STRIDES[1], outputs.1, outputs.4, outputs.7),
+        (FEAT_STRIDES[2], outputs.2, outputs.5, outputs.8),
+    ];
 
     let mut detections = Vec::new();
-    for (idx, &stride) in FEAT_STRIDES.iter().enumerate() {
-        let scores = tensor_to_vec2(score_tensors[idx].clone())?;
-        let mut bboxes = tensor_to_vec2(bbox_tensors[idx].clone())?;
-        let mut kps = tensor_to_vec2(kps_tensors[idx].clone())?;
-        for row in &mut bboxes {
-            for v in row.iter_mut() {
-                *v *= stride as f32;
-            }
+    for (stride, score_t, bbox_t, kps_t) in stride_outputs {
+        let (score_rows, score_cols, scores) = tensor_to_flat(score_t)?;
+        let (bbox_rows, bbox_cols, mut bboxes) = tensor_to_flat(bbox_t)?;
+        let (kps_rows, kps_cols, mut kps) = tensor_to_flat(kps_t)?;
+        if score_rows != bbox_rows || score_rows != kps_rows {
+            return Err(format!(
+                "scrfd row mismatch stride={stride}: scores={score_rows} bbox={bbox_rows} kps={kps_rows}"
+            ));
         }
-        for row in &mut kps {
-            for v in row.iter_mut() {
-                *v *= stride as f32;
-            }
+        for v in &mut bboxes {
+            *v *= stride as f32;
+        }
+        for v in &mut kps {
+            *v *= stride as f32;
         }
 
         let height = input_h / stride;
         let width = input_w / stride;
         let centers = anchor_centers(height, width, stride, NUM_ANCHORS);
-        if scores.len() != centers.len() {
+        if score_rows != centers.len() {
             return Err(format!(
                 "scrfd score/center mismatch stride={stride}: {} vs {}",
-                scores.len(),
+                score_rows,
                 centers.len()
             ));
         }
 
-        for i in 0..scores.len() {
-            let score = scores[i][0];
+        for i in 0..score_rows {
+            let score = scores[i * score_cols];
             if score < score_threshold {
                 continue;
             }
-            let (x1, y1, x2, y2) = distance2bbox(centers[i], &bboxes[i]);
-            let landmarks = distance2kps(centers[i], &kps[i]);
+            let bbox = &bboxes[i * bbox_cols..(i + 1) * bbox_cols];
+            let kps_row = &kps[i * kps_cols..(i + 1) * kps_cols];
+            let (x1, y1, x2, y2) = distance2bbox(centers[i], bbox);
+            let landmarks = distance2kps(centers[i], kps_row);
             // Map from letterboxed network space back to original image.
             let x1 = x1 / det_scale;
             let y1 = y1 / det_scale;
@@ -174,18 +178,13 @@ fn decode_scrfd_outputs(
 }
 
 #[cfg(ai_onnx_generated)]
-fn tensor_to_vec2(tensor: Tensor<AiBackend, 2>) -> Result<Vec<Vec<f32>>, String> {
+fn tensor_to_flat(tensor: Tensor<AiBackend, 2>) -> Result<(usize, usize, Vec<f32>), String> {
     let [rows, cols] = tensor.dims();
     let data = tensor
         .into_data()
         .to_vec::<f32>()
         .map_err(|error| format!("scrfd output: {error:?}"))?;
-    let mut out = Vec::with_capacity(rows);
-    for r in 0..rows {
-        let start = r * cols;
-        out.push(data[start..start + cols].to_vec());
-    }
-    Ok(out)
+    Ok((rows, cols, data))
 }
 
 fn anchor_centers(height: usize, width: usize, stride: usize, num_anchors: usize) -> Vec<[f32; 2]> {

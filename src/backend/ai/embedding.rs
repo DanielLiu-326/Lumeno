@@ -5,6 +5,10 @@ use image::imageops::FilterType;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::backend::album::decoder::{
+    create_decoder, DecodeOptions, DecoderCreateOptions,
+};
+
 pub const IMAGE_EMBEDDING_DIM: usize = 128;
 pub const VISUAL_EMBED_REVISION: &str = "visual-hash-v2-burn";
 pub const TEXT_HASH_REVISION: &str = "text-hash-v1";
@@ -316,7 +320,11 @@ pub fn compute_visual_embedding_rgb(rgb: &image::RgbImage) -> Result<Vec<f32>, S
 }
 
 pub fn compute_visual_embedding(path: &Path) -> Result<Vec<f32>, String> {
-    let image = image::open(path)
+    let decoder = create_decoder(DecoderCreateOptions::auto())
+        .map_err(|error| format!("create decoder failed: {error}"))?;
+    let bytes = std::fs::read(path).map_err(|error| format!("read photo failed: {error}"))?;
+    let image = decoder
+        .decode_bytes(&bytes, DecodeOptions::new())
         .map_err(|error| format!("decode photo for visual embedding failed: {error}"))?;
     compute_visual_embedding_rgb(&image.to_rgb8())
 }

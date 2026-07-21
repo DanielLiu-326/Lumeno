@@ -28,11 +28,12 @@ use crate::backend::common::{
     into_host_path_safely, move_file_or_dir,
 };
 use crate::backend::i18n::{RequestLocale, tr, trf};
-use crate::backend::tasks::{Task, TaskBase, TaskStatus};
+use crate::backend::tasks::{Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::media::{
     collect_album_images, ensure_thumbnail_cached, exif_cache_key, find_xmp_sidecar, is_image_path,
-    is_raw_path, DarktableClient,
+    is_raw_path,
 };
 use super::types::*;
 
@@ -77,12 +78,57 @@ pub(crate) fn cache_exif_root(data_path: &FsPath) -> PathBuf {
     data_path.join("cache").join("exif")
 }
 
-pub(crate) fn album_index_path(data_path: &FsPath, username: &str, album_name: &str) -> PathBuf {
+/// Index file path keyed by stable `AlbumMeta.cache` (not directory name).
+pub(crate) fn album_index_path(data_path: &FsPath, username: &str, cache_id: &str) -> PathBuf {
     data_path
         .join("cache")
         .join("index")
         .join(username)
-        .join(format!("{album_name}.json"))
+        .join(format!("{cache_id}.json"))
+}
+
+fn album_dir_name(album_dir: &FsPath) -> String {
+    album_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+pub(crate) fn is_safe_album_cache_id(cache_id: &str) -> bool {
+    !cache_id.is_empty()
+        && !cache_id.starts_with('.')
+        && !cache_id.contains(['/', '\\', '\0'])
+}
+
+/// Ensure official `album_meta.json` has a stable cache pointer.
+/// Legacy albums without `cache` keep `dir_name` so existing index files still match.
+pub(crate) async fn ensure_album_cache_id(album_dir: &FsPath) -> Result<String, AppError> {
+    let mut meta = read_album_meta(album_dir).await;
+    if is_safe_album_cache_id(&meta.cache) {
+        return Ok(meta.cache);
+    }
+    let dir_name = album_dir_name(album_dir);
+    meta.cache = if is_safe_album_cache_id(&dir_name) {
+        dir_name
+    } else {
+        Uuid::new_v4().to_string()
+    };
+    write_album_meta(album_dir, &meta).await?;
+    Ok(meta.cache)
+}
+
+pub(crate) async fn album_index_path_for_dir(
+    data_path: &FsPath,
+    username: &str,
+    album_dir: &FsPath,
+) -> Result<PathBuf, AppError> {
+    let cache_id = ensure_album_cache_id(album_dir).await?;
+    Ok(album_index_path(data_path, username, &cache_id))
+}
+
+pub(crate) fn new_album_cache_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 pub(crate) fn xmp_sidecar_path(photo: &FsPath) -> PathBuf {
@@ -431,10 +477,34 @@ pub(crate) fn sanitize_album_name(name: &str) -> Option<String> {
         || trimmed.contains('\\')
         || trimmed.contains('\0')
         || trimmed.starts_with('.')
+        || trimmed.starts_with("__")
     {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+/// System / staging dirs under `albums/` (e.g. `__uploading`) stay hidden from UI and stats.
+pub(crate) fn is_user_visible_album_dir(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with("__")
+}
+
+pub(crate) fn album_display_name(meta: &AlbumMeta, dir_name: &str) -> String {
+    let trimmed = meta.name.trim();
+    if trimmed.is_empty() {
+        dir_name.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Album key used by list / dashboard / frontend selection (`dir` or `owner/dir`).
+pub(crate) fn album_access_key(viewer: &str, owner: &str, dir_name: &str) -> String {
+    if owner == viewer {
+        dir_name.to_string()
+    } else {
+        format!("{owner}/{dir_name}")
+    }
 }
 
 pub(crate) fn normalize_tags(tags: &[String]) -> Vec<String> {
@@ -717,6 +787,22 @@ pub(crate) async fn ensure_exif_cached(
     Ok(entry)
 }
 
+/// Read-only EXIF cache lookup (no decode). Used by AI scan to avoid opening originals.
+pub(crate) fn read_exif_cache_if_present(
+    data_path: &FsPath,
+    source: &FsPath,
+    metadata: &std::fs::Metadata,
+) -> Option<ExifCacheEntry> {
+    let cache_key = exif_cache_key(source, metadata);
+    let cache_path = cache_exif_root(data_path).join(format!("{cache_key}.json"));
+    let cached_raw = std::fs::read_to_string(cache_path).ok()?;
+    let cached = serde_json::from_str::<ExifCacheEntry>(&cached_raw).ok()?;
+    if cached.width == 0 && cached.height == 0 && cached.date.is_empty() {
+        return None;
+    }
+    Some(cached)
+}
+
 pub(crate) async fn read_image_software_meta(image_path: &FsPath) -> ImageSoftwareMeta {
     let xmp_path = find_xmp_sidecar(image_path);
     match xmp_path {
@@ -835,15 +921,17 @@ pub(crate) async fn rebuild_album_index(
     username: &str,
     album_name: &str,
     task_base: Option<&TaskBase>,
-) -> Result<AlbumIndex, AppError> {
+    cancel: Option<&AtomicBool>,
+    paused: Option<&AtomicBool>,
+) -> Result<Option<AlbumIndex>, AppError> {
     use futures::StreamExt;
 
     let album_dir = albums_root(root_path).join(album_name);
     if !album_dir.exists() {
-        return Ok(AlbumIndex {
+        return Ok(Some(AlbumIndex {
             version: 2,
             entries: Vec::new(),
-        });
+        }));
     }
 
     let mut photos_paths = Vec::new();
@@ -857,6 +945,7 @@ pub(crate) async fn rebuild_album_index(
 
     let data_path_buf = data_path.to_path_buf();
     let root_path_buf = root_path.to_path_buf();
+    let cancelled = AtomicBool::new(false);
 
     // Process EXIF/metadata concurrently — up to 8 photos at a time.
     let mut entries: Vec<AlbumPhotoItem> = futures::stream::iter(photos_paths)
@@ -864,15 +953,41 @@ pub(crate) async fn rebuild_album_index(
             let data_path = data_path_buf.clone();
             let root_path = root_path_buf.clone();
             let task_base = task_base;
+            let cancel = cancel;
+            let paused = paused;
+            let cancelled = &cancelled;
             async move {
+                if let (Some(cancel), Some(paused)) = (cancel, paused)
+                    && wait_while_paused(cancel, paused).await
+                {
+                    cancelled.store(true, Ordering::Relaxed);
+                    return None;
+                }
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    cancelled.store(true, Ordering::Relaxed);
+                    return None;
+                }
+                // Legacy pause via TaskStatus when coop flags were not passed.
+                if cancel.is_none()
+                    && let Some(base) = task_base
+                {
+                    loop {
+                        let status = *base.status.lock().await;
+                        if status != TaskStatus::Paused {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
                 if let Some(base) = task_base {
-                    base.set_cur_task(
-                        photo
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                    )
+                    let done = base.processed_count.load(Ordering::Relaxed);
+                    let total = base.total_count.load(Ordering::Relaxed).max(1);
+                    base.set_cur_task(format_subtask(
+                        "indexing",
+                        &task_file_name(photo.as_path()),
+                        done + 1,
+                        total,
+                    ))
                     .await;
                 }
                 let Ok(meta) = tokio::fs::metadata(&photo).await else {
@@ -933,6 +1048,10 @@ pub(crate) async fn rebuild_album_index(
         .collect()
         .await;
 
+    if cancelled.load(Ordering::Relaxed) || cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Ok(None);
+    }
+
     entries.sort_by(|a, b| b.date.cmp(&a.date).then(a.name.cmp(&b.name)));
 
     let index = AlbumIndex {
@@ -940,7 +1059,7 @@ pub(crate) async fn rebuild_album_index(
         entries,
     };
 
-    let index_path = album_index_path(data_path, username, album_name);
+    let index_path = album_index_path_for_dir(data_path, username, album_dir.as_path()).await?;
     if let Some(parent) = index_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -952,7 +1071,7 @@ pub(crate) async fn rebuild_album_index(
         .await
         .map_err(|e| AppError::Unknown(format!("write index failed: {e}")))?;
 
-    Ok(index)
+    Ok(Some(index))
 }
 
 pub(crate) async fn import_album_files(
@@ -964,6 +1083,7 @@ pub(crate) async fn import_album_files(
     move_files: bool,
     conflict_action: crate::backend::files::ConflictAction,
     task_base: Option<&TaskBase>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<usize, AppError> {
     let album_base = albums_root(root_path).join(album_name);
     tokio::fs::create_dir_all(&album_base)
@@ -986,15 +1106,19 @@ pub(crate) async fn import_album_files(
     }
 
     let mut imported = 0usize;
+    let import_total = all_images.len().max(1);
     for image in all_images {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
         if let Some(base) = task_base {
-            base.set_cur_task(
-                image
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-            )
+            let done = base.processed_count.load(Ordering::Relaxed);
+            base.set_cur_task(format_subtask(
+                "importing",
+                &task_file_name(image.as_path()),
+                done + 1,
+                import_total,
+            ))
             .await;
         }
 
@@ -1077,11 +1201,17 @@ pub(crate) async fn import_album_files(
         }
     }
 
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Ok(imported);
+    }
+
     let _ = rebuild_album_index(
         cfg.data_path.as_path(),
         root_path,
         username,
         album_name,
+        None,
+        None,
         None,
     )
     .await;
@@ -1107,6 +1237,8 @@ pub(crate) struct RebuildIndexTask {
     owner: String,
     album_name: String,
     locale: String,
+    cancel: AtomicBool,
+    paused: AtomicBool,
 }
 
 impl RebuildIndexTask {
@@ -1128,6 +1260,8 @@ impl RebuildIndexTask {
             owner,
             album_name,
             locale,
+            cancel: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
         }
     }
 }
@@ -1142,6 +1276,33 @@ impl Task for RebuildIndexTask {
         Some(format!("rebuild-index:{}:{}", self.owner, self.album_name))
     }
 
+    fn cancellable(&self) -> bool {
+        true
+    }
+
+    fn pausable(&self) -> bool {
+        true
+    }
+
+    async fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+        self.base.set_status(TaskStatus::Paused).await;
+        self.base.set_cur_task("Paused".to_string()).await;
+    }
+
+    async fn resume(&self, _extra_info: serde_json::Value) {
+        self.paused.store(false, Ordering::Relaxed);
+        self.base.set_status(TaskStatus::Running).await;
+        self.base.set_cur_task("Resuming".to_string()).await;
+    }
+
+    async fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.paused.store(false, Ordering::Relaxed);
+        self.base.set_cur_task("Cancelled".to_string()).await;
+        self.base.set_status(TaskStatus::Cancelled).await;
+    }
+
     async fn execute(&self) {
         self.base.set_status(TaskStatus::Pending).await;
         match rebuild_album_index(
@@ -1150,10 +1311,17 @@ impl Task for RebuildIndexTask {
             &self.owner,
             &self.album_name,
             Some(&self.base),
+            Some(&self.cancel),
+            Some(&self.paused),
         )
         .await
         {
-            Ok(index) => {
+            Ok(Some(index)) => {
+                if self.cancel.load(Ordering::Relaxed) {
+                    self.base.set_cur_task("Cancelled".to_string()).await;
+                    self.base.set_status(TaskStatus::Cancelled).await;
+                    return;
+                }
                 self.base
                     .set_cur_task(format!("Finished, {} photos indexed", index.entries.len()))
                     .await;
@@ -1168,14 +1336,21 @@ impl Task for RebuildIndexTask {
                     .await;
                 }
             }
+            Ok(None) => {
+                self.base.set_cur_task("Cancelled".to_string()).await;
+                self.base.set_status(TaskStatus::Cancelled).await;
+            }
             Err(e) => {
-                self.base.set_error_msg(format!("{e}")).await;
-                self.base.set_status(TaskStatus::Failed).await;
+                if self.cancel.load(Ordering::Relaxed) {
+                    self.base.set_cur_task("Cancelled".to_string()).await;
+                    self.base.set_status(TaskStatus::Cancelled).await;
+                } else {
+                    self.base.set_error_msg(format!("{e}")).await;
+                    self.base.set_status(TaskStatus::Failed).await;
+                }
             }
         }
     }
-
-    async fn cancel(&self) {}
 }
 
 pub(crate) struct ImportAlbumTask {
@@ -1188,6 +1363,7 @@ pub(crate) struct ImportAlbumTask {
     move_files: bool,
     conflict_action: crate::backend::files::ConflictAction,
     locale: String,
+    cancel: AtomicBool,
 }
 
 impl ImportAlbumTask {
@@ -1212,6 +1388,7 @@ impl ImportAlbumTask {
             move_files,
             conflict_action,
             locale,
+            cancel: AtomicBool::new(false),
         }
     }
 }
@@ -1220,6 +1397,16 @@ impl ImportAlbumTask {
 impl Task for ImportAlbumTask {
     fn base(&self) -> &TaskBase {
         &self.base
+    }
+
+    fn cancellable(&self) -> bool {
+        true
+    }
+
+    async fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.base.set_cur_task("Cancelled".to_string()).await;
+        self.base.set_status(TaskStatus::Cancelled).await;
     }
 
     async fn execute(&self) {
@@ -1233,10 +1420,18 @@ impl Task for ImportAlbumTask {
             self.move_files,
             self.conflict_action,
             Some(&self.base),
+            Some(&self.cancel),
         )
         .await
         {
             Ok(imported) => {
+                if self.cancel.load(Ordering::Relaxed) {
+                    self.base
+                        .set_cur_task(format!("Cancelled after {imported} photos"))
+                        .await;
+                    self.base.set_status(TaskStatus::Cancelled).await;
+                    return;
+                }
                 self.base
                     .set_cur_task(format!("Finished, {imported} photos imported"))
                     .await;
@@ -1250,21 +1445,29 @@ impl Task for ImportAlbumTask {
                 .await;
             }
             Err(e) => {
-                self.base.set_error_msg(format!("{e}")).await;
-                self.base.set_status(TaskStatus::Failed).await;
+                if self.cancel.load(Ordering::Relaxed) {
+                    self.base.set_cur_task("Cancelled".to_string()).await;
+                    self.base.set_status(TaskStatus::Cancelled).await;
+                } else {
+                    self.base.set_error_msg(format!("{e}")).await;
+                    self.base.set_status(TaskStatus::Failed).await;
+                }
             }
         }
     }
-
-    async fn cancel(&self) {}
 }
 
 pub(crate) async fn load_existing_album_index(
     data_path: &FsPath,
+    root_path: &FsPath,
     username: &str,
     album_name: &str,
 ) -> Result<Option<AlbumIndex>, AppError> {
-    let index_path = album_index_path(data_path, username, album_name);
+    let album_dir = albums_root(root_path).join(album_name);
+    if !album_dir.exists() {
+        return Ok(None);
+    }
+    let index_path = album_index_path_for_dir(data_path, username, album_dir.as_path()).await?;
     if !index_path.exists() {
         return Ok(None);
     }
@@ -1287,8 +1490,13 @@ pub(crate) async fn load_or_queue_album_index(
     album_name: &str,
     locale: &str,
 ) -> Result<Option<AlbumIndex>, AppError> {
-    if let Some(index) =
-        load_existing_album_index(cfg.data_path.as_path(), index_owner, album_name).await?
+    if let Some(index) = load_existing_album_index(
+        cfg.data_path.as_path(),
+        root_path,
+        index_owner,
+        album_name,
+    )
+    .await?
     {
         return Ok(Some(index));
     }

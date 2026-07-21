@@ -354,7 +354,7 @@ function confirmSplit() {
               :class="isDark ? 'hover:bg-stone-800' : 'hover:bg-stone-100'"
             >
               <button type="button" class="h-12 w-12 overflow-hidden rounded-full" :class="isDark ? 'bg-stone-800' : 'bg-stone-200'" @click="emit('filter-person', person)">
-                <FaceAvatar v-if="person.cover?.path" :cover="person.cover" :size="160" />
+                <FaceAvatar v-if="person.cover?.path" :cover="person.cover" :size="48" />
               </button>
               <button type="button" class="w-full truncate text-[10px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'" @click="emit('filter-person', person)">
                 {{ personLabel(person) }}
@@ -435,7 +435,7 @@ function confirmSplit() {
               @click="toggleFaceSelection(face.faceId)"
             >
               <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                <FaceAvatar :path="face.path" :owner="face.owner" :face-box="face.box" :size="240" />
+                <FaceAvatar :path="face.path" :owner="face.owner" :face-box="face.box" :size="80" />
               </div>
               <span
                 v-if="selectedFaceIds.includes(face.faceId)"

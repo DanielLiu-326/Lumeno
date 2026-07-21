@@ -17,47 +17,15 @@ use super::people::{FaceAssignment, PersonRecord};
 use super::provider::{AiCapabilities, AiProviderHealth};
 
 pub struct FileAiIndexStore {
+    /// `dist/data/cache/ai/` — album embeddings under `{root}/{owner}/albums/{cache_id}/`,
+    /// owner-level people under `{root}/{owner}/people/`.
     root: PathBuf,
 }
 
 impl FileAiIndexStore {
-    pub fn new(root: PathBuf, legacy_roots: Vec<PathBuf>) -> Self {
+    pub fn new(root: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&root);
-        Self::migrate_legacy_roots(&root, &legacy_roots);
         Self { root }
-    }
-
-    fn migrate_legacy_roots(root: &Path, legacy_roots: &[PathBuf]) {
-        for legacy_root in legacy_roots {
-            Self::migrate_legacy_root(root, legacy_root.as_path());
-        }
-    }
-
-    fn migrate_legacy_root(root: &Path, legacy_root: &Path) {
-        if !legacy_root.exists() || !legacy_root.is_dir() {
-            return;
-        }
-
-        let Ok(entries) = std::fs::read_dir(legacy_root) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let source_path = entry.path();
-            if !source_path.is_dir() {
-                continue;
-            }
-            let owner_name = entry.file_name();
-            let owner_root = root.join(&owner_name);
-            let target_path = owner_root.join("ai");
-            if target_path.exists() {
-                continue;
-            }
-            let _ = std::fs::create_dir_all(&owner_root);
-            let _ = std::fs::rename(&source_path, &target_path);
-        }
-
-        let _ = std::fs::remove_dir(legacy_root);
     }
 
     pub fn root(&self) -> &Path {
@@ -65,7 +33,16 @@ impl FileAiIndexStore {
     }
 
     pub fn owner_dir(&self, owner: &str) -> PathBuf {
-        self.root.join(owner).join("ai")
+        self.root.join(owner)
+    }
+
+    /// Per-album AI index root, keyed by `AlbumMeta.cache`.
+    pub fn album_dir(&self, owner: &str, cache_id: &str) -> PathBuf {
+        self.owner_dir(owner).join("albums").join(cache_id)
+    }
+
+    pub fn people_dir(&self, owner: &str) -> PathBuf {
+        self.owner_dir(owner).join("people")
     }
 
     pub fn purge_owner(&self, owner: &str) -> Result<(), String> {
@@ -78,15 +55,44 @@ impl FileAiIndexStore {
     }
 
     pub fn owner_has_current_index(&self, owner: &str) -> bool {
-        self.current_generation(owner).is_some()
+        !self.list_album_cache_ids(owner).is_empty()
     }
 
-    pub(crate) fn current_generation(&self, owner: &str) -> Option<String> {
-        let current_path = self.owner_dir(owner).join("CURRENT");
-        std::fs::read_to_string(&current_path)
+    pub(crate) fn list_album_cache_ids(&self, owner: &str) -> Vec<String> {
+        let albums_root = self.owner_dir(owner).join("albums");
+        let Ok(entries) = std::fs::read_dir(albums_root) else {
+            return Vec::new();
+        };
+        let mut ids = entries
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter(|entry| entry.path().join("CURRENT").exists())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
+    fn read_current_generation(dir: &Path) -> Option<String> {
+        std::fs::read_to_string(dir.join("CURRENT"))
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn current_album_generation(&self, owner: &str, cache_id: &str) -> Option<String> {
+        Self::read_current_generation(&self.album_dir(owner, cache_id))
+    }
+
+    pub(crate) fn current_people_generation(&self, owner: &str) -> Option<String> {
+        Self::read_current_generation(&self.people_dir(owner))
+    }
+
+    /// Backward-compatible alias used by older call sites; prefers any album CURRENT.
+    pub(crate) fn current_generation(&self, owner: &str) -> Option<String> {
+        self.list_album_cache_ids(owner).into_iter().next().and_then(|cache_id| {
+            self.current_album_generation(owner, &cache_id)
+        })
     }
 
     fn infer_vector_dim(embeddings: &[Option<Vec<f32>>]) -> Option<usize> {
@@ -144,7 +150,7 @@ impl FileAiIndexStore {
                 continue;
             }
             if let Ok(vector) = decode_f16_vector_dim(&bytes[start..end], dim) {
-                embeddings.insert(record.stable_key.clone(), vector);
+                embeddings.insert(record.embedding_key(), vector);
             }
         }
         embeddings
@@ -217,18 +223,27 @@ impl FileAiIndexStore {
             .unwrap_or_default()
     }
 
-    pub(crate) fn load_current_index(&self, owner: &str) -> Option<LoadedOwnerIndex> {
-        let current_generation = self.current_generation(owner)?;
+    pub(crate) fn load_album_index(&self, owner: &str, cache_id: &str) -> Option<LoadedOwnerIndex> {
+        let current_generation = self.current_album_generation(owner, cache_id)?;
         let generation_dir = self
-            .owner_dir(owner)
+            .album_dir(owner, cache_id)
             .join("generations")
             .join(&current_generation);
+        self.load_index_from_generation_dir(&current_generation, &generation_dir, false)
+    }
+
+    fn load_index_from_generation_dir(
+        &self,
+        generation: &str,
+        generation_dir: &Path,
+        include_people: bool,
+    ) -> Option<LoadedOwnerIndex> {
         let photos_path = generation_dir.join("photos.meta");
         let raw = std::fs::read_to_string(&photos_path).ok()?;
         let records = serde_json::from_str::<Vec<AiIndexedPhotoRecord>>(&raw).ok()?;
-        let embeddings = Self::load_image_embeddings(&generation_dir, &records);
-        let faces_list = Self::load_faces_meta(&generation_dir);
-        let face_embeddings = Self::load_face_embeddings(&generation_dir, &faces_list);
+        let embeddings = Self::load_image_embeddings(generation_dir, &records);
+        let faces_list = Self::load_faces_meta(generation_dir);
+        let face_embeddings = Self::load_face_embeddings(generation_dir, &faces_list);
         let mut faces_by_stable_key = HashMap::<String, Vec<String>>::new();
         let faces = faces_list
             .into_iter()
@@ -240,20 +255,26 @@ impl FileAiIndexStore {
                 (face.face_id.clone(), face)
             })
             .collect::<HashMap<_, _>>();
-        let people = Self::load_people_json(&generation_dir)
-            .into_iter()
-            .map(|person| (person.id.clone(), person))
-            .collect::<HashMap<_, _>>();
-        let assignments = Self::load_assignments_json(&generation_dir)
-            .into_iter()
-            .map(|assignment| (assignment.face_id.clone(), assignment))
-            .collect::<HashMap<_, _>>();
+        let (people, assignments) = if include_people {
+            (
+                Self::load_people_json(generation_dir)
+                    .into_iter()
+                    .map(|person| (person.id.clone(), person))
+                    .collect::<HashMap<_, _>>(),
+                Self::load_assignments_json(generation_dir)
+                    .into_iter()
+                    .map(|assignment| (assignment.face_id.clone(), assignment))
+                    .collect::<HashMap<_, _>>(),
+            )
+        } else {
+            (HashMap::new(), HashMap::new())
+        };
         let photos = records
             .into_iter()
             .map(|record| (record.stable_key.clone(), record))
             .collect::<HashMap<_, _>>();
         Some(LoadedOwnerIndex {
-            generation: current_generation,
+            generation: generation.to_string(),
             photos,
             embeddings,
             faces,
@@ -262,6 +283,64 @@ impl FileAiIndexStore {
             people,
             assignments,
         })
+    }
+
+    fn load_people_index(&self, owner: &str) -> (HashMap<String, PersonRecord>, HashMap<String, FaceAssignment>) {
+        let Some(generation) = self.current_people_generation(owner) else {
+            return (HashMap::new(), HashMap::new());
+        };
+        let generation_dir = self.people_dir(owner).join("generations").join(generation);
+        (
+            Self::load_people_json(&generation_dir)
+                .into_iter()
+                .map(|person| (person.id.clone(), person))
+                .collect(),
+            Self::load_assignments_json(&generation_dir)
+                .into_iter()
+                .map(|assignment| (assignment.face_id.clone(), assignment))
+                .collect(),
+        )
+    }
+
+    /// Merge all per-album indexes for `owner` plus owner-level people assignments.
+    pub(crate) fn load_current_index(&self, owner: &str) -> Option<LoadedOwnerIndex> {
+        let cache_ids = self.list_album_cache_ids(owner);
+        if cache_ids.is_empty() {
+            return None;
+        }
+        let mut merged = LoadedOwnerIndex {
+            generation: format!("albums:{}", cache_ids.len()),
+            photos: HashMap::new(),
+            embeddings: HashMap::new(),
+            faces: HashMap::new(),
+            faces_by_stable_key: HashMap::new(),
+            face_embeddings: HashMap::new(),
+            people: HashMap::new(),
+            assignments: HashMap::new(),
+        };
+        for cache_id in &cache_ids {
+            let Some(album_index) = self.load_album_index(owner, cache_id) else {
+                continue;
+            };
+            merged.photos.extend(album_index.photos);
+            merged.embeddings.extend(album_index.embeddings);
+            for (face_id, face) in album_index.faces {
+                merged
+                    .faces_by_stable_key
+                    .entry(face.stable_key.clone())
+                    .or_default()
+                    .push(face_id.clone());
+                merged.faces.insert(face_id, face);
+            }
+            merged.face_embeddings.extend(album_index.face_embeddings);
+        }
+        let (people, assignments) = self.load_people_index(owner);
+        merged.people = people;
+        merged.assignments = assignments;
+        if merged.photos.is_empty() && merged.people.is_empty() {
+            return None;
+        }
+        Some(merged)
     }
 
     pub(crate) fn load_current_photos(
@@ -274,37 +353,38 @@ impl FileAiIndexStore {
 
     pub fn owner_status(&self, owner: &str) -> OwnerIndexStatus {
         let owner_root = self.owner_dir(owner);
-        let current_generation = self.current_generation(owner);
-        let generation_dir = current_generation
-            .as_ref()
-            .map(|generation| owner_root.join("generations").join(generation));
-        let manifest_path = generation_dir.as_ref().map(|dir| dir.join("manifest.json"));
-        let photos_meta_path = generation_dir.as_ref().map(|dir| dir.join("photos.meta"));
-        let hashes_bin_path = generation_dir.as_ref().map(|dir| dir.join("hashes.bin"));
-        let vectors_path = generation_dir
-            .as_ref()
-            .map(|dir| dir.join("image-vectors.f16"));
-        let manifest_present = manifest_path
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false);
-        let photos_meta_present = photos_meta_path
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false);
-        let hashes_bin_present = hashes_bin_path
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false);
-        let _vectors_present = vectors_path
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false);
-        let manifest = manifest_path
-            .as_ref()
-            .filter(|path| path.exists())
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|raw| serde_json::from_str::<StoredAiGenerationManifest>(&raw).ok());
+        let cache_ids = self.list_album_cache_ids(owner);
+        let current_generation = cache_ids
+            .first()
+            .and_then(|cache_id| self.current_album_generation(owner, cache_id));
+        let mut manifest_present = false;
+        let mut photos_meta_present = false;
+        let mut hashes_bin_present = false;
+        let mut state = None;
+        let mut created_at_unix_ms = None;
+        let mut stats = None;
+        for cache_id in &cache_ids {
+            let Some(generation) = self.current_album_generation(owner, cache_id) else {
+                continue;
+            };
+            let generation_dir = self
+                .album_dir(owner, cache_id)
+                .join("generations")
+                .join(generation);
+            manifest_present |= generation_dir.join("manifest.json").exists();
+            photos_meta_present |= generation_dir.join("photos.meta").exists();
+            hashes_bin_present |= generation_dir.join("hashes.bin").exists();
+            if let Some(manifest) = std::fs::read_to_string(generation_dir.join("manifest.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<StoredAiGenerationManifest>(&raw).ok())
+            {
+                if state.is_none() {
+                    state = manifest.state.clone();
+                }
+                created_at_unix_ms = created_at_unix_ms.or(manifest.created_at_unix_ms);
+                stats = stats.or(manifest.stats);
+            }
+        }
         OwnerIndexStatus {
             owner: owner.to_string(),
             root_exists: owner_root.exists(),
@@ -312,10 +392,10 @@ impl FileAiIndexStore {
             manifest_present,
             photos_meta_present,
             hashes_bin_present,
-            state: manifest.as_ref().and_then(|value| value.state.clone()),
-            created_at_unix_ms: manifest.as_ref().and_then(|value| value.created_at_unix_ms),
-            sources_total: manifest.as_ref().map(|value| value.sources.len()),
-            stats: manifest.and_then(|value| value.stats),
+            state,
+            created_at_unix_ms,
+            sources_total: Some(cache_ids.len()),
+            stats,
         }
     }
 
@@ -323,13 +403,12 @@ impl FileAiIndexStore {
         &self,
         generation_dir: &Path,
         photos: &mut [AiIndexedPhotoRecord],
-        embeddings: &[Option<Vec<f32>>],
+        embeddings: &HashMap<String, Vec<f32>>,
     ) -> Result<Option<(usize, u64, usize)>, String> {
-        if embeddings.len() != photos.len() {
-            return Err("embedding count does not match photo count".to_string());
-        }
-
-        let ready_count = embeddings.iter().filter(|value| value.is_some()).count();
+        let ready_count = photos
+            .iter()
+            .filter(|photo| embeddings.contains_key(&photo.embedding_key()))
+            .count();
         if ready_count == 0 {
             for photo in photos.iter_mut() {
                 photo.image_embedding_offset = None;
@@ -337,14 +416,23 @@ impl FileAiIndexStore {
             return Ok(None);
         }
 
-        let dim = Self::infer_vector_dim(embeddings)
+        let dim = embeddings
+            .values()
+            .next()
+            .map(|vector| vector.len())
             .ok_or_else(|| "image embeddings missing dimension".to_string())?;
         let mut bytes = Vec::with_capacity(ready_count * dim * 2);
-        for (photo, embedding) in photos.iter_mut().zip(embeddings.iter()) {
+        for photo in photos.iter_mut() {
             photo.image_embedding_offset = None;
-            let Some(vector) = embedding.as_ref() else {
+            let Some(vector) = embeddings.get(&photo.embedding_key()) else {
                 continue;
             };
+            if vector.len() != dim {
+                return Err(format!(
+                    "image embedding dimension mismatch: got {}, expected {dim}",
+                    vector.len()
+                ));
+            }
             let encoded = encode_f16_vector_dim(vector, dim)?;
             let offset = bytes.len() as u64;
             bytes.extend_from_slice(&encoded);
@@ -430,15 +518,14 @@ impl FileAiIndexStore {
         generation_dir: &Path,
         photos: &mut [AiIndexedPhotoRecord],
     ) -> Result<Option<(usize, u64)>, String> {
+        // Layout kept as 32-byte SHA256 slot + 8-byte pHash for compatibility.
+        // Exact SHA256 is currently disabled; the first 32 bytes are zeros.
         let ready_records = photos
             .iter()
             .filter(|photo| {
                 photo.duplicate_hash_state == "ready"
-                    && photo
-                        .duplicate_sha256_hex
-                        .as_ref()
-                        .map(|value| !value.is_empty())
-                        .unwrap_or(false)
+                    && photo.duplicate_phash_valid
+                    && photo.duplicate_phash_u64.is_some()
             })
             .count();
         if ready_records == 0 {
@@ -450,21 +537,21 @@ impl FileAiIndexStore {
         for photo in photos.iter_mut() {
             photo.duplicate_sha256_offset = None;
             photo.duplicate_phash_offset = None;
-            if photo.duplicate_hash_state != "ready" {
+            if photo.duplicate_hash_state != "ready"
+                || !photo.duplicate_phash_valid
+                || photo.duplicate_phash_u64.is_none()
+            {
                 continue;
             }
-            let Some(sha256_hex) = photo.duplicate_sha256_hex.as_deref() else {
-                continue;
-            };
-            let Some(sha256_bytes) = decode_sha256_hex(sha256_hex) else {
-                photo.duplicate_hash_state = "error".to_string();
-                photo
-                    .record_error
-                    .get_or_insert_with(|| "invalid duplicate sha256 hex".to_string());
-                continue;
-            };
             let offset = bytes.len() as u64;
-            bytes.extend_from_slice(&sha256_bytes);
+            if let Some(sha256_hex) = photo.duplicate_sha256_hex.as_deref()
+                && let Some(sha256_bytes) = decode_sha256_hex(sha256_hex)
+            {
+                bytes.extend_from_slice(&sha256_bytes);
+            } else {
+                photo.duplicate_sha256_hex = None;
+                bytes.extend_from_slice(&[0_u8; 32]);
+            }
             let phash = photo.duplicate_phash_u64.unwrap_or(0_u64);
             bytes.extend_from_slice(&phash.to_le_bytes());
             photo.duplicate_sha256_offset = Some(offset);
@@ -491,20 +578,22 @@ impl FileAiIndexStore {
     pub(crate) fn write_generation_manifest(
         &self,
         owner: &str,
+        cache_id: &str,
         request: &NormalizedAiIndexRequest,
         capabilities: &AiCapabilities,
         provider_health: &AiProviderHealth,
         indexed_albums: &[AiIndexedAlbumSummary],
         indexed_photos: &mut [AiIndexedPhotoRecord],
-        embeddings: &[Option<Vec<f32>>],
+        embeddings: &HashMap<String, Vec<f32>>,
         faces: &mut [AiFaceRecord],
         face_embeddings: &[Option<Vec<f32>>],
-        people: &[PersonRecord],
-        assignments: &[FaceAssignment],
         photos_total: usize,
     ) -> Result<String, String> {
-        let owner_root = self.owner_dir(owner);
-        let generations_root = owner_root.join("generations");
+        if cache_id.is_empty() {
+            return Err("album cache_id is required for ai generation".to_string());
+        }
+        let album_root = self.album_dir(owner, cache_id);
+        let generations_root = album_root.join("generations");
         std::fs::create_dir_all(&generations_root)
             .map_err(|error| format!("create ai generations root: {error}"))?;
 
@@ -523,7 +612,6 @@ impl FileAiIndexStore {
         let face_vectors_file =
             self.write_generation_face_vectors(&generation_dir, faces, face_embeddings)?;
         self.write_generation_faces_meta(&generation_dir, faces)?;
-        self.write_generation_people(&generation_dir, people, assignments)?;
         self.write_generation_photos(&generation_dir, indexed_photos)?;
 
         let photos_reused = indexed_photos
@@ -566,8 +654,9 @@ impl FileAiIndexStore {
         };
 
         let manifest = json!({
-            "version": 1,
+            "version": 2,
             "owner": owner,
+            "cache_id": cache_id,
             "album": request.album,
             "mode": request.mode,
             "features": request.features,
@@ -602,14 +691,6 @@ impl FileAiIndexStore {
                     "file": "faces.meta",
                     "records": faces.len(),
                 },
-                "people_json": {
-                    "file": "people.json",
-                    "records": people.len(),
-                },
-                "assignments_json": {
-                    "file": "assignments.json",
-                    "records": assignments.len(),
-                },
             },
             "provider": {
                 "kind": provider_health.kind,
@@ -621,13 +702,13 @@ impl FileAiIndexStore {
             },
             "capabilities": capabilities,
             "stats": {
-                "albums_total": indexed_albums.len(),
+                "albums_total": 1,
                 "photos_total": photos_total,
                 "photos_indexed": indexed_photos.len(),
                 "photos_reused": photos_reused,
                 "duplicates": duplicate_groups,
                 "faces": faces.len(),
-                "people": people.len(),
+                "people": 0,
                 "image_embeddings_pending": image_embeddings_pending,
                 "duplicate_hashes_pending": duplicate_hashes_pending,
                 "face_embeddings_pending": face_embeddings_pending,
@@ -643,7 +724,7 @@ impl FileAiIndexStore {
             "face_embedding": {
                 "dimension": face_vectors_file.map(|(_, _, dim)| dim),
             },
-            "note": "generation stores reusable photo metadata, duplicate hashes, embeddings, and faces",
+            "note": "per-album generation keyed by AlbumMeta.cache; people live under cache/ai/{owner}/people",
         });
 
         let manifest_path = generation_dir.join("manifest.json");
@@ -652,173 +733,108 @@ impl FileAiIndexStore {
         std::fs::write(&manifest_path, manifest_bytes)
             .map_err(|error| format!("write ai manifest: {error}"))?;
 
-        let current_tmp = owner_root.join("CURRENT.tmp");
+        let current_tmp = album_root.join("CURRENT.tmp");
         std::fs::write(&current_tmp, format!("{generation_id}\n"))
             .map_err(|error| format!("write ai current tmp: {error}"))?;
-        std::fs::rename(&current_tmp, owner_root.join("CURRENT"))
+        std::fs::rename(&current_tmp, album_root.join("CURRENT"))
             .map_err(|error| format!("commit ai current generation: {error}"))?;
 
         Ok(generation_id)
     }
 
+    pub(crate) fn write_people_generation(
+        &self,
+        owner: &str,
+        people: &[PersonRecord],
+        assignments: &[FaceAssignment],
+    ) -> Result<String, String> {
+        let people_root = self.people_dir(owner);
+        let generations_root = people_root.join("generations");
+        std::fs::create_dir_all(&generations_root)
+            .map_err(|error| format!("create ai people generations root: {error}"))?;
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let generation_id = format!("gen-{timestamp_ms}-{}", Uuid::new_v4().simple());
+        let generation_dir = generations_root.join(&generation_id);
+        std::fs::create_dir_all(&generation_dir)
+            .map_err(|error| format!("create ai people generation dir: {error}"))?;
+        self.write_generation_people(&generation_dir, people, assignments)?;
+        let manifest = json!({
+            "version": 1,
+            "owner": owner,
+            "created_at_unix_ms": timestamp_ms,
+            "files": {
+                "people_json": { "file": "people.json", "records": people.len() },
+                "assignments_json": { "file": "assignments.json", "records": assignments.len() },
+            },
+            "stats": {
+                "people": people.len(),
+                "assignments": assignments.len(),
+            },
+            "state": "ready",
+        });
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("serialize ai people manifest: {error}"))?;
+        std::fs::write(generation_dir.join("manifest.json"), manifest_bytes)
+            .map_err(|error| format!("write ai people manifest: {error}"))?;
+        let current_tmp = people_root.join("CURRENT.tmp");
+        std::fs::write(&current_tmp, format!("{generation_id}\n"))
+            .map_err(|error| format!("write ai people current tmp: {error}"))?;
+        std::fs::rename(&current_tmp, people_root.join("CURRENT"))
+            .map_err(|error| format!("commit ai people current: {error}"))?;
+        Ok(generation_id)
+    }
+
     pub(crate) fn albums_from_photos(photos: &[AiIndexedPhotoRecord]) -> Vec<AiIndexedAlbumSummary> {
-        let mut grouped = HashMap::<(String, String, String), usize>::new();
+        let mut grouped = HashMap::<(String, String, String, String), usize>::new();
         for photo in photos {
             *grouped
                 .entry((
                     photo.owner.clone(),
                     photo.album.clone(),
                     photo.source_key.clone(),
+                    photo.cache_id.clone(),
                 ))
                 .or_default() += 1;
         }
         let mut albums = grouped
             .into_iter()
-            .map(|((owner, album, source_key), photo_count)| AiIndexedAlbumSummary {
-                owner,
-                album: album.clone(),
-                source_key,
-                photo_count,
-            })
+            .map(
+                |((owner, album, source_key, cache_id), photo_count)| AiIndexedAlbumSummary {
+                    owner,
+                    album: album.clone(),
+                    source_key,
+                    cache_id,
+                    photo_count,
+                },
+            )
             .collect::<Vec<_>>();
-        albums.sort_by(|left, right| left.source_key.cmp(&right.source_key));
+        albums.sort_by(|left, right| {
+            left.cache_id
+                .cmp(&right.cache_id)
+                .then(left.source_key.cmp(&right.source_key))
+        });
         albums
-    }
-
-    pub(crate) fn load_generation_rewrite_snapshot(
-        &self,
-        owner: &str,
-    ) -> Result<
-        (
-            NormalizedAiIndexRequest,
-            Vec<AiIndexedAlbumSummary>,
-            Vec<AiIndexedPhotoRecord>,
-            Vec<Option<Vec<f32>>>,
-            Vec<AiFaceRecord>,
-            Vec<Option<Vec<f32>>>,
-            Vec<PersonRecord>,
-            Vec<FaceAssignment>,
-            usize,
-        ),
-        String,
-    > {
-        let Some(loaded) = self.load_current_index(owner) else {
-            return Err("ai index not found".to_string());
-        };
-        let generation_dir = self
-            .owner_dir(owner)
-            .join("generations")
-            .join(&loaded.generation);
-        let manifest = generation_dir
-            .join("manifest.json")
-            .exists()
-            .then(|| std::fs::read_to_string(generation_dir.join("manifest.json")).ok())
-            .flatten()
-            .and_then(|raw| serde_json::from_str::<StoredAiGenerationManifest>(&raw).ok());
-
-        let mut indexed_photos = loaded.photos.values().cloned().collect::<Vec<_>>();
-        indexed_photos.sort_by(|left, right| left.stable_key.cmp(&right.stable_key));
-        let embeddings = indexed_photos
-            .iter()
-            .map(|photo| loaded.embeddings.get(&photo.stable_key).cloned())
-            .collect::<Vec<_>>();
-
-        let mut faces = loaded.faces.values().cloned().collect::<Vec<_>>();
-        faces.sort_by(|left, right| left.face_id.cmp(&right.face_id));
-        let face_embeddings = faces
-            .iter()
-            .map(|face| loaded.face_embeddings.get(&face.face_id).cloned())
-            .collect::<Vec<_>>();
-
-        let mut people = loaded.people.values().cloned().collect::<Vec<_>>();
-        people.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut assignments = loaded.assignments.values().cloned().collect::<Vec<_>>();
-        assignments.sort_by(|left, right| left.face_id.cmp(&right.face_id));
-
-        let request = NormalizedAiIndexRequest {
-            album: manifest.as_ref().and_then(|value| value.album.clone()),
-            mode: manifest
-                .as_ref()
-                .and_then(|value| value.mode.clone())
-                .unwrap_or_else(|| "incremental".to_string()),
-            features: manifest
-                .as_ref()
-                .map(|value| {
-                    if value.features.is_empty() {
-                        vec![
-                            "image".to_string(),
-                            "duplicates".to_string(),
-                            "faces".to_string(),
-                        ]
-                    } else {
-                        value.features.clone()
-                    }
-                })
-                .unwrap_or_else(|| {
-                    vec![
-                        "image".to_string(),
-                        "duplicates".to_string(),
-                        "faces".to_string(),
-                    ]
-                }),
-        };
-        let indexed_albums = Self::albums_from_photos(&indexed_photos);
-        let photos_total = manifest
-            .as_ref()
-            .and_then(|value| value.stats.as_ref())
-            .map(|stats| stats.photos_total)
-            .unwrap_or(indexed_photos.len());
-
-        Ok((
-            request,
-            indexed_albums,
-            indexed_photos,
-            embeddings,
-            faces,
-            face_embeddings,
-            people,
-            assignments,
-            photos_total,
-        ))
     }
 
     pub fn commit_people_mutation<F>(
         &self,
         owner: &str,
-        capabilities: &AiCapabilities,
-        provider_health: &AiProviderHealth,
+        _capabilities: &AiCapabilities,
+        _provider_health: &AiProviderHealth,
         mutator: F,
     ) -> Result<String, String>
     where
         F: FnOnce(&mut Vec<PersonRecord>, &mut Vec<FaceAssignment>) -> Result<(), String>,
     {
-        let (
-            request,
-            indexed_albums,
-            mut indexed_photos,
-            embeddings,
-            mut faces,
-            face_embeddings,
-            mut people,
-            mut assignments,
-            photos_total,
-        ) = self.load_generation_rewrite_snapshot(owner)?;
+        let (people_map, assignments_map) = self.load_people_index(owner);
+        let mut people = people_map.into_values().collect::<Vec<_>>();
+        let mut assignments = assignments_map.into_values().collect::<Vec<_>>();
+        people.sort_by(|left, right| left.id.cmp(&right.id));
+        assignments.sort_by(|left, right| left.face_id.cmp(&right.face_id));
         mutator(&mut people, &mut assignments)?;
-        self.write_generation_manifest(
-            owner,
-            &request,
-            capabilities,
-            provider_health,
-            &indexed_albums,
-            &mut indexed_photos,
-            &embeddings,
-            &mut faces,
-            &face_embeddings,
-            &people,
-            &assignments,
-            photos_total,
-        )
+        self.write_people_generation(owner, &people, &assignments)
     }
 }
-
-

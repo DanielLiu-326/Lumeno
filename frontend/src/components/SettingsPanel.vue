@@ -21,6 +21,8 @@ const props = defineProps({
 
 const emit = defineEmits(["update-settings", "scan-thumbnails", "update-preferences", "update-member", "update-password", "delete-member", "reset-member-password"]);
 
+const defaultAiCpuThreads = Math.max(1, (typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4) - 1);
+
 const localSettings = ref({});
 const localPreferences = ref({ locale: "en" });
 const localMembers = ref([]);
@@ -120,6 +122,8 @@ watch(
       ai_provider: "local",
       ai_remote_url: "",
       ai_concurrency: 1,
+      ai_batch_size: 64,
+      ai_cpu_threads: defaultAiCpuThreads,
       ...val,
     };
   },
@@ -578,6 +582,21 @@ function promptResetPassword(member) {
                     <input v-model.number="localSettings.ai_concurrency" type="number" min="1" max="16" placeholder="1"
                       class="w-full rounded-lg border px-3 py-2 text-sm"
                       :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.aiBatchSize') }}</label>
+                    <input v-model.number="localSettings.ai_batch_size" type="number" min="1" max="64" placeholder="64"
+                      class="w-full rounded-lg border px-3 py-2 text-sm"
+                      :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                    <p class="mt-1 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.aiBatchSizeHint') }}</p>
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.aiCpuThreads') }}</label>
+                    <input v-model.number="localSettings.ai_cpu_threads" type="number" min="1" max="64"
+                      :placeholder="String(defaultAiCpuThreads)"
+                      class="w-full rounded-lg border px-3 py-2 text-sm"
+                      :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                    <p class="mt-1 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.aiCpuThreadsHint') }}</p>
                   </div>
                 </div>
               </div>

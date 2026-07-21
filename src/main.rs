@@ -26,7 +26,8 @@ use backend::album::{
     api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_photos_query,
     api_albums_rebuild_index,
     api_albums_share, api_albums_unshare, api_albums_update, api_albums_upload, api_daily_picks,
-    api_darktable_preview, api_dashboard, api_has_xmp, api_on_this_day, api_thumbnail,
+    api_darktable_preview, api_dashboard, api_face_thumbnail, api_has_xmp, api_on_this_day,
+    api_thumbnail,
     spawn_thumbnail_prewarmer,
 };
 use backend::auth::{
@@ -47,6 +48,7 @@ use backend::settings::{
 };
 use backend::tasks::{
     TaskManager, api_cancel_task, api_clear_finished_tasks, api_get_task_list, api_get_task_status,
+    api_pause_task, api_resume_task,
 };
 
 #[tokio::main]
@@ -152,6 +154,7 @@ async fn main() {
         .route("/api/list_files/{*path}", get(api_get_file_list))
         .route("/api/list_files/", get(api_get_file_list))
         .route("/api/thumbnail/{*path}", get(api_thumbnail))
+        .route("/api/face-thumbnail/{*path}", get(api_face_thumbnail))
         .route("/api/albums", get(api_albums_list).post(api_albums_create))
         .route("/api/albums/update", post(api_albums_update))
         .route("/api/albums/delete", post(api_albums_delete))
@@ -230,6 +233,8 @@ async fn main() {
         .route("/api/move_files", post(api_move_files))
         .route("/api/get_task_status/{*path}", get(api_get_task_status))
         .route("/api/cancel_task/{*path}", post(api_cancel_task))
+        .route("/api/pause_task/{*path}", post(api_pause_task))
+        .route("/api/resume_task/{*path}", post(api_resume_task))
         .route("/api/clear_finished_tasks", post(api_clear_finished_tasks))
         .route("/api/get_task_list/", get(api_get_task_list))
         .route("/api/upload", post(api_upload))

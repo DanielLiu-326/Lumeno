@@ -74,6 +74,10 @@ function openTaskList() {
   }
 }
 
+watch(taskListOpen, (open) => {
+  app.setTaskListExpanded(open);
+});
+
 function openNotifications() {
   notificationOpen.value = !notificationOpen.value;
   if (notificationOpen.value) {
@@ -390,7 +394,19 @@ async function openDashboardAlbum(album) {
                     <p class="min-w-0 truncate text-sm font-medium" :class="isDark ? 'text-stone-100' : 'text-stone-900'" :title="task.name">{{ task.name }}</p>
                     <div class="flex shrink-0 items-center gap-2">
                       <button
-                        v-if="task.cancellable && (task.status === 0 || task.status === 1)"
+                        v-if="task.pausable && task.status === 1"
+                        class="rounded-full px-2.5 py-1 text-[11px] font-medium transition"
+                        :class="isDark ? 'bg-amber-900/50 text-amber-300 hover:bg-amber-800/60' : 'bg-amber-100 text-amber-800 hover:bg-amber-200'"
+                        @click="app.pauseTask(task.id)"
+                      >{{ t('tasks.pause') }}</button>
+                      <button
+                        v-if="task.pausable && task.status === 2"
+                        class="rounded-full px-2.5 py-1 text-[11px] font-medium transition"
+                        :class="isDark ? 'bg-emerald-900/50 text-emerald-300 hover:bg-emerald-800/60' : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'"
+                        @click="app.resumeTask(task.id)"
+                      >{{ t('tasks.resume') }}</button>
+                      <button
+                        v-if="task.cancellable && (task.status === 0 || task.status === 1 || task.status === 2)"
                         class="rounded-full px-2.5 py-1 text-[11px] font-medium transition"
                         :class="isDark ? 'bg-rose-900/50 text-rose-300 hover:bg-rose-800/60' : 'bg-rose-100 text-rose-700 hover:bg-rose-200'"
                         @click="app.cancelTask(task.id)"
@@ -398,7 +414,10 @@ async function openDashboardAlbum(album) {
                       <span class="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium" :class="statusTone(task.status)">{{ statusLabel(task.status) }}</span>
                     </div>
                   </div>
-                  <p class="mt-1 truncate text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'" :title="task.current_task">{{ task.current_task || t('topbar.waitingForUpdate') }}</p>
+                  <div class="mt-1 flex min-w-0 items-center justify-between gap-3">
+                    <p class="min-w-0 truncate text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'" :title="task.current_task">{{ task.current_task || t('topbar.waitingForUpdate') }}</p>
+                    <span class="shrink-0 text-xs font-medium tabular-nums" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ progressPercent(task) }}%</span>
+                  </div>
                   <div class="mt-2 h-1.5 overflow-hidden rounded-full" :class="isDark ? 'bg-stone-700' : 'bg-stone-200'">
                     <div
                       class="h-full rounded-full bg-linear-to-r from-amber-600 via-orange-400 to-emerald-600"

@@ -1,0 +1,23 @@
+[package]
+name = "rsraw-sys"
+version = "0.1.1+libraw-0.22.2"
+build = "build.rs"
+edition = "2021"
+authors = ["hexilee <i@hexilee.me>"]
+description = "Low-level FFI bindings for the LibRaw C++ library (vendored LibRaw 0.22.2)"
+license = "MIT"
+repository = "https://github.com/hexilee/rsraw"
+readme = "README.lumeno.md"
+
+[dependencies]
+libc = "0.2"
+
+[features]
+default = []
+
+[lib]
+name = "rsraw_sys"
+
+[build-dependencies]
+cc = { version = "1.2", features = ["parallel"] }
+bindgen = { version = "0.71", default-features = false, features = ["runtime"] }

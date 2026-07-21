@@ -33,7 +33,7 @@ use super::common::{
     AppError, AppState, Token, create_response, into_host_path_safely, move_file_or_dir,
 };
 use super::i18n::{RequestLocale, tr, trf};
-use super::tasks::{Task, TaskBase, TaskManager, TaskStatus};
+use super::tasks::{Task, TaskBase, TaskManager, TaskStatus, format_subtask, task_file_name};
 
 const UPLOAD_FEED_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -120,12 +120,6 @@ where
     Ok(())
 }
 
-fn cloud_path(root: &FsPath, abs: &FsPath) -> String {
-    abs.strip_prefix(root)
-        .map(|p| format!("/{}", p.to_string_lossy()))
-        .unwrap_or_else(|_| abs.to_string_lossy().into())
-}
-
 // ── CopyFiles task ───────────────────────────────────────────────────────────
 
 struct CopyFiles {
@@ -182,7 +176,14 @@ impl Task for CopyFiles {
         *base.status.lock().await = TaskStatus::Running;
         for (_idx, (src, dst)) in collected.iter().enumerate() {
             if src.is_file() {
-                *base.current_task.lock().await = cloud_path(&self.root_path, src.as_path());
+                let done = base.processed_count.load(Ordering::Relaxed);
+                let total = base.total_count.load(Ordering::Relaxed).max(1);
+                *base.current_task.lock().await = format_subtask(
+                    "copying",
+                    &task_file_name(src.as_path()),
+                    done + 1,
+                    total,
+                );
 
                 let effective_dst = if dst.exists() {
                     match self.conflict {
@@ -282,8 +283,15 @@ impl Task for MoveFiles {
             if self.cancel.load(Ordering::Relaxed) {
                 break;
             }
+            let done = self.base.processed_count.load(Ordering::Relaxed);
+            let total = self.base.total_count.load(Ordering::Relaxed).max(1);
             self.base
-                .set_cur_task(cloud_path(&self.root_path, src.as_path()))
+                .set_cur_task(format_subtask(
+                    "moving",
+                    &task_file_name(src.as_path()),
+                    done + 1,
+                    total,
+                ))
                 .await;
 
             if src == dst {
@@ -444,8 +452,15 @@ impl Task for UploadFiles {
             if self.cancel.load(Ordering::Relaxed) {
                 break;
             }
+            let done = self.base.processed_count.load(Ordering::Relaxed);
+            let total = self.base.total_count.load(Ordering::Relaxed).max(1);
             self.base
-                .set_cur_task(cloud_path(&self.root_path, FsPath::new(&file_meta.path)))
+                .set_cur_task(format_subtask(
+                    "uploading",
+                    &task_file_name(FsPath::new(&file_meta.path)),
+                    done + 1,
+                    total,
+                ))
                 .await;
             let path = std::path::Path::new(&file_meta.path);
             if file_meta.is_dir {
@@ -664,8 +679,15 @@ impl Task for DeleteFiles {
             if self.cancel.load(Ordering::Relaxed) {
                 break;
             }
-            base.set_cur_task(cloud_path(&self.root_path, entry.as_path()))
-                .await;
+            let done = base.processed_count.load(Ordering::Relaxed);
+            let total = base.total_count.load(Ordering::Relaxed).max(1);
+            base.set_cur_task(format_subtask(
+                "deleting",
+                &task_file_name(entry.as_path()),
+                done + 1,
+                total,
+            ))
+            .await;
             if entry.is_file() {
                 if let Ok(meta) = tokio::fs::metadata(&entry).await {
                     let size = meta.len();

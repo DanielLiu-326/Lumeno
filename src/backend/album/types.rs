@@ -370,6 +370,10 @@ pub struct AlbumIndex {
 pub struct AlbumMeta {
     #[serde(default)]
     pub(crate) name: String,
+    /// Stable cache key for `cache/index/{user}/{cache}.json`.
+    /// Official album dir may be renamed without moving this pointer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) cache: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) cover: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
