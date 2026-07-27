@@ -10,11 +10,13 @@ import LoginPanel from "./components/LoginPanel.vue";
 import OnThisDayPanel from "./components/OnThisDayPanel.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import { useAlbumApp } from "./composables/useAlbumApp";
+import { normalizeDiscoveryPhoto } from "./utils/photoDetail.js";
 import { progressPercent, statusLabel, statusTone } from "./utils/format";
 import { IconBell, IconClose, IconMenu, IconMoon, IconPower, IconSun, IconTasks } from "./utils/icons";
 import { t, locale } from "./i18n/index.js";
 
 const app = proxyRefs(useAlbumApp());
+const albumPanelRef = ref(null);
 const activeTab = ref("dashboard");
 const mobileSidebarOpen = ref(false);
 const taskListOpen = ref(false);
@@ -199,6 +201,15 @@ watch(
 async function openDashboardAlbum(album) {
   activeTab.value = "albums";
   await app.selectAlbum(album);
+}
+
+function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
+  const normalized = normalizeDiscoveryPhoto(photo);
+  if (!normalized) return;
+  albumPanelRef.value?.openPhotoDetail(normalized, {
+    navPhotos: (navPhotos || []).map(normalizeDiscoveryPhoto).filter(Boolean),
+    fullscreen,
+  });
 }
 </script>
 
@@ -435,6 +446,80 @@ async function openDashboardAlbum(album) {
       </div>
 
       <div class="relative z-10 flex flex-1 gap-5 overflow-hidden p-3 md:p-6">
+        <!-- Keep mounted so photo detail overlay works from other tabs. -->
+        <div v-show="activeTab === 'albums'" class="min-h-0 min-w-0 w-full">
+          <AlbumPanel
+            ref="albumPanelRef"
+            :is-dark="isDark"
+            :busy-albums="app.busy.albums"
+            :albums="app.albums"
+            :shared-albums="app.sharedAlbums"
+            :current-album="app.currentAlbum"
+            :current-user="app.currentUser"
+            :album-view-mode="app.albumViewMode"
+            :album-photos="app.albumPhotos"
+            :duplicate-groups="app.albumDuplicateGroups"
+            :duplicate-total="app.albumDuplicateTotal"
+            :similar-results="app.aiSimilarResults"
+            :similar-query="app.aiSimilarQuery"
+            :similar-loading="app.aiSimilarLoading"
+            :album-people="app.albumPeople"
+            :album-people-loading="app.albumPeopleLoading"
+            :album-face-suggestions="app.albumFaceSuggestionsDisplay"
+            :album-faces-editable="app.albumFacesEditable"
+            :album-faces-owner="app.albumFacesOwner"
+            :available-tags="app.albumAvailableTags"
+            :available-cameras="app.albumAvailableCameras"
+            :available-lenses="app.albumAvailableLenses"
+            :available-formats="app.albumAvailableFormats"
+            :date-histogram="app.dateHistogram"
+            :filters="app.albumFilters"
+            :sort="app.albumSort"
+            :format-size="app.formatSize"
+            :format-time="app.formatTime"
+            :fetch-list="app.fetchFilesForPicker"
+            :load-all-photos="app.loadAllRemainingAlbumPhotos"
+            :collections="app.collections"
+            :selected-collection-id="app.selectedCollectionId"
+            :on-create-album="app.createAlbum"
+            :on-update-album="app.updateAlbum"
+            :on-share-album="app.shareAlbum"
+            :on-unshare-album="app.unshareAlbum"
+            :on-search-text-in-modal="(opts) => app.searchAlbumByText({ ...opts, inModal: true })"
+            :on-load-duplicates-in-modal="app.loadAlbumDuplicatesForModal"
+            :fetch-photos-by-paths="app.fetchAlbumPhotosByPaths"
+            @create-album="app.createAlbum"
+            @refresh-albums="app.refreshAlbums"
+            @select-album="app.selectAlbum"
+            @update-album="app.updateAlbum"
+            @delete-album="app.deleteAlbum"
+            @delete-photos="app.deleteAlbumPhotos"
+            @share-album="app.shareAlbum"
+            @show-duplicates="app.showAlbumDuplicates"
+            @show-photos="app.showAlbumPhotos"
+            @find-similar="app.findSimilarPhotos"
+            @search-text="app.searchAlbumByText"
+            @filter-person="app.filterAlbumByPerson"
+            @refresh-album-people="() => app.refreshPeopleForAlbum()"
+            @patch-album-person="(id, updates) => app.patchAlbumPerson(id, updates)"
+            @remove-album-center="(body) => app.removeAlbumPersonCenter(body)"
+            @delete-album-person="(id) => app.deleteAlbumPerson(id)"
+            @adopt-album-cluster="app.adoptAlbumCluster"
+            @merge-album-cluster="app.mergeAlbumCluster"
+            @unshare-album="app.unshareAlbum"
+            @apply-filters="app.refreshAlbumPhotos"
+            @update-sort="(s) => { app.albumSort = s; app.refreshAlbumPhotos(); }"
+            @import-selected="app.importSelectedToAlbum"
+            @import-local="(files) => app.importLocalToAlbum(files)"
+            @import-cloud="(paths) => app.importCloudToAlbum(paths)"
+            @update-photo-meta="app.updatePhotoMeta"
+            @copy-photo-to-album="app.copyPhotoToAlbum"
+            @rebuild-index="app.rebuildAlbumIndex"
+            @load-more-photos="app.loadMoreAlbumPhotos"
+            @select-collection="app.selectCollection"
+          />
+        </div>
+
         <template v-if="activeTab === 'dashboard'">
           <div class="min-h-0 min-w-0 w-full">
             <DashboardPanel
@@ -494,80 +579,6 @@ async function openDashboardAlbum(album) {
           </div>
         </template>
 
-        <template v-else-if="activeTab === 'albums'">
-          <div class="min-h-0 min-w-0 w-full">
-            <AlbumPanel
-              :is-dark="isDark"
-              :busy-albums="app.busy.albums"
-              :albums="app.albums"
-              :shared-albums="app.sharedAlbums"
-              :current-album="app.currentAlbum"
-              :current-user="app.currentUser"
-              :album-view-mode="app.albumViewMode"
-              :album-photos="app.albumPhotos"
-              :duplicate-groups="app.albumDuplicateGroups"
-              :duplicate-total="app.albumDuplicateTotal"
-              :similar-results="app.aiSimilarResults"
-              :similar-query="app.aiSimilarQuery"
-              :similar-loading="app.aiSimilarLoading"
-              :album-people="app.albumPeople"
-              :album-people-loading="app.albumPeopleLoading"
-              :album-face-suggestions="app.albumFaceSuggestionsDisplay"
-              :album-faces-editable="app.albumFacesEditable"
-              :album-faces-owner="app.albumFacesOwner"
-              :available-tags="app.albumAvailableTags"
-              :available-cameras="app.albumAvailableCameras"
-              :available-lenses="app.albumAvailableLenses"
-              :available-formats="app.albumAvailableFormats"
-              :date-histogram="app.dateHistogram"
-              :filters="app.albumFilters"
-              :sort="app.albumSort"
-              :format-size="app.formatSize"
-              :format-time="app.formatTime"
-              :fetch-list="app.fetchFilesForPicker"
-              :load-all-photos="app.loadAllRemainingAlbumPhotos"
-              :collections="app.collections"
-              :selected-collection-id="app.selectedCollectionId"
-              :on-create-album="app.createAlbum"
-              :on-update-album="app.updateAlbum"
-              :on-share-album="app.shareAlbum"
-              :on-unshare-album="app.unshareAlbum"
-              :on-search-text-in-modal="(opts) => app.searchAlbumByText({ ...opts, inModal: true })"
-              :on-load-duplicates-in-modal="app.loadAlbumDuplicatesForModal"
-              :fetch-photos-by-paths="app.fetchAlbumPhotosByPaths"
-              @create-album="app.createAlbum"
-              @refresh-albums="app.refreshAlbums"
-              @select-album="app.selectAlbum"
-              @update-album="app.updateAlbum"
-              @delete-album="app.deleteAlbum"
-              @delete-photos="app.deleteAlbumPhotos"
-              @share-album="app.shareAlbum"
-              @show-duplicates="app.showAlbumDuplicates"
-              @show-photos="app.showAlbumPhotos"
-              @find-similar="app.findSimilarPhotos"
-              @search-text="app.searchAlbumByText"
-              @filter-person="app.filterAlbumByPerson"
-              @refresh-album-people="() => app.refreshPeopleForAlbum()"
-              @patch-album-person="(id, updates) => app.patchAlbumPerson(id, updates)"
-              @remove-album-center="(body) => app.removeAlbumPersonCenter(body)"
-              @delete-album-person="(id) => app.deleteAlbumPerson(id)"
-              @adopt-album-cluster="app.adoptAlbumCluster"
-              @merge-album-cluster="app.mergeAlbumCluster"
-              @unshare-album="app.unshareAlbum"
-              @apply-filters="app.refreshAlbumPhotos"
-              @update-sort="(s) => { app.albumSort = s; app.refreshAlbumPhotos(); }"
-              @import-selected="app.importSelectedToAlbum"
-              @import-local="(files) => app.importLocalToAlbum(files)"
-              @import-cloud="(paths) => app.importCloudToAlbum(paths)"
-              @update-photo-meta="app.updatePhotoMeta"
-              @copy-photo-to-album="app.copyPhotoToAlbum"
-              @rebuild-index="app.rebuildAlbumIndex"
-              @load-more-photos="app.loadMoreAlbumPhotos"
-              @select-collection="app.selectCollection"
-            />
-          </div>
-        </template>
-
         <template v-else-if="activeTab === 'settings'">
           <div class="min-h-0 min-w-0 w-full">
             <SettingsPanel
@@ -598,13 +609,13 @@ async function openDashboardAlbum(album) {
 
         <template v-else-if="activeTab === 'on_this_day'">
           <div class="min-h-0 min-w-0 w-full h-full">
-            <OnThisDayPanel :is-dark="isDark" />
+            <OnThisDayPanel :is-dark="isDark" @open-photo="openDiscoveryPhoto" />
           </div>
         </template>
 
         <template v-else-if="activeTab === 'daily_picks'">
           <div class="min-h-0 min-w-0 w-full h-full">
-            <DailyPicksPanel :is-dark="isDark" />
+            <DailyPicksPanel :is-dark="isDark" @open-photo="openDiscoveryPhoto" />
           </div>
         </template>
       </div>

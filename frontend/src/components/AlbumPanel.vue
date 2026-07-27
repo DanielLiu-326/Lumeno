@@ -593,7 +593,7 @@ function handlePhotosScrollNearBottom() {
 }
 
 function getThumbnail(path, size = 320, owner = null) {
-  const resolvedOwner = owner || currentAlbumOwner.value;
+  const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
   const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
   return `/api/thumbnail/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
 }
@@ -716,7 +716,28 @@ function openDetail(photo, expanded = detailOriginalPreference.value, options = 
   // Restore darktable after XMP check; keep expanded preference immediately.
   darktablePreview.value = false;
   hasXmpSidecar.value = false;
-  checkXmpSidecar(photo.path);
+  checkXmpSidecar(photo.path, photo.owner);
+}
+
+function openPhotoDetail(photo, options = {}) {
+  if (!photo?.path) return;
+  const { navPhotos = null, fullscreen = false, expanded } = options;
+  void (async () => {
+    const stubs = (navPhotos?.length ? navPhotos : [photo]).map((entry) => ({
+      ...entry,
+      name: entry.name || String(entry.path || "").split("/").pop() || entry.path,
+    }));
+    const enriched = await enrichPhotosWithIndexMeta(stubs);
+    const main = enriched.find((entry) => entry.path === photo.path) || enriched[0];
+    if (!main) return;
+    openDetail(main, expanded ?? detailOriginalPreference.value, {
+      navPhotos: enriched.length > 1 ? enriched : null,
+    });
+    if (fullscreen) {
+      detailFullscreen.value = true;
+      showFullscreenControls();
+    }
+  })();
 }
 
 function onAiToolsOpenPhoto({ photo, navPhotos } = {}) {
@@ -832,19 +853,22 @@ function onDetailImageError() {
   }
   imageLoading.value = false;
 }
-function getOriginalUrl(path) {
-  const ownerParam = currentAlbumOwner.value ? `?owner=${encodeURIComponent(currentAlbumOwner.value)}` : "";
+function getOriginalUrl(path, owner = null) {
+  const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
+  const ownerParam = resolvedOwner ? `?owner=${encodeURIComponent(resolvedOwner)}` : "";
   return `/api/download/${encodeURIComponent(path)}${ownerParam}`;
 }
 
-function getDarktablePreviewUrl(path, size = 1600) {
-  const ownerParam = currentAlbumOwner.value ? `&owner=${encodeURIComponent(currentAlbumOwner.value)}` : "";
+function getDarktablePreviewUrl(path, size = 1600, owner = null) {
+  const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
+  const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
   return `/api/albums/darktable_preview/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
 }
 
-async function checkXmpSidecar(path) {
+async function checkXmpSidecar(path, owner = null) {
   try {
-    const ownerParam = currentAlbumOwner.value ? `?owner=${encodeURIComponent(currentAlbumOwner.value)}` : "";
+    const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
+    const ownerParam = resolvedOwner ? `?owner=${encodeURIComponent(resolvedOwner)}` : "";
     const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(path)}${ownerParam}`, { credentials: "same-origin" });
     if (res.ok) {
       const data = await res.json();
@@ -920,7 +944,9 @@ async function doExport() {
       quality: exportForm.value.quality,
       max_width: exportForm.value.maxWidth || 0,
     };
-    if (currentAlbumOwner.value) body.owner = currentAlbumOwner.value;
+    if (detailPhoto.value.owner || currentAlbumOwner.value) {
+      body.owner = detailPhoto.value.owner || currentAlbumOwner.value;
+    }
     const res = await fetch("/api/albums/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -962,6 +988,7 @@ function savePhotoMeta() {
   const tags = editTagsText.value.split(",").map((s) => s.trim()).filter(Boolean);
   emit("update-photo-meta", {
     path: detailPhoto.value.path,
+    album: detailPhoto.value.album,
     tags,
     rating: editRating.value,
     colorLabel: [...editColorLabels.value],
@@ -1023,6 +1050,8 @@ function setCoverFromPhoto(photo) {
     cover: photo.path,
   });
 }
+
+defineExpose({ openPhotoDetail });
 </script>
 
 <template>
@@ -1985,7 +2014,7 @@ function setCoverFromPhoto(photo) {
          Export Dialog
          ═══════════════════════════════════════════ -->
     <teleport to="body">
-      <div v-if="showExportDialog" class="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showExportDialog = false">
+      <div v-if="showExportDialog" class="fixed inset-0 z-[145] flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showExportDialog = false">
         <div class="w-full max-w-sm rounded-2xl border p-5 shadow-2xl"
           :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-stone-200 bg-white text-stone-900'">
           <h3 class="mb-4 text-base font-bold">{{ t('detail.exportTitle') }}</h3>
@@ -2038,7 +2067,7 @@ function setCoverFromPhoto(photo) {
          Add to Album Modal
          ═══════════════════════════════════════════ -->
     <teleport to="body">
-      <div v-if="showAddToAlbumModal" class="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showAddToAlbumModal = false">
+      <div v-if="showAddToAlbumModal" class="fixed inset-0 z-[145] flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showAddToAlbumModal = false">
         <div class="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border shadow-2xl"
           :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-stone-200 bg-white text-stone-900'">
           <div class="flex items-center justify-between border-b px-5 py-4"

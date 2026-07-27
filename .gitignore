@@ -15,5 +15,6 @@
 
 # Local editor and operating-system artifacts
 /.gitconfig
+.vscode/
 .DS_Store
 *.log

@@ -1,14 +1,15 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, onMounted } from "vue";
 import { t } from "../i18n/index.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
 });
 
+const emit = defineEmits(["open-photo"]);
+
 const photos = ref([]);
 const loading = ref(true);
-const lightbox = ref(null); // { index }
 
 async function load() {
   loading.value = true;
@@ -28,22 +29,9 @@ function thumbUrl(photo, size = 360) {
   return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=${size}${ownerParam}`;
 }
 
-function openLightbox(idx) {
-  lightbox.value = { index: idx };
+function openPhoto(photo) {
+  emit("open-photo", { photo, navPhotos: photos.value, fullscreen: true });
 }
-function closeLightbox() {
-  lightbox.value = null;
-}
-function navigateLightbox(dir) {
-  if (!lightbox.value) return;
-  const next = lightbox.value.index + dir;
-  if (next >= 0 && next < photos.value.length) {
-    lightbox.value = { index: next };
-  }
-}
-const lbPhoto = computed(() =>
-  lightbox.value != null ? photos.value[lightbox.value.index] : null,
-);
 
 onMounted(load);
 </script>
@@ -77,11 +65,11 @@ onMounted(load);
       <!-- Photo grid -->
       <div class="grid grid-cols-3 gap-1.5 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
         <button
-          v-for="(photo, idx) in photos"
+          v-for="photo in photos"
           :key="photo.path"
           class="group relative aspect-square overflow-hidden rounded-lg focus:outline-none"
           :class="isDark ? 'bg-stone-800' : 'bg-stone-200'"
-          @click="openLightbox(idx)"
+          @click="openPhoto(photo)"
         >
           <img
             :src="thumbUrl(photo)"
@@ -100,67 +88,5 @@ onMounted(load);
         </button>
       </div>
     </div>
-
-    <!-- Lightbox -->
-    <Teleport to="body">
-      <div
-        v-if="lightbox && lbPhoto"
-        class="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 backdrop-blur-sm"
-        @click.self="closeLightbox"
-        @keydown.esc="closeLightbox"
-        @keydown.arrow-left="navigateLightbox(-1)"
-        @keydown.arrow-right="navigateLightbox(1)"
-        tabindex="-1"
-      >
-        <!-- Prev -->
-        <button
-          class="absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white hover:bg-black/75"
-          @click="navigateLightbox(-1)"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
-          </svg>
-        </button>
-
-        <!-- Image -->
-        <div class="max-h-[90vh] max-w-[90vw] flex flex-col items-center gap-3">
-          <img
-            :src="thumbUrl(lbPhoto, 1200)"
-            class="max-h-[80vh] max-w-[90vw] rounded-xl object-contain shadow-2xl"
-            alt=""
-          />
-          <div class="text-center text-white/80 text-sm">
-            <p class="font-medium">{{ lbPhoto.album_name }} · {{ lbPhoto.date }}</p>
-            <p v-if="lbPhoto.camera_model" class="text-xs text-white/50">
-              {{ lbPhoto.camera_make }} {{ lbPhoto.camera_model }}
-              <template v-if="lbPhoto.focal_length"> · {{ lbPhoto.focal_length }}</template>
-              <template v-if="lbPhoto.aperture"> · {{ lbPhoto.aperture }}</template>
-              <template v-if="lbPhoto.shutter_speed"> · {{ lbPhoto.shutter_speed }}</template>
-              <template v-if="lbPhoto.iso"> · ISO {{ lbPhoto.iso }}</template>
-            </p>
-          </div>
-        </div>
-
-        <!-- Next -->
-        <button
-          class="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white hover:bg-black/75"
-          @click="navigateLightbox(1)"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-          </svg>
-        </button>
-
-        <!-- Close -->
-        <button
-          class="absolute right-3 top-3 rounded-full bg-black/50 p-2 text-white hover:bg-black/75"
-          @click="closeLightbox"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-    </Teleport>
   </div>
 </template>

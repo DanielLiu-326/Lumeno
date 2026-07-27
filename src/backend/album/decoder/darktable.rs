@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use image::DynamicImage;
 
 use super::exif::apply_exif_from_bytes;
-use super::formats::{resolve_format, ImageFormat, ImageFormatSet};
+use super::formats::{format_from_hint_or_path, require_format, ImageFormat, ImageFormatSet};
 use super::{apply_max_edge, DecodeError, DecodeOptions, DecoderBackendKind, ImageDecoder};
 
 /// Full demosaic / XMP grading via `darktable-cli`. Requires darktable-cli on PATH.
@@ -36,7 +36,7 @@ impl DarktableImageDecoder {
         path: &Path,
         options: DecodeOptions,
     ) -> Result<DynamicImage, DecodeError> {
-        let _format = resolve_format(options.format, Some(path), None)?;
+        let _format = format_from_hint_or_path(options.format, Some(path))?;
         let output = run_darktable_cli_blocking(path, options)?;
         let img = Self::decode_jpeg_bytes(&output, options.apply_exif)?;
         Ok(apply_max_edge(img, options.max_edge))
@@ -254,7 +254,7 @@ impl ImageDecoder for DarktableImageDecoder {
     }
 
     fn decode_bytes(&self, bytes: &[u8], options: DecodeOptions) -> Result<DynamicImage, DecodeError> {
-        let format = resolve_format(options.format, None, Some(bytes))?;
+        let format = require_format(options.format)?;
         if format == ImageFormat::Jpeg {
             let img = Self::decode_jpeg_bytes(bytes, options.apply_exif)?;
             return Ok(apply_max_edge(img, options.max_edge));
@@ -270,7 +270,7 @@ impl ImageDecoder for DarktableImageDecoder {
         path: &Path,
         options: DecodeOptions,
     ) -> Result<DynamicImage, DecodeError> {
-        let _format = resolve_format(options.format, Some(path), None)?;
+        let _format = format_from_hint_or_path(options.format, Some(path))?;
         let bytes = run_darktable_cli(path, options).await?;
         let apply_exif = options.apply_exif;
         let max_edge = options.max_edge;

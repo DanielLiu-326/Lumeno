@@ -10,7 +10,7 @@ mod gpu;
 pub use auto::AutoImageDecoder;
 pub use cpu::CpuImageDecoder;
 pub use darktable::{darktable_export, find_xmp_sidecar, DarktableImageDecoder};
-pub use formats::{is_raw_path, ImageFormat, ImageFormatSet};
+pub use formats::{format_from_path, is_raw_path, ImageFormat, ImageFormatSet};
 pub use gpu::{GpuDevice, GpuImageDecoder};
 
 use std::path::Path;
@@ -77,10 +77,10 @@ impl DecoderCreateOptions {
     }
 }
 
-/// Per-decode options. Format is optional; inferred from path or bytes when unset.
+/// Per-decode options. Set [`Self::format`] explicitly (via [`Self::for_path`]) before decode.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeOptions {
-    /// Optional format hint. When `None`, format is inferred from path or bytes at decode time.
+    /// Image format. Required for [`ImageDecoder::decode_bytes`]; set via [`Self::for_path`] or [`decode_bytes_with_path`].
     pub format: Option<ImageFormat>,
     /// Apply EXIF orientation when present (recommended for display / face boxes).
     pub apply_exif: bool,
@@ -108,13 +108,9 @@ impl DecodeOptions {
     }
 
     /// Oriented decode; if an XMP sidecar exists, apply it via darktable.
-    pub const fn with_xmp() -> Self {
-        Self {
-            format: None,
-            apply_exif: true,
-            use_xmp: true,
-            max_edge: 0,
-        }
+    pub const fn with_xmp(mut self) -> Self {
+        self.use_xmp = true;
+        self
     }
 
     /// Raw pixels: no EXIF orientation, no XMP, full resolution.
@@ -130,6 +126,16 @@ impl DecodeOptions {
     pub const fn with_max_edge(mut self, max_edge: u32) -> Self {
         self.max_edge = max_edge;
         self
+    }
+
+    pub const fn with_format(mut self, format: ImageFormat) -> Self {
+        self.format = Some(format);
+        self
+    }
+
+    /// Build options with format taken from the file extension.
+    pub fn for_path(path: &Path) -> Result<Self, DecodeError> {
+        Ok(Self::new().with_format(format_from_path(path)?))
     }
 }
 
@@ -184,17 +190,14 @@ pub fn create_decoder(options: DecoderCreateOptions) -> Result<Box<dyn ImageDeco
     }
 }
 
-/// Decode image bytes using `path` for format detection.
-///
-/// Camera RAW (RW2, CR2, …) often cannot be identified from bytes alone; the AI
-/// pipeline must pass the original path so extension-based detection works.
+/// Decode image bytes; `path` supplies the format via file extension.
 pub fn decode_bytes_with_path(
     decoder: &dyn ImageDecoder,
     path: &Path,
     bytes: &[u8],
     options: DecodeOptions,
 ) -> Result<DynamicImage, DecodeError> {
-    let format = formats::resolve_format(options.format, Some(path), Some(bytes))?;
+    let format = formats::format_from_hint_or_path(options.format, Some(path))?;
     decoder.decode_bytes(
         bytes,
         DecodeOptions {

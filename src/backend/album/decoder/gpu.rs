@@ -6,7 +6,7 @@ use burn::DispatchDevice;
 use image::DynamicImage;
 
 use super::cpu::CpuImageDecoder;
-use super::formats::{resolve_format, ImageFormat, ImageFormatSet};
+use super::formats::{format_from_hint_or_path, require_format, ImageFormat, ImageFormatSet};
 use super::{apply_max_edge, DecodeError, DecodeOptions, DecoderBackendKind, ImageDecoder};
 
 pub type GpuBackend = Dispatch;
@@ -42,7 +42,7 @@ impl ImageDecoder for GpuImageDecoder {
     }
 
     fn decode_bytes(&self, bytes: &[u8], options: DecodeOptions) -> Result<DynamicImage, DecodeError> {
-        let format = resolve_format(options.format, None, Some(bytes))?;
+        let format = require_format(options.format)?;
         let image = CpuImageDecoder::decode_bytes_inner(bytes, format, options.apply_exif)?;
         Ok(apply_max_edge(image, options.max_edge))
     }
@@ -58,7 +58,7 @@ impl ImageDecoder for GpuImageDecoder {
                 code: "read_failed",
                 message: error.to_string(),
             })?;
-            let format = resolve_format(options.format, Some(&path), Some(bytes.as_slice()))?;
+            let format = format_from_hint_or_path(options.format, Some(&path))?;
             let image = CpuImageDecoder::decode_bytes_inner(&bytes, format, options.apply_exif)?;
             Ok(apply_max_edge(image, options.max_edge))
         })

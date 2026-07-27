@@ -5,7 +5,7 @@ use image::DynamicImage;
 
 use super::cpu::{select_backend_for_format, CpuImageDecoder};
 use super::darktable::{find_xmp_sidecar, DarktableImageDecoder};
-use super::formats::{resolve_format, ImageFormat, ImageFormatSet};
+use super::formats::{format_from_hint_or_path, require_format, ImageFormat, ImageFormatSet};
 use super::gpu::GpuImageDecoder;
 use super::{
     DecodeError, DecodeOptions, DecoderBackendKind, DecoderCreateOptions, ImageDecoder,
@@ -91,7 +91,7 @@ impl ImageDecoder for AutoImageDecoder {
     }
 
     fn decode_bytes(&self, bytes: &[u8], options: DecodeOptions) -> Result<DynamicImage, DecodeError> {
-        let format = resolve_format(options.format, None, Some(bytes))?;
+        let format = require_format(options.format)?;
         let options = DecodeOptions {
             format: Some(format),
             ..options
@@ -113,7 +113,7 @@ impl ImageDecoder for AutoImageDecoder {
             return DarktableImageDecoder.decode_path(path, options).await;
         }
 
-        let format = resolve_format(options.format, Some(path), None)?;
+        let format = format_from_hint_or_path(options.format, Some(path))?;
         let options = DecodeOptions {
             format: Some(format),
             ..options

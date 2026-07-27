@@ -1471,10 +1471,10 @@ export function useAlbumApp() {
         }
     }
 
-    async function updatePhotoMeta({ path, tags, rating, colorLabel }) {
+    async function updatePhotoMeta({ path, tags, rating, colorLabel, album }) {
         try {
             const body = { path };
-            if (currentAlbum.value) body.album = currentAlbum.value;
+            if (album || currentAlbum.value) body.album = album || currentAlbum.value;
             if (tags !== undefined) body.tags = tags;
             if (rating !== undefined) body.rating = rating;
             if (colorLabel !== undefined) body.color_label = colorLabel;

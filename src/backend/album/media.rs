@@ -39,7 +39,7 @@ use crate::backend::tasks::{
     Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused,
 };
 
-use super::decoder::{create_decoder, darktable_export, DecodeOptions, DecoderCreateOptions};
+use super::decoder::{create_decoder, darktable_export, decode_bytes_with_path, DecodeOptions, DecoderCreateOptions};
 use super::helpers::{
     albums_root, ensure_exif_cached, is_user_visible_album_dir, read_album_meta,
     relative_display_path,
@@ -66,7 +66,8 @@ pub struct FaceThumbnailQuery {
 /// darktable outputs never collide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThumbnailGenerator {
-    /// App-side decode: raster via `image`, RAW via embedded JPEG (exiftool).
+    /// App-side decode: raster via `image`, RAW via LibRaw; Nikon HE/HE* uses
+    /// the full-resolution JPEG embedded by the camera because TicoRAW is proprietary.
     #[default]
     Lumeno,
     /// `darktable-cli` demosaic / grade (RAW only; non-RAW falls back to lumeno).
@@ -134,37 +135,7 @@ pub fn thumbnail_cache_key(
     let digest = hasher.finalize();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
-
-/// Pre-generator cache key (`|v2`). Kept so existing thumbnails are reused after the v3 bump.
-fn thumbnail_cache_key_v2(
-    username: &str,
-    source: &std::path::Path,
-    size: u32,
-    metadata: &std::fs::Metadata,
-) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut hasher = Sha512::new();
-    hasher.update(username.as_bytes());
-    hasher.update(b"|");
-    hasher.update(source.to_string_lossy().as_bytes());
-    hasher.update(b"|");
-    hasher.update(size.to_string().as_bytes());
-    hasher.update(b"|");
-    hasher.update(metadata.len().to_string().as_bytes());
-    hasher.update(b"|");
-    hasher.update(modified.to_string().as_bytes());
-    hasher.update(b"|v2");
-    let digest = hasher.finalize();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
-}
-
-/// Resolve thumbnail cache path for the given generator. If a pre-v3 (`|v2`) file
-/// exists and the new path does not, adopt it (rename/copy) so thumbs are not regenerated.
+/// Resolve the current thumbnail cache path for the selected generator.
 pub(crate) fn thumbnail_cache_file(
     data_path: &std::path::Path,
     username: &str,
@@ -174,37 +145,10 @@ pub(crate) fn thumbnail_cache_file(
     generator: ThumbnailGenerator,
 ) -> PathBuf {
     let dir = data_path.join("cache").join("thumbnails");
-    let primary = dir.join(format!(
+    dir.join(format!(
         "{}.webp",
         thumbnail_cache_key(username, source, size, metadata, generator)
-    ));
-    if primary.exists() {
-        return primary;
-    }
-
-    let legacy = dir.join(format!(
-        "{}.webp",
-        thumbnail_cache_key_v2(username, source, size, metadata)
-    ));
-    if !legacy.exists() {
-        return primary;
-    }
-
-    if let Some(parent) = primary.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match std::fs::rename(&legacy, &primary) {
-        Ok(()) => primary,
-        Err(_) => {
-            if std::fs::copy(&legacy, &primary).is_ok() {
-                let _ = std::fs::remove_file(&legacy);
-                primary
-            } else {
-                // Last resort: keep serving the legacy file without regenerating.
-                legacy
-            }
-        }
-    }
+    ))
 }
 
 /// Cache key for EXIF metadata, keyed on file path, size, and mtime.
@@ -262,7 +206,9 @@ pub(crate) async fn ensure_thumbnail_cached(
     } else {
         DecoderCreateOptions::auto()
     };
-    let decode_opts = DecodeOptions::new().with_max_edge(size);
+    let decode_opts = DecodeOptions::for_path(&source)
+        .map_err(|error| AppError::Unknown(error.message))?
+        .with_max_edge(size);
     let source_for_decode = source.clone();
     let output_blocking = output.clone();
     let result = async {
@@ -284,22 +230,31 @@ pub(crate) async fn ensure_thumbnail_cached(
     result.map_err(AppError::Unknown)
 }
 
-fn load_oriented_image_from_bytes(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+fn load_oriented_image_from_bytes(
+    source: &std::path::Path,
+    bytes: &[u8],
+) -> Result<image::DynamicImage, String> {
     let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|error| error.message)?;
-    decoder
-        .decode_bytes(bytes, DecodeOptions::new())
+    decode_bytes_with_path(decoder.as_ref(), source, bytes, DecodeOptions::new())
         .map_err(|error| error.message)
 }
 
 fn write_webp_thumbnail_from_bytes(
+    source: &std::path::Path,
     bytes: &[u8],
     output: &std::path::Path,
     size: u32,
 ) -> Result<(), String> {
     let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|error| error.message)?;
-    let img = decoder
-        .decode_bytes(bytes, DecodeOptions::new().with_max_edge(size))
-        .map_err(|error| error.message)?;
+    let img = decode_bytes_with_path(
+        decoder.as_ref(),
+        source,
+        bytes,
+        DecodeOptions::for_path(source)
+            .map_err(|error| error.message)?
+            .with_max_edge(size),
+    )
+    .map_err(|error| error.message)?;
     img.save_with_format(output, image::ImageFormat::WebP)
         .map_err(|e| format!("save webp thumbnail failed: {e}"))?;
     Ok(())
@@ -515,7 +470,10 @@ pub(crate) async fn ensure_cached_face_crop(
     let result = async {
         let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|e| e.message)?;
         let image = decoder
-            .decode_path(&source_for_decode, DecodeOptions::new())
+            .decode_path(
+                &source_for_decode,
+                DecodeOptions::for_path(&source_for_decode).map_err(|e| e.message)?,
+            )
             .await
             .map_err(|e| e.message)?;
         tokio::task::spawn_blocking(move || {
@@ -537,12 +495,13 @@ pub(crate) async fn ensure_cached_face_crop(
 }
 
 fn write_face_webp_thumbnail_from_bytes(
+    source: &std::path::Path,
     bytes: &[u8],
     output: &std::path::Path,
     size: u32,
     box_xywh: [f32; 4],
 ) -> Result<(), String> {
-    let img = load_oriented_image_from_bytes(bytes)?;
+    let img = load_oriented_image_from_bytes(source, bytes)?;
     write_face_webp_thumbnail_from_image(&img, output, size, box_xywh)
 }
 
@@ -573,7 +532,10 @@ async fn ensure_face_thumbnail_cached(
     let result = async {
         let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|error| error.message)?;
         let image = decoder
-            .decode_path(&source_for_decode, DecodeOptions::new())
+            .decode_path(
+                &source_for_decode,
+                DecodeOptions::for_path(&source_for_decode).map_err(|error| error.message)?,
+            )
             .await
             .map_err(|error| error.message)?;
         tokio::task::spawn_blocking(move || {
@@ -1264,7 +1226,10 @@ pub async fn api_darktable_preview(
             }
             let source_for_decode = source.clone();
             let cache_blocking = cache_path.clone();
-            let decode_opts = DecodeOptions::with_xmp().with_max_edge(size);
+            let decode_opts = DecodeOptions::for_path(&source_for_decode)
+                .map_err(|error| AppError::Unknown(error.message))?
+                .with_xmp()
+                .with_max_edge(size);
             let result = async {
                 let decoder = create_decoder(DecoderCreateOptions::darktable())
                     .map_err(|error| error.message)?;
