@@ -18,6 +18,7 @@ pub use media::{
     is_image_path, queue_background_thumbnail_tasks, spawn_thumbnail_prewarmer, thumbnail_cache_key,
     ThumbnailGenerator,
 };
+pub(crate) use media::{ensure_cached_face_crop, write_cached_face_crop_from_image};
 pub use types::*;
 
 pub(crate) use api::{collect_accessible_ai_scan_targets, AiAlbumScanTarget};

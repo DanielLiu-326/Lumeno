@@ -1,6 +1,5 @@
 //! ArcFace runtime backed by burn-onnx generated IResNet50.
 
-use burn::prelude::*;
 use image::RgbImage;
 use std::path::Path;
 

@@ -8,12 +8,12 @@
 //! Vulkan memory uses a tight CubeCL `Custom` pool: exclusive pages capped well
 //! below full VRAM, with short `dealloc_period` so idle pages return quickly.
 
+use burn::Dispatch;
+use burn::DispatchDevice;
 use burn::backend::wgpu::{
     MemoryConfiguration, RuntimeOptions, WgpuDevice, graphics::Vulkan, init_setup,
 };
 use burn::prelude::*;
-use burn::Dispatch;
-use burn::DispatchDevice;
 use cubecl_runtime::memory_management::{MemoryPoolOptions, PoolType};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::OnceLock;
@@ -85,13 +85,17 @@ fn select_ai_device() -> AiDeviceChoice {
 ///
 /// Max alloc (~1.5 GiB) still fits SigLIP text weights (~1.1 GiB) while preventing
 /// the default SubSlices habit of growing toward heap/4 on large cards.
+///
+/// On Intel iGPU (shared RAM), prefer a short `dealloc_period` so idle activation
+/// pages return quickly instead of ratcheting RSS for the whole index run.
 fn tight_memory_config() -> MemoryConfiguration {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const MAX_ALLOC: u64 = 1536 * MB;
     const MIN_BUCKET: u64 = 32 * KB;
-    // Reclaim unused pages after this many subsequent allocs in the parent allocator.
-    const DEALLOC_PERIOD: u64 = 50;
+    // CubeCL: reclaim unused ExclusivePages after this many parent allocs.
+    // Lower = faster return to the driver (better for shared iGPU memory).
+    const DEALLOC_PERIOD: u64 = 5;
 
     let mut sizes = Vec::new();
     let mut size = MIN_BUCKET;

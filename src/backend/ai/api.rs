@@ -1,6 +1,6 @@
 use axum::{
     Extension, Json,
-    extract::{Path as AxumPath, Query},
+    extract::Query,
 };
 use function_name::named;
 use serde::Deserialize;
@@ -8,22 +8,15 @@ use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use super::super::album::collect_accessible_ai_scan_targets;
+use super::super::album::{collect_accessible_ai_scan_targets, AiAlbumScanTarget};
 use super::super::auth::Role;
 use super::super::common::{AppError, AppState, Token, create_response};
 use super::super::i18n::{RequestLocale, tr, trf};
-use super::duplicate::build_near_duplicate_groups;
-use super::models::NormalizedAiIndexRequest;
-use super::people::{
-    MAX_PERSON_NAME_LEN, merge_people, split_person, update_person,
-};
-use super::scope::{
-    accessible_albums_by_owner, build_person_cover, collect_visible_person_photos,
-    count_visible_person_photos, filter_photos_for_scope, normalize_ai_photo_path,
-    normalize_ai_text_query, person_is_editable, person_mutation_owner,
-};
-use super::tasks::AiIndexTask;
 use super::AiService;
+use super::duplicate::{default_near_duplicate_distance, read_duplicates_index_async};
+use super::models::{AiIndexedPhotoRecord, NormalizedAiIndexRequest};
+use super::scope::{normalize_ai_photo_path, normalize_ai_text_query};
+use super::tasks::AiIndexTask;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AiIndexRequest {
@@ -220,11 +213,7 @@ impl AiSimilarSearchRequest {
             )));
         }
         let path = normalize_ai_photo_path(self.path.as_str()).map_err(|error| {
-            AppError::BadRequest(trf(
-                locale,
-                "error.bad_request",
-                &[("value", error)],
-            ))
+            AppError::BadRequest(trf(locale, "error.bad_request", &[("value", error)]))
         })?;
         let scope = self
             .scope
@@ -257,11 +246,7 @@ impl AiSimilarSearchRequest {
 impl AiTextSearchRequest {
     fn normalize(self, locale: &str) -> Result<NormalizedAiTextSearchRequest, AppError> {
         let text = normalize_ai_text_query(self.text.as_str()).map_err(|error| {
-            AppError::BadRequest(trf(
-                locale,
-                "error.bad_request",
-                &[("value", error)],
-            ))
+            AppError::BadRequest(trf(locale, "error.bad_request", &[("value", error)]))
         })?;
         let album = self
             .album
@@ -285,7 +270,10 @@ impl AiTextSearchRequest {
             return Err(AppError::BadRequest(trf(
                 locale,
                 "error.bad_request",
-                &[("value", "album is required for current_album scope".to_string())],
+                &[(
+                    "value",
+                    "album is required for current_album scope".to_string(),
+                )],
             )));
         }
         let limit = self.limit.unwrap_or(60).clamp(1, 200);
@@ -316,17 +304,78 @@ fn normalize_search_path_allowlist(
     let mut normalized = BTreeSet::new();
     for path in paths {
         let path = normalize_ai_photo_path(path.as_str()).map_err(|error| {
-            AppError::BadRequest(trf(
-                "en",
-                "error.bad_request",
-                &[("value", error)],
-            ))
+            AppError::BadRequest(trf("en", "error.bad_request", &[("value", error)]))
         })?;
         normalized.insert(path);
     }
     Ok(Some(normalized))
 }
 
+struct EmbeddingSearchLoad {
+    candidates: Vec<(AiIndexedPhotoRecord, Option<Vec<f32>>)>,
+    generations: HashMap<String, String>,
+    any_index: bool,
+}
+
+async fn load_embedding_search_candidates(
+    store: &super::store::FileAiIndexStore,
+    targets: &[AiAlbumScanTarget],
+    allowed_paths: Option<&BTreeSet<String>>,
+) -> EmbeddingSearchLoad {
+    let mut candidates = Vec::new();
+    let mut generations = HashMap::new();
+    let mut any_index = false;
+
+    for target in targets {
+        let Some(loaded) = store
+            .load_album_index_from_file_cache_async(
+                target.owner.as_str(),
+                target.cache_id.as_str(),
+                false,
+            )
+            .await
+        else {
+            continue;
+        };
+        any_index = true;
+        generations.insert(target.cache_id.clone(), loaded.generation.clone());
+        for (stable_key, record) in loaded.photos {
+            if let Some(allowed) = allowed_paths {
+                if !allowed.contains(&record.path) {
+                    continue;
+                }
+            }
+            let embedding = if record.image_embedding_state == "ready" {
+                loaded
+                    .embeddings
+                    .get(&record.embedding_key())
+                    .or_else(|| loaded.embeddings.get(&stable_key))
+                    .cloned()
+            } else {
+                None
+            };
+            candidates.push((record, embedding));
+        }
+    }
+
+    EmbeddingSearchLoad {
+        candidates,
+        generations,
+        any_index,
+    }
+}
+
+async fn load_similar_search_candidates(
+    store: &super::store::FileAiIndexStore,
+    targets: &[AiAlbumScanTarget],
+    allowed_paths: Option<&BTreeSet<String>>,
+) -> EmbeddingSearchLoad {
+    let mut loaded = load_embedding_search_candidates(store, targets, allowed_paths).await;
+    loaded.candidates.retain(|(record, embedding)| {
+        record.image_embedding_state == "ready" && embedding.is_some()
+    });
+    loaded
+}
 
 pub async fn api_ai_duplicates(
     locale: RequestLocale,
@@ -342,7 +391,9 @@ pub async fn api_ai_duplicates(
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(20);
     let kind = query.kind.as_deref().unwrap_or("all");
-    let max_distance = query.max_distance.unwrap_or(8);
+    let max_distance = query
+        .max_distance
+        .unwrap_or_else(default_near_duplicate_distance);
     let targets = collect_accessible_ai_scan_targets(
         cfg.as_ref(),
         session.username.as_str(),
@@ -351,35 +402,32 @@ pub async fn api_ai_duplicates(
     )
     .await?;
 
-    let mut albums_by_owner = HashMap::<String, BTreeSet<String>>::new();
-    for target in targets {
-        albums_by_owner
-            .entry(target.owner)
-            .or_default()
-            .insert(target.album_name);
-    }
-
+    let ai_root = cfg.ai_service.store().root();
     let mut generations = HashMap::<String, String>::new();
-    let mut records = Vec::new();
-    for (owner, allowed_albums) in albums_by_owner {
-        let Some((generation, owner_records)) =
-            cfg.ai_service.store().load_current_photos(owner.as_str())
-        else {
-            continue;
-        };
-        generations.insert(owner.clone(), generation);
-        let scope = HashMap::from([(owner, allowed_albums)]);
-        records.extend(
-            filter_photos_for_scope(owner_records.into_values(), &scope)
-                .into_iter()
-                .filter(|record| record.duplicate_hash_state == "ready"),
-        );
-    }
-
     let mut groups = Vec::new();
-    // Exact (SHA256) duplicate groups are temporarily disabled.
+    // Serve precomputed cliques from duplicates_index.json (built at index time).
+    // Do not re-run Bron–Kerbosch / pHash on query.
     if matches!(kind, "near" | "all") {
-        groups.extend(build_near_duplicate_groups(&records, max_distance));
+        for target in &targets {
+            let generation = cfg
+                .ai_service
+                .store()
+                .current_album_generation_async(&target.owner, &target.cache_id)
+                .await
+                .unwrap_or_default();
+            generations
+                .entry(target.owner.clone())
+                .or_insert(generation);
+            let Some(index) =
+                read_duplicates_index_async(ai_root, &target.owner, &target.cache_id).await
+            else {
+                continue;
+            };
+            if index.max_distance != max_distance {
+                continue;
+            }
+            groups.extend(index.groups);
+        }
     }
     groups.sort_by(|left, right| {
         right
@@ -424,7 +472,11 @@ pub async fn api_ai_status(
     let enabled = cfg.settings_manager.ai_enabled().await;
     let inference = cfg.ai_service.provider().await;
     let provider_health = inference.health().await;
-    let owner_status = cfg.ai_service.store().owner_status(&session.username);
+    let store = Arc::clone(cfg.ai_service.store());
+    let username = session.username.clone();
+    let owner_status = tokio::task::spawn_blocking(move || store.owner_status(&username))
+        .await
+        .map_err(|e| AppError::Unknown(format!("ai status join: {e}")))?;
     let message = tr(locale.as_str(), "response.success");
     let provider = if session.role == Role::Admin {
         json!({
@@ -520,7 +572,6 @@ pub async fn api_ai_index(
     ))
 }
 
-
 pub async fn api_ai_search_similar(
     locale: RequestLocale,
     token: Token,
@@ -557,7 +608,12 @@ pub async fn api_ai_search_similar(
     let Some(source_index) = cfg
         .ai_service
         .store()
-        .load_current_index(source_target.owner.as_str())
+        .load_album_index_from_file_cache_async(
+            source_target.owner.as_str(),
+            source_target.cache_id.as_str(),
+            false,
+        )
+        .await
     else {
         return Err(AppError::BadRequest(tr(
             locale.as_str(),
@@ -568,7 +624,7 @@ pub async fn api_ai_search_similar(
     let source_record = source_index
         .photos
         .values()
-        .find(|record| record.album == source_target.album_name && record.path == request.path)
+        .find(|record| record.path == request.path)
         .cloned();
     let Some(source_record) = source_record else {
         return Err(AppError::BadRequest(tr(
@@ -578,7 +634,8 @@ pub async fn api_ai_search_similar(
     };
     let Some(query_vector) = source_index
         .embeddings
-        .get(&source_record.stable_key)
+        .get(&source_record.embedding_key())
+        .or_else(|| source_index.embeddings.get(&source_record.stable_key))
         .cloned()
     else {
         return Err(AppError::BadRequest(tr(
@@ -600,44 +657,17 @@ pub async fn api_ai_search_similar(
     )
     .await?;
 
-    let mut albums_by_owner = HashMap::<String, BTreeSet<String>>::new();
-    for target in search_targets {
-        albums_by_owner
-            .entry(target.owner)
-            .or_default()
-            .insert(target.album_name);
-    }
-
-    let mut candidates = Vec::new();
-    let mut generations = HashMap::<String, String>::new();
-    for (owner, allowed_albums) in albums_by_owner {
-        let Some(loaded) = cfg.ai_service.store().load_current_index(owner.as_str()) else {
-            continue;
-        };
-        generations.insert(owner.clone(), loaded.generation.clone());
-        for (stable_key, record) in loaded.photos {
-            if record.owner != owner || !allowed_albums.contains(&record.album) {
-                continue;
-            }
-            if let Some(ref allowed_paths) = request.paths {
-                if !allowed_paths.contains(&record.path) {
-                    continue;
-                }
-            }
-            if record.image_embedding_state != "ready" {
-                continue;
-            }
-            let Some(vector) = loaded
-                .embeddings
-                .get(&record.embedding_key())
-                .or_else(|| loaded.embeddings.get(&stable_key))
-                .cloned()
-            else {
-                continue;
-            };
-            candidates.push((record, vector));
-        }
-    }
+    let loaded = load_similar_search_candidates(
+        cfg.ai_service.store(),
+        &search_targets,
+        request.paths.as_ref(),
+    )
+    .await;
+    let candidates = loaded
+        .candidates
+        .into_iter()
+        .map(|(record, embedding)| (record, embedding.unwrap_or_default()))
+        .collect::<Vec<_>>();
 
     let results = AiService::search_similar_in_records(
         &query_vector,
@@ -661,7 +691,7 @@ pub async fn api_ai_search_similar(
                 "scope": request.scope,
                 "min_score": request.min_score,
             },
-            "generations": generations,
+            "generations": loaded.generations,
             "total": results.len(),
             "results": results,
         })),
@@ -744,46 +774,14 @@ pub async fn api_ai_search_text(
     )
     .await?;
 
-    let mut albums_by_owner = HashMap::<String, BTreeSet<String>>::new();
-    for target in search_targets {
-        albums_by_owner
-            .entry(target.owner)
-            .or_default()
-            .insert(target.album_name);
-    }
+    let loaded = load_embedding_search_candidates(
+        cfg.ai_service.store(),
+        &search_targets,
+        request.paths.as_ref(),
+    )
+    .await;
 
-    let mut candidates = Vec::new();
-    let mut generations = HashMap::<String, String>::new();
-    let mut any_index = false;
-    for (owner, allowed_albums) in albums_by_owner {
-        let Some(loaded) = cfg.ai_service.store().load_current_index(owner.as_str()) else {
-            continue;
-        };
-        any_index = true;
-        generations.insert(owner.clone(), loaded.generation.clone());
-        for (stable_key, record) in loaded.photos {
-            if record.owner != owner || !allowed_albums.contains(&record.album) {
-                continue;
-            }
-            if let Some(ref allowed_paths) = request.paths {
-                if !allowed_paths.contains(&record.path) {
-                    continue;
-                }
-            }
-            let embedding = if record.image_embedding_state == "ready" {
-                loaded
-                    .embeddings
-                    .get(&record.embedding_key())
-                    .or_else(|| loaded.embeddings.get(&stable_key))
-                    .cloned()
-            } else {
-                None
-            };
-            candidates.push((record, embedding));
-        }
-    }
-
-    if !any_index {
+    if !loaded.any_index {
         return Err(AppError::BadRequest(tr(
             locale.as_str(),
             "error.ai_not_indexed",
@@ -793,7 +791,7 @@ pub async fn api_ai_search_text(
     let results = AiService::search_text_in_records(
         request.text.as_str(),
         &query_vector,
-        &candidates,
+        &loaded.candidates,
         request.min_score,
         request.limit,
     );
@@ -811,437 +809,9 @@ pub async fn api_ai_search_text(
                 "scope": request.scope,
                 "min_score": request.min_score,
             },
-            "generations": generations,
+            "generations": loaded.generations,
             "total": results.len(),
             "results": results,
         })),
     ))
 }
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AiPeopleQuery {
-    #[serde(default)]
-    include_hidden: Option<bool>,
-    #[serde(default)]
-    person_id: Option<String>,
-    /// When set, only return people who have visible faces in this album.
-    #[serde(default)]
-    album: Option<String>,
-    #[serde(default)]
-    offset: Option<usize>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AiPeoplePatchRequest {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    hidden: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AiPeopleMergeRequest {
-    target_person_id: String,
-    source_person_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AiPeopleSplitRequest {
-    source_person_id: String,
-    face_ids: Vec<String>,
-    #[serde(default)]
-    new_name: Option<String>,
-}
-
-
-#[named]
-pub async fn api_ai_people(
-    locale: RequestLocale,
-    token: Token,
-    Extension(cfg): Extension<Arc<AppState>>,
-    Query(query): Query<AiPeopleQuery>,
-) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-
-    let inference = cfg.ai_service.provider().await;
-    if !inference.capabilities().faces {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.ai_faces_unavailable",
-        )));
-    }
-
-    let include_hidden = query.include_hidden.unwrap_or(false);
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(100).clamp(1, 200);
-
-    if let Some(person_id) = query
-        .person_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return api_ai_people_photos_inner(
-            locale,
-            &session.username,
-            &cfg,
-            person_id,
-            offset,
-            limit,
-        )
-        .await;
-    }
-
-    let targets = collect_accessible_ai_scan_targets(
-        cfg.as_ref(),
-        session.username.as_str(),
-        query
-            .album
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-        locale.as_str(),
-    )
-    .await?;
-    let albums_by_owner = accessible_albums_by_owner(&targets);
-
-    let mut people = Vec::new();
-    for (owner, allowed_albums) in albums_by_owner {
-        let Some(index) = cfg.ai_service.store().load_current_index(owner.as_str()) else {
-            continue;
-        };
-        for person in index.people.values() {
-            if person.hidden && !include_hidden {
-                continue;
-            }
-            let visible_photo_count =
-                count_visible_person_photos(person.id.as_str(), &index, &allowed_albums);
-            if visible_photo_count == 0 {
-                continue;
-            }
-            people.push(json!({
-                "id": person.id,
-                "name": person.name,
-                "hidden": person.hidden,
-                "visible_photo_count": visible_photo_count,
-                "cover": build_person_cover(person, &index, &allowed_albums),
-                "editable": person_is_editable(owner.as_str(), session.username.as_str()),
-                "owner": owner,
-            }));
-        }
-    }
-
-    people.sort_by(|left, right| {
-        left.get("name")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .cmp(right.get("name").and_then(|value| value.as_str()).unwrap_or_default())
-            .then_with(|| {
-                left.get("id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .cmp(right.get("id").and_then(|value| value.as_str()).unwrap_or_default())
-            })
-    });
-
-    let total_count = people.len();
-    let people = people.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
-    let message = tr(locale.as_str(), "response.success");
-
-    Ok(create_response(
-        true,
-        &message,
-        0,
-        Some(json!({
-            "offset": offset,
-            "limit": limit,
-            "total_count": total_count,
-            "people": people,
-        })),
-    ))
-}
-
-async fn api_ai_people_photos_inner(
-    locale: RequestLocale,
-    username: &str,
-    cfg: &Arc<AppState>,
-    person_id: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<Json<Value>, AppError> {
-    let targets = collect_accessible_ai_scan_targets(cfg.as_ref(), username, None, locale.as_str())
-        .await?;
-    let albums_by_owner = accessible_albums_by_owner(&targets);
-
-    for (owner, allowed_albums) in albums_by_owner {
-        let Some(index) = cfg.ai_service.store().load_current_index(owner.as_str()) else {
-            continue;
-        };
-        if !index.people.contains_key(person_id) {
-            continue;
-        }
-        let photos = collect_visible_person_photos(person_id, &index, &allowed_albums);
-        if photos.is_empty() {
-            return Err(AppError::NotFound(tr(
-                locale.as_str(),
-                "error.ai_person_not_visible",
-            )));
-        }
-        let total_count = photos.len();
-        let photos = photos.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
-        let message = tr(locale.as_str(), "response.success");
-        return Ok(create_response(
-            true,
-            &message,
-            0,
-            Some(json!({
-                "person_id": person_id,
-                "owner": owner,
-                "offset": offset,
-                "limit": limit,
-                "total_count": total_count,
-                "photos": photos,
-            })),
-        ));
-    }
-
-    Err(AppError::NotFound(tr(
-        locale.as_str(),
-        "error.ai_person_not_found",
-    )))
-}
-
-#[named]
-pub async fn api_ai_people_photos(
-    locale: RequestLocale,
-    token: Token,
-    Extension(cfg): Extension<Arc<AppState>>,
-    AxumPath(person_id): AxumPath<String>,
-    Query(query): Query<AiPeopleQuery>,
-) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-
-    let inference = cfg.ai_service.provider().await;
-    if !inference.capabilities().faces {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.ai_faces_unavailable",
-        )));
-    }
-
-    api_ai_people_photos_inner(
-        locale,
-        session.username.as_str(),
-        &cfg,
-        person_id.trim(),
-        query.offset.unwrap_or(0),
-        query.limit.unwrap_or(100).clamp(1, 200),
-    )
-    .await
-}
-
-#[named]
-pub async fn api_ai_people_patch(
-    locale: RequestLocale,
-    token: Token,
-    Extension(cfg): Extension<Arc<AppState>>,
-    AxumPath(person_id): AxumPath<String>,
-    Json(payload): Json<AiPeoplePatchRequest>,
-) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-
-    if payload.name.is_none() && payload.hidden.is_none() {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.ai_person_update_empty",
-        )));
-    }
-
-    if payload
-        .name
-        .as_deref()
-        .map(|value| value.trim().chars().count() > MAX_PERSON_NAME_LEN)
-        .unwrap_or(false)
-    {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.ai_person_name_invalid",
-        )));
-    }
-
-    let owner = person_mutation_owner(session.username.as_str());
-    let Some(index) = cfg.ai_service.store().load_current_index(owner) else {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.ai_not_indexed",
-        )));
-    };
-    if !index.people.contains_key(person_id.trim()) {
-        return Err(AppError::NotFound(tr(
-            locale.as_str(),
-            "error.ai_person_not_found",
-        )));
-    }
-
-    let inference = cfg.ai_service.provider().await;
-    let provider_health = inference.health().await;
-    let name = payload.name.as_deref();
-    let hidden = payload.hidden;
-    let person_id_trimmed = person_id.trim().to_string();
-    cfg.ai_service
-        .store()
-        .commit_people_mutation(
-            owner,
-            inference.capabilities(),
-            &provider_health,
-            |people, assignments| {
-                update_person(people, assignments, person_id_trimmed.as_str(), name, hidden)
-                    .map_err(|error| error.to_string())
-            },
-        )
-        .map_err(AppError::BadRequest)?;
-
-    let person = cfg
-        .ai_service
-        .store()
-        .load_current_index(owner)
-        .and_then(|index| index.people.get(person_id_trimmed.as_str()).cloned());
-    let message = tr(locale.as_str(), "response.success");
-    Ok(create_response(
-        true,
-        &message,
-        0,
-        Some(json!({
-            "person_id": person_id_trimmed,
-            "updated": true,
-            "person": person.map(|person| json!({
-                "id": person.id,
-                "name": person.name,
-                "hidden": person.hidden,
-            })),
-        })),
-    ))
-}
-
-#[named]
-pub async fn api_ai_people_merge(
-    locale: RequestLocale,
-    token: Token,
-    Extension(cfg): Extension<Arc<AppState>>,
-    Json(payload): Json<AiPeopleMergeRequest>,
-) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-
-    let owner = person_mutation_owner(session.username.as_str());
-    if payload.source_person_ids.is_empty() {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.ai_person_merge_empty",
-        )));
-    }
-
-    let inference = cfg.ai_service.provider().await;
-    let provider_health = inference.health().await;
-    cfg.ai_service
-        .store()
-        .commit_people_mutation(
-            owner,
-            inference.capabilities(),
-            &provider_health,
-            |people, assignments| {
-                merge_people(
-                    people,
-                    assignments,
-                    payload.target_person_id.trim(),
-                    &payload
-                        .source_person_ids
-                        .iter()
-                        .map(|value| value.trim().to_string())
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(|error| error.to_string())
-            },
-        )
-        .map_err(AppError::BadRequest)?;
-
-    let message = tr(locale.as_str(), "response.success");
-    Ok(create_response(
-        true,
-        &message,
-        0,
-        Some(json!({
-            "target_person_id": payload.target_person_id.trim(),
-            "merged": payload.source_person_ids.len(),
-        })),
-    ))
-}
-
-#[named]
-pub async fn api_ai_people_split(
-    locale: RequestLocale,
-    token: Token,
-    Extension(cfg): Extension<Arc<AppState>>,
-    Json(payload): Json<AiPeopleSplitRequest>,
-) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-
-    let owner = person_mutation_owner(session.username.as_str());
-    if payload.face_ids.is_empty() {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.ai_person_split_empty",
-        )));
-    }
-
-    let inference = cfg.ai_service.provider().await;
-    let provider_health = inference.health().await;
-    let mut new_person_id = String::new();
-    cfg
-        .ai_service
-        .store()
-        .commit_people_mutation(
-            owner,
-            inference.capabilities(),
-            &provider_health,
-            |people, assignments| {
-                new_person_id = split_person(
-                    people,
-                    assignments,
-                    payload.source_person_id.trim(),
-                    &payload
-                        .face_ids
-                        .iter()
-                        .map(|value| value.trim().to_string())
-                        .collect::<Vec<_>>(),
-                    payload.new_name.as_deref(),
-                )?;
-                Ok(())
-            },
-        )
-        .map_err(AppError::BadRequest)?;
-
-    let message = tr(locale.as_str(), "response.success");
-    Ok(create_response(
-        true,
-        &message,
-        0,
-        Some(json!({
-            "source_person_id": payload.source_person_id.trim(),
-            "new_person_id": new_person_id,
-            "face_count": payload.face_ids.len(),
-        })),
-    ))
-}
-

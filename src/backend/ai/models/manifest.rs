@@ -72,8 +72,8 @@ impl ModelManifest {
     pub fn load_path(path: &Path) -> Result<Self, ManifestError> {
         let raw = std::fs::read_to_string(path)
             .map_err(|_| ManifestError::Missing(path.to_path_buf()))?;
-        let manifest: Self = serde_json::from_str(&raw)
-            .map_err(|error| ManifestError::Parse(error.to_string()))?;
+        let manifest: Self =
+            serde_json::from_str(&raw).map_err(|error| ManifestError::Parse(error.to_string()))?;
         if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
             return Err(ManifestError::Schema {
                 found: manifest.schema_version,

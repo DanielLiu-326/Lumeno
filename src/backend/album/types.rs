@@ -104,6 +104,9 @@ pub struct AlbumPhotosBody {
     pub(crate) sort: Option<String>,
     pub(crate) offset: Option<u32>,
     pub(crate) limit: Option<u32>,
+    /// When set, only return photos whose path is in this list (from album index).
+    #[serde(default)]
+    pub(crate) paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

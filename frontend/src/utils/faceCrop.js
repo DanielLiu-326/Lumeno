@@ -4,14 +4,13 @@ export const FACE_CROP_PAD = 0.15;
 /**
  * CSS crop for a normalized face box `[x, y, w, h]` in `[0, 1]`.
  * Parent must be `position: relative; overflow: hidden`.
- * Prefer `faceThumbnailUrl` when available — it crops from full resolution.
+ * @deprecated Prefer server-side `/api/ai/albums/.../face-crop`.
  */
 export function faceCropStyle(box) {
   if (!Array.isArray(box) || box.length < 4) {
     return { objectFit: "cover", objectPosition: "center" };
   }
   const [x, y, w, h] = box.map(Number);
-  // Expect normalized [0,1] xywh. Pixel boxes break CSS crop — fall back to center.
   if (
     ![x, y, w, h].every((value) => Number.isFinite(value))
     || w <= 0
@@ -49,34 +48,94 @@ function isValidFaceBox(box) {
     && y + h <= 1.01;
 }
 
-/**
- * Request size for face avatar thumbnails. Scales with display size and DPR.
- * @param {number} displayPx CSS display size of the avatar
- * @param {number} [dpr=1] device pixel ratio
- */
-export function faceAvatarRequestSize(displayPx, dpr = 1) {
-  const base = Math.max(64, Math.round(Number(displayPx) * Number(dpr) * 2));
-  return Math.min(512, base);
+/** Album param for face-crop (`album` or shared `owner/album`). */
+export function resolveFaceCropAlbum(albumName = "") {
+  return String(albumName || "").trim();
+}
+
+/** Parse `albums/{album}/{relative}` photo API paths. */
+export function parseAlbumPhotoPath(path) {
+  const normalized = String(path || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const match = normalized.match(/^albums\/([^/]+)\/(.+)$/);
+  if (!match) return null;
+  return { album: match[1], source: match[2] };
+}
+
+export function albumFaceCropUrl(albumName, faceId) {
+  const album = resolveFaceCropAlbum(albumName);
+  if (!album || !faceId) return "";
+  const params = new URLSearchParams({ face_id: faceId });
+  return `/api/ai/albums/${encodeURIComponent(album)}/face-crop?${params.toString()}`;
+}
+
+export function albumFaceCropUrlByBox(albumName, source, boxXywh) {
+  const album = resolveFaceCropAlbum(albumName);
+  if (!album || !source || !isValidFaceBox(boxXywh)) return "";
+  const box = boxXywh.map((v) => Number(v)).join(",");
+  const params = new URLSearchParams({ source, box });
+  return `/api/ai/albums/${encodeURIComponent(album)}/face-crop?${params.toString()}`;
+}
+
+export const FACE_AVATAR_REQUEST_SIZE = 256;
+
+/** @deprecated display/dpr ignored — always {@link FACE_AVATAR_REQUEST_SIZE}. */
+export function faceAvatarRequestSize(_displayPx, _dpr = 1) {
+  return FACE_AVATAR_REQUEST_SIZE;
 }
 
 /**
- * Server-side face crop from full-resolution source (sharp even for small faces).
+ * Build face-crop URL from a cover/appearance-like object.
+ * Prefers `face_id`, else `source` + `face_box` / `box_xywh`.
  */
-export function faceThumbnailUrl(path, box, size = 256, owner = "") {
-  if (!path || !isValidFaceBox(box)) return "";
-  const [x, y, w, h] = box.map(Number);
-  const boxParam = `${x},${y},${w},${h}`;
-  const ownerQ = owner ? `&owner=${encodeURIComponent(owner)}` : "";
-  return `/api/face-thumbnail/${encodeURIComponent(path)}?box=${encodeURIComponent(boxParam)}&size=${size}${ownerQ}`;
-}
+export function personFaceCropUrl(subject, albumName = "") {
+  if (!subject) return "";
+  const album = resolveFaceCropAlbum(subject.album || albumName);
+  if (!album) return "";
 
-export function personCoverThumbnailUrl(cover, displayPx = 128) {
-  if (!cover?.path) return "";
-  const owner = cover.owner || "";
-  const requestSize = faceAvatarRequestSize(displayPx);
-  if (isValidFaceBox(cover.face_box)) {
-    return faceThumbnailUrl(cover.path, cover.face_box, requestSize, owner);
+  const faceId = subject.face_id || subject.faceId;
+  if (faceId) return albumFaceCropUrl(album, faceId);
+
+  const box = subject.face_box || subject.box_xywh || subject.box;
+  let source = subject.source;
+  if (!source && subject.path) {
+    source = parseAlbumPhotoPath(subject.path)?.source || "";
   }
-  const ownerQ = owner ? `&owner=${encodeURIComponent(owner)}` : "";
-  return `/api/thumbnail/${encodeURIComponent(cover.path)}?size=${requestSize}${ownerQ}`;
+  if (source && isValidFaceBox(box)) {
+    return albumFaceCropUrlByBox(album, source, box);
+  }
+  return "";
+}
+
+/** Build API photo path for an album-relative source. */
+export function albumPhotoApiPath(albumName, relativeSource) {
+  if (!relativeSource) return "";
+  const rel = String(relativeSource).replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!rel) return "";
+  if (rel.startsWith("albums/")) return rel;
+  if (!albumName) return rel;
+  return `albums/${albumName}/${rel}`;
+}
+
+/** Cover for UI lists: explicit cover, else first appearance fallback. */
+export function personDisplayCover(person, albumName = "", owner = "") {
+  const album = resolveFaceCropAlbum(albumName);
+  if (person?.cover) {
+    return {
+      ...person.cover,
+      album,
+      face_id: person.cover.face_id,
+      source: person.cover.source || parseAlbumPhotoPath(person.cover.path)?.source,
+      face_box: person.cover.face_box ?? person.cover.box_xywh,
+      owner: person.cover.owner || owner || person?.owner || "",
+    };
+  }
+  const first = person?.appearances?.[0];
+  if (!first?.source) return null;
+  return {
+    album,
+    face_id: first.face_id,
+    source: first.source,
+    face_box: first.box_xywh,
+    owner: owner || person?.owner || "",
+  };
 }

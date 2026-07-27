@@ -1,37 +1,42 @@
+mod album_cache;
+mod album_faces_api;
 mod api;
 mod duplicate;
 mod embedding;
+mod embedding_snapshot;
 mod faces;
+mod faces_config;
 mod models;
 mod people;
+mod pipeline;
+mod pipelines;
 mod provider;
 mod scope;
 mod store;
 mod tasks;
 
-pub use api::{
-    api_ai_duplicates, api_ai_index, api_ai_people, api_ai_people_merge, api_ai_people_patch,
-    api_ai_people_photos, api_ai_people_split, api_ai_search_similar, api_ai_search_text,
-    api_ai_status,
+pub use album_faces_api::{
+    api_album_face_crop, api_album_face_hints_get, api_album_faces_adopt_cluster,
+    api_album_faces_delete, api_album_faces_get, api_album_faces_merge_clusters,
+    api_album_faces_patch, api_album_faces_remove_center, api_album_faces_split,
 };
-pub use models::{AiGenerationStats, OwnerIndexStatus};
+pub use api::{
+    api_ai_duplicates, api_ai_index, api_ai_search_similar, api_ai_search_text, api_ai_status,
+};
+pub(crate) use faces_config::collect_person_photo_paths_from_config_async;
 pub use provider::{
-    AiCapabilities, AiInferenceProvider, AiItemError, AiProviderHealth, AiProviderKind,
-    PipelineProgressTx, build_provider_from_settings, progress_channel,
+    AiInferenceProvider, AiProviderHealth, AiProviderKind, build_provider_from_settings,
     validate_ai_settings_update, validate_remote_url,
 };
 pub use store::FileAiIndexStore;
 pub use tasks::queue_owner_ai_index;
 
-pub(crate) use models::{AiFaceRecord, AiIndexedPhotoRecord, LoadedOwnerIndex};
-pub(crate) use scope::collect_person_photo_paths_in_album;
-
 use embedding::{
     calibrate_siglip_text_image_score, cosine_similarity, normalize_search_text,
     tokenize_search_text,
 };
+pub(crate) use models::{AiFaceRecord, AiIndexedPhotoRecord, LoadedOwnerIndex};
 use models::{AiIndexedAlbumSummary, AiSimilarSearchResult, NormalizedAiIndexRequest};
-use people::{FaceAssignment, PersonRecord};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -123,39 +128,35 @@ impl AiService {
         request: &NormalizedAiIndexRequest,
         provider_health: &AiProviderHealth,
         indexed_albums: &[AiIndexedAlbumSummary],
-        indexed_photos: &mut [AiIndexedPhotoRecord],
-        embeddings: &std::collections::HashMap<String, Vec<f32>>,
-        faces: &mut [AiFaceRecord],
-        face_embeddings: &[Option<Vec<f32>>],
-        people: &[PersonRecord],
-        assignments: &[FaceAssignment],
+        indexed_photos: &[AiIndexedPhotoRecord],
+        faces: &[AiFaceRecord],
         photos_total: usize,
     ) -> Result<String, String> {
         let provider = self.provider().await;
-        let generation_id = self.store.write_generation_manifest(
-            owner,
-            cache_id,
-            request,
-            provider.capabilities(),
-            provider_health,
-            indexed_albums,
-            indexed_photos,
-            embeddings,
-            faces,
-            face_embeddings,
-            photos_total,
-        )?;
-        Ok(generation_id)
-    }
-
-    pub(crate) async fn bootstrap_people_index(
-        &self,
-        owner: &str,
-        people: &[PersonRecord],
-        assignments: &[FaceAssignment],
-    ) -> Result<String, String> {
-        self.store
-            .write_people_generation(owner, people, assignments)
+        let capabilities = provider.capabilities().clone();
+        let owner = owner.to_string();
+        let cache_id = cache_id.to_string();
+        let request = request.clone();
+        let provider_health = provider_health.clone();
+        let indexed_albums = indexed_albums.to_vec();
+        let indexed_photos = indexed_photos.to_vec();
+        let faces = faces.to_vec();
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || {
+            store.write_generation_manifest(
+                owner.as_str(),
+                cache_id.as_str(),
+                &request,
+                &capabilities,
+                &provider_health,
+                &indexed_albums,
+                &indexed_photos,
+                &faces,
+                photos_total,
+            )
+        })
+        .await
+        .map_err(|e| format!("generation write join: {e}"))?
     }
 
     pub(crate) fn search_similar_in_records(

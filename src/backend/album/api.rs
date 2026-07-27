@@ -32,8 +32,7 @@ use crate::backend::tasks::{Task, TaskBase, TaskStatus};
 
 use super::helpers::*;
 use super::media::{
-    ensure_thumbnail_cached, find_xmp_sidecar, is_image_path, is_raw_path,
-    resolve_photo_owner_root,
+    ensure_thumbnail_cached, find_xmp_sidecar, is_image_path, is_raw_path, resolve_photo_owner_root,
 };
 use super::types::*;
 
@@ -868,6 +867,7 @@ pub async fn api_albums_photos(
         query.sort.as_deref(),
         query.offset,
         query.limit,
+        None,
     )
     .await
 }
@@ -888,6 +888,7 @@ pub async fn api_albums_photos_query(
         body.sort.as_deref(),
         body.offset,
         body.limit,
+        body.paths.as_deref(),
     )
     .await
 }
@@ -901,6 +902,7 @@ pub(crate) async fn list_album_photos_with_filters(
     sort: Option<&str>,
     offset: Option<u32>,
     limit: Option<u32>,
+    paths: Option<&[String]>,
 ) -> Result<Json<Value>, AppError> {
     let Some((username, root_path)) = cfg.get_session_and_root(&token).await else {
         return Err(AppError::unauthorized(locale.as_str()));
@@ -955,20 +957,24 @@ pub(crate) async fn list_album_photos_with_filters(
     let person_ids = super::filters::collect_person_ids(clauses);
     let person_paths = if person_ids.is_empty() {
         None
-    } else if let Some(ai_index) = cfg.ai_service.store().load_current_index(owner.as_str()) {
-        let mut paths = std::collections::HashSet::new();
-        for person_id in &person_ids {
-            paths.extend(crate::backend::ai::collect_person_photo_paths_in_album(
-                person_id,
-                &ai_index,
-                album_name.as_str(),
-            ));
-        }
-        Some(paths)
     } else {
-        Some(std::collections::HashSet::new())
+        let paths = crate::backend::ai::collect_person_photo_paths_from_config_async(
+            album_dir.as_path(),
+            album_name.as_str(),
+            &person_ids,
+        )
+        .await;
+        Some(paths)
     };
     let filter_ctx = super::filters::FilterEvalCtx { person_paths };
+
+    let path_allowlist = paths.map(|items| {
+        items
+            .iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect::<HashSet<_>>()
+    });
 
     let offset = offset.unwrap_or(0) as usize;
     let requested_limit = limit.unwrap_or(100);
@@ -997,8 +1003,14 @@ pub(crate) async fn list_album_photos_with_filters(
         })
         .collect();
 
-    let matches_filters = |p: &AlbumPhotoItem| {
-        super::filters::matches_compiled(p, &compiled, &filter_ctx)
+    let matches_filters =
+        |p: &AlbumPhotoItem| super::filters::matches_compiled(p, &compiled, &filter_ctx);
+
+    let matches_path_allowlist = |p: &AlbumPhotoItem| {
+        path_allowlist
+            .as_ref()
+            .map(|allow| allow.contains(&p.path))
+            .unwrap_or(true)
     };
 
     let (available_tags, available_cameras, available_lenses, available_formats) = if include_facets
@@ -1054,7 +1066,7 @@ pub(crate) async fn list_album_photos_with_filters(
         let mut paginated_photos = Vec::with_capacity(limit.min(64));
 
         for photo in index.entries.iter() {
-            if !matches_filters(photo) {
+            if !matches_path_allowlist(photo) || !matches_filters(photo) {
                 continue;
             }
 
@@ -1069,7 +1081,7 @@ pub(crate) async fn list_album_photos_with_filters(
         let mut photos: Vec<&AlbumPhotoItem> = index
             .entries
             .iter()
-            .filter(|photo| matches_filters(photo))
+            .filter(|photo| matches_path_allowlist(photo) && matches_filters(photo))
             .collect();
 
         photos.sort_by(|a, b| {
@@ -1534,12 +1546,12 @@ pub async fn verify_shared_photo_access(
 
 /// Resolved album access info for sharing-aware endpoints.
 pub(crate) struct ResolvedAlbum {
-    owner: String,
-    root_path: PathBuf,
-    album_name: String,
-    can_write: bool,
-    can_delete: bool,
-    is_owner: bool,
+    pub(crate) owner: String,
+    pub(crate) root_path: PathBuf,
+    pub(crate) album_name: String,
+    pub(crate) can_write: bool,
+    pub(crate) can_delete: bool,
+    pub(crate) is_owner: bool,
 }
 
 pub(crate) async fn resolve_album_access(
@@ -1643,7 +1655,10 @@ async fn push_visible_album_source(
 
 /// Gather every album accessible by `username`: own albums + albums shared to them.
 /// Hidden system dirs (`__*`, e.g. `__uploading`) are excluded — same口径 as album list.
-pub(crate) async fn collect_accessible_album_sources(cfg: &AppState, username: &str) -> Vec<AlbumSource> {
+pub(crate) async fn collect_accessible_album_sources(
+    cfg: &AppState,
+    username: &str,
+) -> Vec<AlbumSource> {
     let mut sources = Vec::new();
     let user_root = cfg.user_root_path(username);
 
@@ -1797,13 +1812,8 @@ pub async fn api_dashboard(
     let mut photos = Vec::<Value>::new();
     let mut albums = Vec::<(String, Value)>::new();
 
-    let indexed = load_accessible_album_indexes(
-        cfg.as_ref(),
-        &username,
-        &sources,
-        locale.as_str(),
-    )
-    .await?;
+    let indexed =
+        load_accessible_album_indexes(cfg.as_ref(), &username, &sources, locale.as_str()).await?;
 
     for (source, index) in indexed {
         let album_key = album_access_key(&username, &source.owner, &source.dir_name);
@@ -1987,13 +1997,8 @@ pub async fn api_on_this_day(
     let today_md = format!("{:02}-{:02}", now.month(), now.day());
 
     let sources = collect_accessible_album_sources(&cfg, &username).await;
-    let indexed = load_accessible_album_indexes(
-        cfg.as_ref(),
-        &username,
-        &sources,
-        locale.as_str(),
-    )
-    .await?;
+    let indexed =
+        load_accessible_album_indexes(cfg.as_ref(), &username, &sources, locale.as_str()).await?;
     let mut by_year: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
     for (src, index) in indexed {
@@ -2042,13 +2047,8 @@ pub async fn api_daily_picks(
 
     let today = Local::now().format("%Y-%m-%d").to_string();
     let sources = collect_accessible_album_sources(&cfg, &username).await;
-    let indexed = load_accessible_album_indexes(
-        cfg.as_ref(),
-        &username,
-        &sources,
-        locale.as_str(),
-    )
-    .await?;
+    let indexed =
+        load_accessible_album_indexes(cfg.as_ref(), &username, &sources, locale.as_str()).await?;
 
     let mut all_photos: Vec<Value> = Vec::new();
     for (src, index) in indexed {
@@ -2081,7 +2081,11 @@ pub async fn api_daily_picks(
 }
 
 /// Collect albums shared with `username` by scanning all other users' album dirs.
-pub(crate) async fn collect_shared_albums(cfg: &AppState, username: &str, locale: &str) -> Vec<Value> {
+pub(crate) async fn collect_shared_albums(
+    cfg: &AppState,
+    username: &str,
+    locale: &str,
+) -> Vec<Value> {
     struct Candidate {
         owner: String,
         owner_root: PathBuf,
@@ -2434,8 +2438,14 @@ pub async fn api_albums_upload(
     };
 
     let task = Arc::new(
-        crate::backend::files::UploadFiles::new(task_name, username, root_path.clone(), metas, conflict)
-            .with_on_single_finished(on_single_finished),
+        crate::backend::files::UploadFiles::new(
+            task_name,
+            username,
+            root_path.clone(),
+            metas,
+            conflict,
+        )
+        .with_on_single_finished(on_single_finished),
     );
     cfg.task_mgr.add_task(task.clone()).await;
 

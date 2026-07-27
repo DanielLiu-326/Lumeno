@@ -364,28 +364,55 @@ CPU 推理可以使用 `f32`，磁盘索引仍可独立压缩为 `f16`。写分�
 
 ## 8. AI 索引存储
 
-### 8.1 文件边界
+### 8.1 当前布局（2026-07 起）
 
-不使用 SQLite、嵌入式 KV 或外部数据库。每个 owner 使用一个独立目录：
+机器可重建缓存与用户配置分离：
 
 ```text
-dist/data/config/{owner}/ai/
-  CURRENT
-  generations/
-    00000001/
-      manifest.json
-      photos.meta
-      image-vectors.f16
-      hashes.bin
-      faces.meta
-      face-vectors.f16
-      people.json
-      assignments.json
-      clusters.json
-      errors.json
+dist/data/cache/ai/{owner}/albums/{cache_id}/
+  embeddings/{key}.json      # 一图一个图像 embedding（f32 base64）
+  faces/{key}.json           # 一图一个人脸集合（boxes + face embeddings）
+  clusters.json              # 未命名聚类建议（可重建）
+  generations/…              # 旧 generation 布局（迁移期仍写入，将废弃）
+  MIGRATED                   # 迁移完成标记
+
+dist/data/{owner}/albums/{album}/
+  faces.json                 # 用户钦定：命名、多 center、appearances
+  .faces/{face_id}.webp      # 持久头像裁剪（配置的一部分）
 ```
 
-原因：
+原则：
+
+- `cache/ai/...` 可随时重建；`faces.json` + `.faces/` 只有用户编辑才会变。
+- 人物库 **per-album**（首版不跨相册合并同一人）。
+- 同一人被拆成多个 cluster 时用 **多 center**（`max` 相似度），禁止平均 embedding。
+- 迁移：`POST /api/ai/migrate` 从旧 `generations/` + owner `people/` 写入新布局。
+
+### 8.1b 旧布局（legacy，仍可读取）
+
+不使用 SQLite、嵌入式 KV 或外部数据库。早期每个 owner 使用 generation 目录：
+
+```text
+dist/data/cache/ai/{owner}/
+  albums/{cache_id}/
+    CURRENT
+    generations/
+      gen-…/
+        manifest.json
+        photos.meta
+        image-vectors.f16
+        hashes.bin
+        faces.meta
+        face-vectors.f16
+  people/
+    CURRENT
+    generations/
+      gen-…/
+        people.json
+        assignments.json
+```
+
+原因（历史）：
 
 - 与当前用户文件根目录和 owner 权限模型一致，删除和迁移用户时边界清晰。
 - 同一 owner 的跨相册人物可以形成统一人物库。
@@ -394,6 +421,8 @@ dist/data/config/{owner}/ai/
 - generation 目录天然支持原子发布和故障回滚。
 
 `CURRENT` 只包含当前 generation 名称。写入流程先在临时 generation 中生成全部文件、flush 并校验 checksum，再通过同文件系统 rename 原子替换 `CURRENT`。旧 generation 在没有活跃 reader 后由 GC 删除。API handler 只调用 `AiIndexStore`，不能自行读写这些文件。
+
+> **迁移说明**：新索引任务会同时写入 file-cache（`embeddings/` / `faces/` / `clusters.json`）与旧 generation。人物命名请使用相册弹窗与 `faces.json`；legacy `/api/ai/people` 仍可用作回退。
 
 ### 8.2 文件职责
 

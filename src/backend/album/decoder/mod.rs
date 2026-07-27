@@ -183,3 +183,23 @@ pub fn create_decoder(options: DecoderCreateOptions) -> Result<Box<dyn ImageDeco
         Ok(Box::new(AutoImageDecoder::new(options)))
     }
 }
+
+/// Decode image bytes using `path` for format detection.
+///
+/// Camera RAW (RW2, CR2, …) often cannot be identified from bytes alone; the AI
+/// pipeline must pass the original path so extension-based detection works.
+pub fn decode_bytes_with_path(
+    decoder: &dyn ImageDecoder,
+    path: &Path,
+    bytes: &[u8],
+    options: DecodeOptions,
+) -> Result<DynamicImage, DecodeError> {
+    let format = formats::resolve_format(options.format, Some(path), Some(bytes))?;
+    decoder.decode_bytes(
+        bytes,
+        DecodeOptions {
+            format: Some(format),
+            ..options
+        },
+    )
+}

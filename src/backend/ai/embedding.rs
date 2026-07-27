@@ -1,12 +1,15 @@
 use burn::backend::Flex;
 use burn::prelude::*;
+#[cfg(test)]
 use half::f16;
 use image::imageops::FilterType;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[cfg(test)]
 use crate::backend::album::decoder::{
-    create_decoder, DecodeOptions, DecoderCreateOptions,
+    DecodeOptions, DecoderCreateOptions, create_decoder, decode_bytes_with_path,
 };
 
 pub const IMAGE_EMBEDDING_DIM: usize = 128;
@@ -129,10 +132,12 @@ pub fn calibrate_siglip_text_image_score(cosine: f32) -> f32 {
     (cosine / SIGLIP_TEXT_IMAGE_COSINE_SCALE).clamp(0.0, 1.0)
 }
 
+#[cfg(test)]
 pub fn encode_f16_vector(vector: &[f32]) -> Result<Vec<u8>, String> {
     encode_f16_vector_dim(vector, vector.len())
 }
 
+#[cfg(test)]
 pub fn encode_f16_vector_dim(vector: &[f32], dim: usize) -> Result<Vec<u8>, String> {
     if dim == 0 {
         return Err("embedding dimension must be > 0".to_string());
@@ -153,6 +158,7 @@ pub fn encode_f16_vector_dim(vector: &[f32], dim: usize) -> Result<Vec<u8>, Stri
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub fn decode_f16_vector(bytes: &[u8]) -> Result<Vec<f32>, String> {
     if !bytes.len().is_multiple_of(2) || bytes.is_empty() {
         return Err(format!(
@@ -163,6 +169,7 @@ pub fn decode_f16_vector(bytes: &[u8]) -> Result<Vec<f32>, String> {
     decode_f16_vector_dim(bytes, bytes.len() / 2)
 }
 
+#[cfg(test)]
 pub fn decode_f16_vector_dim(bytes: &[u8], dim: usize) -> Result<Vec<f32>, String> {
     if dim == 0 {
         return Err("embedding dimension must be > 0".to_string());
@@ -202,17 +209,15 @@ impl DctEngine {
                     continue;
                 }
                 for sample_y in 0..SAMPLE_SIZE {
-                    let cosine_y = ((2 * sample_y + 1) as f32
-                        * frequency_y as f32
-                        * std::f32::consts::PI
-                        / (2 * SAMPLE_SIZE) as f32)
-                        .cos();
-                    for sample_x in 0..SAMPLE_SIZE {
-                        let cosine_x = ((2 * sample_x + 1) as f32
-                            * frequency_x as f32
-                            * std::f32::consts::PI
+                    let cosine_y =
+                        ((2 * sample_y + 1) as f32 * frequency_y as f32 * std::f32::consts::PI
                             / (2 * SAMPLE_SIZE) as f32)
                             .cos();
+                    for sample_x in 0..SAMPLE_SIZE {
+                        let cosine_x =
+                            ((2 * sample_x + 1) as f32 * frequency_x as f32 * std::f32::consts::PI
+                                / (2 * SAMPLE_SIZE) as f32)
+                                .cos();
                         let row = sample_y * SAMPLE_SIZE + sample_x;
                         basis_host[row * AC_COEFFS + coeff_index] =
                             cosine_x * cosine_y / PIXEL_COUNT as f32;
@@ -319,17 +324,18 @@ pub fn compute_visual_embedding_rgb(rgb: &image::RgbImage) -> Result<Vec<f32>, S
     assemble_embedding(&ac, &color)
 }
 
+#[cfg(test)]
 pub fn compute_visual_embedding(path: &Path) -> Result<Vec<f32>, String> {
     let decoder = create_decoder(DecoderCreateOptions::auto())
         .map_err(|error| format!("create decoder failed: {error}"))?;
     let bytes = std::fs::read(path).map_err(|error| format!("read photo failed: {error}"))?;
-    let image = decoder
-        .decode_bytes(&bytes, DecodeOptions::new())
+    let image = decode_bytes_with_path(decoder.as_ref(), path, &bytes, DecodeOptions::new())
         .map_err(|error| format!("decode photo for visual embedding failed: {error}"))?;
     compute_visual_embedding_rgb(&image.to_rgb8())
 }
 
 /// Batch visual embeddings with one Burn matmul for the DCT stage.
+#[cfg(test)]
 pub fn compute_visual_embeddings_rgb_batch(
     images: &[&image::RgbImage],
 ) -> Result<Vec<Vec<f32>>, String> {
@@ -350,7 +356,10 @@ pub fn compute_visual_embeddings_rgb_batch(
     for batch_index in 0..batch_size {
         let start = batch_index * AC_COEFFS;
         let end = start + AC_COEFFS;
-        out.push(assemble_embedding(&ac_batch[start..end], &colors[batch_index])?);
+        out.push(assemble_embedding(
+            &ac_batch[start..end],
+            &colors[batch_index],
+        )?);
     }
     Ok(out)
 }

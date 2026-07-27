@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -8,76 +8,39 @@ use uuid::Uuid;
 
 use sha2::{Digest, Sha256};
 
-use super::super::album::{
-    collect_accessible_ai_scan_targets, collect_album_image_paths, AiAlbumScanTarget,
-};
 use super::super::album::helpers::{load_existing_album_index, read_exif_cache_if_present};
 use super::super::album::media::preview_thumbnail_cache_path;
 use super::super::album::types::AlbumPhotoItem;
+use super::super::album::{
+    AiAlbumScanTarget, collect_accessible_ai_scan_targets, collect_album_image_paths,
+};
 use super::super::common::AppState;
-use super::duplicate::compute_duplicate_hash_pair;
-use super::faces::FACE_DETECTOR_REVISION;
+use super::super::constants::{
+    AI_EMBED_COST as EMBED_COST, AI_FACE_COST as FACE_COST, AI_SCAN_COST as SCAN_COST,
+    AI_WRITE_COST as WRITE_COST,
+};
 use super::super::i18n::{tr, trf};
-use super::models::{
-    AiFaceRecord, AiIndexedAlbumSummary, AiIndexedPhotoRecord, LoadedOwnerIndex,
-    NormalizedAiIndexRequest,
-};
-use super::people::{
-    ClusterFace, DEFAULT_CLUSTER_EPS, DEFAULT_CLUSTER_MIN_SAMPLES, FaceAssignment, PersonRecord,
-    rebuild_people_assignments,
-};
-use super::provider::{progress_channel, AiInferenceProvider, AiItemError, AiProviderHealth};
 use super::super::tasks::{
     Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused,
 };
+use super::album_cache::{AlbumAiCache, embedding_cache_key, face_photo_cache_key};
+use super::duplicate::{compute_duplicate_hash_pair, lookup_photo_phash_async};
+use super::faces::FACE_DETECTOR_REVISION;
+use super::models::{
+    AiIndexedAlbumSummary, AiIndexedPhotoRecord, LoadedOwnerIndex, NormalizedAiIndexRequest,
+};
+use super::pipelines::{
+    run_duplicate_pipeline, run_embedding_pipeline, run_face_pipeline, run_finalize_pipeline,
+};
 use serde_json::Value;
-
-pub(crate) fn pending_or_skipped(features: &[String], feature: &str) -> String {
-    if features.iter().any(|value| value == feature) {
-        "pending".to_string()
-    } else {
-        "skipped".to_string()
-    }
-}
 
 fn ai_subtask(phase: &str, path: &Path, current: usize, total: usize) -> String {
     format_subtask(phase, &task_file_name(path), current, total)
 }
 
-
 fn embedding_key_for(cache_id: &str, album_relative: &str) -> String {
     format!("{cache_id}/{album_relative}")
 }
-
-fn apply_embed_result(
-    indexed_photos: &mut [AiIndexedPhotoRecord],
-    indexed_embeddings: &mut HashMap<String, Vec<f32>>,
-    embedding_key: &str,
-    result: Result<Vec<f32>, AiItemError>,
-) {
-    let Some(photo) = indexed_photos
-        .iter_mut()
-        .find(|photo| photo.embedding_key() == embedding_key)
-    else {
-        return;
-    };
-    match result {
-        Ok(vector) => {
-            photo.image_embedding_state = "ready".to_string();
-            indexed_embeddings.insert(embedding_key.to_string(), vector);
-        }
-        Err(error) => {
-            photo.image_embedding_state = "error".to_string();
-            photo.record_error = Some(error.to_string());
-        }
-    }
-}
-
-/// Relative work weights: embedding/faces dominate wall time vs scan/hash.
-const SCAN_COST: u64 = 1;
-const EMBED_COST: u64 = 4;
-const FACE_COST: u64 = 5;
-const WRITE_COST: u64 = 1;
 
 struct ScanAlbumsResult {
     indexed_albums: Vec<AiIndexedAlbumSummary>,
@@ -102,7 +65,7 @@ struct PreparedScanPhoto {
     height: Option<u32>,
     scan_state: String,
     hash_preview: Option<PathBuf>,
-    reused_hash: Option<(String, Option<String>, Option<u64>, bool, Option<String>)>,
+    reused_hash: Option<(String, Option<u64>, bool, Option<String>)>,
     skipped_hash_error: Option<String>,
     image_embedding_state: String,
     embedding: Option<Vec<f32>>,
@@ -110,209 +73,21 @@ struct PreparedScanPhoto {
     reused_from_generation: Option<String>,
 }
 
-pub(crate) fn build_photo_content_signature(size_bytes: u64, modified_unix_seconds: Option<u64>) -> String {
+pub(crate) fn build_photo_content_signature(
+    size_bytes: u64,
+    modified_unix_seconds: Option<u64>,
+) -> String {
     match modified_unix_seconds {
         Some(modified) => format!("{size_bytes}:{modified}"),
         None => format!("{size_bytes}:unknown"),
     }
 }
 
-pub(crate) fn resolve_indexed_photo_path(cfg: &AppState, record: &AiIndexedPhotoRecord) -> Option<PathBuf> {
-    let prefix = format!("albums/{}/", record.album);
-    let relative = record.path.strip_prefix(&prefix)?;
-    let user_root = cfg.user_root_path(&record.owner);
-    let path = user_root
-        .join("albums")
-        .join(&record.source_key)
-        .join(relative);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
-}
-
-pub(crate) async fn build_faces_for_photos(
-    cfg: &AppState,
-    provider: &dyn AiInferenceProvider,
-    faces_requested: bool,
-    indexed_photos: &mut [AiIndexedPhotoRecord],
-    previous_index: &Option<LoadedOwnerIndex>,
-    photo_paths: &HashMap<String, PathBuf>,
-    progress: Option<&TaskBase>,
-    face_cost: u64,
-    cancel: Option<&AtomicBool>,
-    paused: Option<&AtomicBool>,
-) -> Result<(Vec<AiFaceRecord>, Vec<Option<Vec<f32>>>), ()> {
-    let mut face_records = Vec::new();
-    let mut face_embeddings = Vec::new();
-    if !faces_requested {
-        return Ok((face_records, face_embeddings));
-    }
-
-    let mut detect_jobs = Vec::new();
-    for photo in indexed_photos.iter_mut() {
-        if photo.face_embedding_state == "skipped" {
-            continue;
-        }
-
-        let reuse_faces = previous_index.as_ref().and_then(|loaded| {
-            if photo.face_embedding_state != "ready" {
-                return None;
-            }
-            let face_ids = loaded.faces_by_stable_key.get(&photo.stable_key)?;
-            Some(
-                face_ids
-                    .iter()
-                    .filter_map(|face_id| loaded.faces.get(face_id))
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            )
-        });
-
-        if let Some(mut reused_faces) = reuse_faces {
-            photo.face_embedding_state = "ready".to_string();
-            for mut face in reused_faces.drain(..) {
-                face.photo_id = photo.photo_id;
-                face.stable_key = photo.stable_key.clone();
-                let embedding = previous_index
-                    .as_ref()
-                    .and_then(|loaded| loaded.face_embeddings.get(&face.face_id))
-                    .cloned();
-                face.embedding_state = if embedding.is_some() {
-                    "ready".to_string()
-                } else {
-                    "error".to_string()
-                };
-                face_records.push(face);
-                face_embeddings.push(embedding);
-            }
-            if let Some(base) = progress {
-                base.add_processed_cost(face_cost);
-            }
-            continue;
-        }
-
-        let Some(photo_path) = photo_paths
-            .get(&photo.stable_key)
-            .cloned()
-            .or_else(|| resolve_indexed_photo_path(cfg, photo))
-        else {
-            photo.face_embedding_state = "error".to_string();
-            photo
-                .record_error
-                .get_or_insert_with(|| "photo path missing for face detection".to_string());
-            if let Some(base) = progress {
-                base.add_processed_cost(face_cost);
-            }
-            continue;
-        };
-
-        detect_jobs.push((photo.stable_key.clone(), photo_path));
-    }
-
-    let detect_paths: Vec<PathBuf> = detect_jobs.iter().map(|(_, path)| path.clone()).collect();
-    let detect_total = detect_paths.len().max(1);
-    if detect_paths.is_empty() {
-        return Ok((face_records, face_embeddings));
-    }
-
-    if let (Some(cancel), Some(paused)) = (cancel, paused)
-        && wait_while_paused(cancel, paused).await
-    {
-        return Err(());
-    }
-    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-        return Err(());
-    }
-
-    let progress_cap = provider
-        .capabilities()
-        .max_batch_size
-        .unwrap_or(8)
-        .saturating_mul(4)
-        .max(8);
-    let (progress_tx, mut progress_rx) = progress_channel(progress_cap);
-    let progress_base = progress;
-    let progress_task = async {
-        let mut done = 0usize;
-        while let Some((_, path)) = progress_rx.recv().await {
-            done += 1;
-            if let Some(base) = progress_base {
-                base
-                    .set_cur_task(ai_subtask(
-                        "detecting faces",
-                        path.as_path(),
-                        done,
-                        detect_total,
-                    ))
-                    .await;
-                base.add_processed_cost(face_cost);
-            }
-        }
-    };
-
-    let (detected_result, _) = tokio::join!(
-        provider.detect_and_embed_faces_progress(
-            detect_paths.as_slice(),
-            Some(progress_tx),
-            cancel,
-        ),
-        progress_task,
-    );
-    let detected_results = match detected_result {
-        Ok(results) => results,
-        Err(error) => detect_jobs
-            .iter()
-            .map(|_| {
-                Err(AiItemError {
-                    code: "provider_rejected".to_string(),
-                    message: error.clone(),
-                })
-            })
-            .collect(),
-    };
-
-    let mut photo_by_stable_key = indexed_photos
-        .iter_mut()
-        .map(|photo| (photo.stable_key.clone(), photo))
-        .collect::<HashMap<_, _>>();
-
-    for ((stable_key, _), result) in detect_jobs.into_iter().zip(detected_results) {
-        let Some(photo) = photo_by_stable_key.get_mut(&stable_key) else {
-            continue;
-        };
-        match result {
-            Ok(detected_faces) => {
-                photo.face_embedding_state = "ready".to_string();
-                let photo_id = photo.photo_id;
-                for detected in detected_faces {
-                    face_records.push(AiFaceRecord {
-                        face_id: Uuid::new_v4().to_string(),
-                        photo_id,
-                        stable_key: stable_key.clone(),
-                        box_xywh: detected.box_xywh,
-                        landmarks: detected.landmarks,
-                        detection_score: detected.detection_score,
-                        quality_score: detected.quality_score,
-                        detector_revision: FACE_DETECTOR_REVISION.to_string(),
-                        embedding_state: "ready".to_string(),
-                        embedding_offset: None,
-                    });
-                    face_embeddings.push(Some(detected.embedding));
-                }
-            }
-            Err(error) => {
-                photo.face_embedding_state = "error".to_string();
-                photo.record_error = Some(error.to_string());
-            }
-        }
-    }
-
-    Ok((face_records, face_embeddings))
-}
-
-pub(crate) fn build_photo_stable_identity(owner: &str, source_key: &str, path: &str) -> (String, String) {
+pub(crate) fn build_photo_stable_identity(
+    owner: &str,
+    source_key: &str,
+    path: &str,
+) -> (String, String) {
     let stable_key = format!("{owner}|{source_key}|{path}");
     let mut hasher = Sha256::new();
     hasher.update(stable_key.as_bytes());
@@ -377,13 +152,12 @@ fn resolve_scan_dimensions(
     }
 }
 
-
 pub struct AiIndexTask {
     base: TaskBase,
     cfg: Arc<AppState>,
     locale: String,
     request: NormalizedAiIndexRequest,
-    cancel: AtomicBool,
+    cancel: Arc<AtomicBool>,
     paused: AtomicBool,
 }
 
@@ -400,7 +174,7 @@ impl AiIndexTask {
             cfg,
             locale,
             request,
-            cancel: AtomicBool::new(false),
+            cancel: Arc::new(AtomicBool::new(false)),
             paused: AtomicBool::new(false),
         }
     }
@@ -410,7 +184,7 @@ impl AiIndexTask {
     }
 
     async fn wait_if_paused(&self) -> bool {
-        wait_while_paused(&self.cancel, &self.paused).await
+        wait_while_paused(self.cancel.as_ref(), &self.paused).await
     }
 
     async fn abort_if_cancelled(&self) -> bool {
@@ -494,7 +268,7 @@ impl AiIndexTask {
         image_requested: bool,
         faces_requested: bool,
     ) {
-        let mut estimated_total = photos_listed as u64 * SCAN_COST + WRITE_COST;
+        let mut estimated_total = photos_listed as u64 * (SCAN_COST + WRITE_COST);
         if image_requested {
             estimated_total += photos_listed as u64 * EMBED_COST;
         }
@@ -568,7 +342,9 @@ impl AiIndexTask {
                     &mut pending_image_embeds,
                 )
                 .await?;
-            let hash_results = self.hash_prepared_photos(&target.album_name, &prepared).await?;
+            let hash_results = self
+                .hash_prepared_photos(&target.album_name, &prepared)
+                .await?;
             Self::commit_prepared_photos(
                 &target,
                 &source_key,
@@ -626,7 +402,13 @@ impl AiIndexTask {
                     scan_total,
                 ))
                 .await;
-            let Ok(metadata) = std::fs::metadata(&photo_path) else {
+            let photo_path_for_meta = photo_path.clone();
+            let Some(metadata) =
+                tokio::task::spawn_blocking(move || std::fs::metadata(photo_path_for_meta))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+            else {
                 continue;
             };
             let relative_path = photo_path
@@ -641,7 +423,6 @@ impl AiIndexTask {
                         .to_string()
                 });
             let display_path = format!("albums/{}/{relative_path}", target.album_name);
-            let legacy_stable_key = format!("{source_key}|{display_path}");
             let (stable_key, stable_id) = build_photo_stable_identity(
                 target.owner.as_str(),
                 source_key,
@@ -655,12 +436,9 @@ impl AiIndexTask {
             let content_signature =
                 build_photo_content_signature(metadata.len(), modified_unix_seconds);
             let index_entry = album_index_by_path.get(&display_path);
-            let previous_record = previous_index.as_ref().and_then(|loaded| {
-                loaded
-                    .photos
-                    .get(&stable_key)
-                    .or_else(|| loaded.photos.get(&legacy_stable_key))
-            });
+            let previous_record = previous_index
+                .as_ref()
+                .and_then(|loaded| loaded.photos.get(&stable_key));
             let reusable_record = previous_record.filter(|record| {
                 !record.content_signature.is_empty()
                     && record.content_signature == content_signature
@@ -680,64 +458,67 @@ impl AiIndexTask {
             } else {
                 "discovered".to_string()
             };
-            let (hash_preview, reused_hash, skipped_hash_error) = if let Some(record) =
-                reusable_record
-                && record.duplicate_hash_state == "ready"
-                && record.duplicate_phash_valid
-                && record.duplicate_phash_u64.is_some()
-            {
-                (
-                    None,
-                    Some((
-                        "ready".to_string(),
-                        None, // exact SHA256 disabled
-                        record.duplicate_phash_u64,
-                        record.duplicate_phash_valid,
-                        record.record_error.clone(),
-                    )),
-                    None,
-                )
-            } else if duplicates_requested {
-                let preview = preview_thumbnail_cache_path(
-                    self.cfg.data_path.as_path(),
-                    target.owner.as_str(),
-                    &photo_path,
-                    &metadata,
-                );
-                (Some(preview), None, None)
-            } else {
-                (
-                    None,
-                    None,
-                    reusable_record.and_then(|record| record.record_error.clone()),
-                )
+            let (hash_preview, reused_hash, skipped_hash_error) = {
+                let cached_phash = if duplicates_requested && !target.cache_id.is_empty() {
+                    lookup_photo_phash_async(
+                        self.cfg.ai_service.store().root(),
+                        target.owner.as_str(),
+                        target.cache_id.as_str(),
+                        &stable_key,
+                        &content_signature,
+                    )
+                    .await
+                } else {
+                    None
+                };
+                if let Some(phash) = cached_phash {
+                    (
+                        None,
+                        Some(("ready".to_string(), Some(phash), true, None)),
+                        None,
+                    )
+                } else if duplicates_requested {
+                    let preview = preview_thumbnail_cache_path(
+                        self.cfg.data_path.as_path(),
+                        target.owner.as_str(),
+                        &photo_path,
+                        &metadata,
+                    );
+                    (Some(preview), None, None)
+                } else {
+                    (
+                        None,
+                        None,
+                        reusable_record.and_then(|record| record.record_error.clone()),
+                    )
+                }
             };
-            let reused_embedding = reusable_record.and_then(|record| {
-                let embed_key = embedding_key_for(target.cache_id.as_str(), &relative_path);
-                previous_index
-                    .as_ref()
-                    .and_then(|loaded| {
-                        loaded
-                            .embeddings
-                            .get(&embed_key)
-                            .or_else(|| loaded.embeddings.get(&record.stable_key))
-                            .or_else(|| loaded.embeddings.get(&stable_key))
-                            .or_else(|| loaded.embeddings.get(&legacy_stable_key))
-                    })
-                    .cloned()
-                    .filter(|_| record.image_embedding_state == "ready")
-            });
+            let reused_embedding = if image_requested && !target.cache_id.is_empty() {
+                let revision = provider_revision.as_deref().unwrap_or("unknown");
+                let key = embedding_cache_key(&stable_key, &content_signature, revision);
+                let cache = AlbumAiCache::new(
+                    self.cfg.ai_service.store().root(),
+                    target.owner.as_str(),
+                    target.cache_id.as_str(),
+                );
+                cache
+                    .read_embedding_async(&key)
+                    .await
+                    .and_then(|file| file.decode_vector().ok())
+            } else {
+                None
+            };
             let (image_embedding_state, embedding) = if let Some(vector) = reused_embedding {
                 ("ready".to_string(), Some(vector))
             } else if image_requested {
-                // Prefer 360px preview for SigLIP (256 input); fall back to original.
+                // Prefer preview thumbs (THUMBNAIL_SIZE) for SigLIP (256 input); fall back to original.
                 let preview = preview_thumbnail_cache_path(
                     self.cfg.data_path.as_path(),
                     target.owner.as_str(),
                     &photo_path,
                     &metadata,
                 );
-                let decode_path = if preview.is_file() {
+                let decode_path = if tokio::fs::try_exists(&preview).await.unwrap_or(false) {
                     preview
                 } else {
                     photo_path.clone()
@@ -749,16 +530,38 @@ impl AiIndexTask {
                 ));
                 ("pending".to_string(), None)
             } else {
-                (
-                    reusable_record
-                        .map(|record| record.image_embedding_state.clone())
-                        .unwrap_or_else(|| "skipped".to_string()),
-                    None,
-                )
+                ("skipped".to_string(), None)
             };
-            let face_embedding_state = reusable_record
-                .map(|record| record.face_embedding_state.clone())
-                .unwrap_or_else(|| pending_or_skipped(&self.request.features, "faces"));
+            // Face reuse must come from faces/*.json (or prior ready state), never from
+            // embedding-only file-cache stubs that defaulted to "skipped".
+            let face_embedding_state = if !self
+                .request
+                .features
+                .iter()
+                .any(|feature| feature == "faces")
+            {
+                "skipped".to_string()
+            } else if !target.cache_id.is_empty() {
+                let face_key = face_photo_cache_key(
+                    &stable_key,
+                    &content_signature,
+                    provider_revision
+                        .as_deref()
+                        .unwrap_or(FACE_DETECTOR_REVISION),
+                );
+                let cache = AlbumAiCache::new(
+                    self.cfg.ai_service.store().root(),
+                    target.owner.as_str(),
+                    target.cache_id.as_str(),
+                );
+                if cache.has_face_photo_async(&face_key).await {
+                    "ready".to_string()
+                } else {
+                    "pending".to_string()
+                }
+            } else {
+                "pending".to_string()
+            };
             let reused_from_generation = reusable_record.and_then(|record| {
                 previous_index
                     .as_ref()
@@ -793,10 +596,7 @@ impl AiIndexTask {
         &self,
         album_name: &str,
         prepared: &[PreparedScanPhoto],
-    ) -> Result<
-        Vec<Option<(String, Option<String>, Option<u64>, bool, Option<String>)>>,
-        (),
-    > {
+    ) -> Result<Vec<Option<(String, Option<u64>, bool, Option<String>)>>, ()> {
         let hash_phase = format!("hashing · {album_name}");
         let hash_concurrency = std::thread::available_parallelism()
             .map(|value| value.get())
@@ -857,10 +657,7 @@ impl AiIndexTask {
             .collect::<Vec<_>>()
             .await;
         indexed.sort_by_key(|(index, _)| *index);
-        Ok(indexed
-            .into_iter()
-            .map(|(_, computed)| computed)
-            .collect())
+        Ok(indexed.into_iter().map(|(_, computed)| computed).collect())
     }
 
     fn commit_prepared_photos(
@@ -869,31 +666,20 @@ impl AiIndexTask {
         provider_revision: &Option<String>,
         indexed_at_unix_ms: u128,
         prepared: Vec<PreparedScanPhoto>,
-        hash_results: Vec<Option<(String, Option<String>, Option<u64>, bool, Option<String>)>>,
+        hash_results: Vec<Option<(String, Option<u64>, bool, Option<String>)>>,
         indexed_photos: &mut Vec<AiIndexedPhotoRecord>,
         indexed_embeddings: &mut HashMap<String, Vec<f32>>,
         photo_disk_paths: &mut HashMap<String, PathBuf>,
     ) {
         for (photo, computed_hash) in prepared.into_iter().zip(hash_results.into_iter()) {
-            let (
-                duplicate_hash_state,
-                duplicate_sha256_hex,
-                duplicate_phash_u64,
-                duplicate_phash_valid,
-                record_error,
-            ) = if let Some(reused) = photo.reused_hash {
-                reused
-            } else if let Some(computed) = computed_hash {
-                computed
-            } else {
-                (
-                    "skipped".to_string(),
-                    None,
-                    None,
-                    false,
-                    photo.skipped_hash_error,
-                )
-            };
+            let (duplicate_hash_state, duplicate_phash_u64, duplicate_phash_valid, record_error) =
+                if let Some(reused) = photo.reused_hash {
+                    reused
+                } else if let Some(computed) = computed_hash {
+                    computed
+                } else {
+                    ("skipped".to_string(), None, false, photo.skipped_hash_error)
+                };
             photo_disk_paths.insert(photo.stable_key.clone(), photo.photo_path);
             if let Some(vector) = photo.embedding {
                 indexed_embeddings.insert(
@@ -918,12 +704,8 @@ impl AiIndexTask {
                 provider_revision: provider_revision.clone(),
                 scan_state: photo.scan_state,
                 image_embedding_state: photo.image_embedding_state,
-                image_embedding_offset: None,
                 duplicate_hash_state,
-                duplicate_sha256_hex,
-                duplicate_sha256_offset: None,
                 duplicate_phash_u64,
-                duplicate_phash_offset: None,
                 duplicate_phash_valid,
                 face_embedding_state: photo.face_embedding_state,
                 reused_from_generation: photo.reused_from_generation,
@@ -949,93 +731,6 @@ impl AiIndexTask {
         indexed_photos
     }
 
-    /// Persist image embeddings right after the embed phase (before faces).
-    async fn checkpoint_image_embeddings(
-        &self,
-        provider_health: &AiProviderHealth,
-        indexed_albums: &[AiIndexedAlbumSummary],
-        indexed_photos: &[AiIndexedPhotoRecord],
-        indexed_embeddings: &HashMap<String, Vec<f32>>,
-    ) -> Result<(), ()> {
-        let mut cache_ids = indexed_photos
-            .iter()
-            .map(|photo| photo.cache_id.clone())
-            .filter(|cache_id| !cache_id.is_empty())
-            .collect::<BTreeSet<_>>();
-        if cache_ids.is_empty() {
-            for album in indexed_albums {
-                if !album.cache_id.is_empty() {
-                    cache_ids.insert(album.cache_id.clone());
-                }
-            }
-        }
-        if cache_ids.is_empty() {
-            return Ok(());
-        }
-
-        let write_total = cache_ids.len().max(1);
-        for (write_index, cache_id) in cache_ids.into_iter().enumerate() {
-            if self.should_stop().await {
-                return Err(());
-            }
-            let album_label = indexed_albums
-                .iter()
-                .find(|album| album.cache_id == cache_id)
-                .map(|album| album.album.as_str())
-                .unwrap_or(cache_id.as_str());
-            self.base
-                .set_cur_task(format_subtask(
-                    "checkpoint embeddings",
-                    album_label,
-                    write_index + 1,
-                    write_total,
-                ))
-                .await;
-
-            let mut album_photos = Vec::new();
-            for photo in indexed_photos.iter().cloned() {
-                if photo.cache_id != cache_id {
-                    continue;
-                }
-                let mut photo = photo;
-                photo.photo_id = album_photos.len();
-                album_photos.push(photo);
-            }
-
-            let album_summaries = indexed_albums
-                .iter()
-                .filter(|album| album.cache_id == cache_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            let album_photo_count = album_photos.len();
-            let mut empty_faces: Vec<AiFaceRecord> = Vec::new();
-            let empty_face_embeddings: Vec<Option<Vec<f32>>> = Vec::new();
-            if let Err(error) = self
-                .cfg
-                .ai_service
-                .bootstrap_owner_index(
-                    self.base.owner.as_str(),
-                    cache_id.as_str(),
-                    &self.request,
-                    provider_health,
-                    &album_summaries,
-                    &mut album_photos,
-                    indexed_embeddings,
-                    &mut empty_faces,
-                    &empty_face_embeddings,
-                    &[],
-                    &[],
-                    album_photo_count,
-                )
-                .await
-            {
-                self.fail(error).await;
-                return Err(());
-            }
-        }
-        Ok(())
-    }
-
     fn recalibrate_progress(
         &self,
         photos_total: usize,
@@ -1045,324 +740,12 @@ impl AiIndexTask {
         let scan_done = photos_total as u64 * SCAN_COST;
         let remaining = pending_image_embeds_len as u64 * EMBED_COST
             + face_work as u64 * FACE_COST
-            + WRITE_COST;
+            + photos_total as u64 * WRITE_COST;
         // Count stays photo-based for the sidebar; cost drives the progress bar.
         self.base.set_total_count(photos_total.max(1));
         self.base.set_processed_count(photos_total);
         self.base.set_total_cost(scan_done + remaining);
         self.base.set_processed_cost(scan_done);
-    }
-
-    async fn embed_pending_images(
-        &self,
-        provider: &dyn AiInferenceProvider,
-        pending_image_embeds: &[(String, PathBuf, PathBuf)],
-        indexed_photos: &mut [AiIndexedPhotoRecord],
-        indexed_embeddings: &mut HashMap<String, Vec<f32>>,
-    ) -> Result<(), ()> {
-        if pending_image_embeds.is_empty() {
-            return Ok(());
-        }
-        if self.should_stop().await {
-            return Err(());
-        }
-
-        let embed_total = pending_image_embeds.len().max(1);
-        let paths = pending_image_embeds
-            .iter()
-            .map(|(_, _, decode_path)| decode_path.clone())
-            .collect::<Vec<_>>();
-        let embedding_keys = pending_image_embeds
-            .iter()
-            .map(|(embedding_key, _, _)| embedding_key.clone())
-            .collect::<Vec<_>>();
-
-        let progress_cap = provider
-        .capabilities()
-        .max_batch_size
-        .unwrap_or(8)
-        .saturating_mul(4)
-        .max(8);
-    let (progress_tx, mut progress_rx) = progress_channel(progress_cap);
-        let base = &self.base;
-        let progress_task = async {
-            let mut done = 0usize;
-            while let Some((index, path)) = progress_rx.recv().await {
-                done += 1;
-                // Prefer original photo path for UI; decode_path may be a preview thumbnail.
-                let display = pending_image_embeds
-                    .get(index)
-                    .map(|(_, photo_path, _)| photo_path.as_path())
-                    .unwrap_or(path.as_path());
-                base
-                    .set_cur_task(ai_subtask(
-                        "embedding images",
-                        display,
-                        done,
-                        embed_total,
-                    ))
-                    .await;
-                base.add_processed_cost(EMBED_COST);
-            }
-        };
-
-        let (results, _) = tokio::join!(
-            provider.embed_images_progress(
-                paths.as_slice(),
-                Some(progress_tx),
-                Some(&self.cancel),
-            ),
-            progress_task,
-        );
-
-        match results {
-            Ok(results) => {
-                for (embedding_key, result) in embedding_keys.iter().zip(results) {
-                    apply_embed_result(
-                        indexed_photos,
-                        indexed_embeddings,
-                        embedding_key,
-                        result,
-                    );
-                }
-            }
-            Err(error) => {
-                for embedding_key in embedding_keys {
-                    apply_embed_result(
-                        indexed_photos,
-                        indexed_embeddings,
-                        embedding_key.as_str(),
-                        Err(AiItemError {
-                            code: "provider_rejected".to_string(),
-                            message: error.clone(),
-                        }),
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn build_faces_and_people(
-        &self,
-        provider: &dyn AiInferenceProvider,
-        faces_requested: bool,
-        indexed_photos: &mut [AiIndexedPhotoRecord],
-        previous_index: &mut Option<LoadedOwnerIndex>,
-        photo_disk_paths: &HashMap<String, PathBuf>,
-    ) -> Result<
-        (
-            Vec<AiFaceRecord>,
-            Vec<Option<Vec<f32>>>,
-            Vec<PersonRecord>,
-            Vec<FaceAssignment>,
-        ),
-        (),
-    > {
-        if faces_requested {
-            let (face_records, face_embeddings) = match build_faces_for_photos(
-                self.cfg.as_ref(),
-                provider,
-                faces_requested,
-                indexed_photos,
-                previous_index,
-                photo_disk_paths,
-                Some(&self.base),
-                FACE_COST,
-                Some(&self.cancel),
-                Some(&self.paused),
-            )
-            .await
-            {
-                Ok(value) => value,
-                Err(()) => {
-                    let _ = self.abort_if_cancelled().await;
-                    return Err(());
-                }
-            };
-            if self.should_stop().await {
-                return Err(());
-            }
-            self.base.set_cur_task("clustering people".to_string()).await;
-            let cluster_faces = face_records
-                .iter()
-                .zip(face_embeddings.iter())
-                .filter_map(|(face, embedding)| {
-                    embedding.as_ref().map(|vector| ClusterFace {
-                        face_id: face.face_id.clone(),
-                        embedding: vector.clone(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            let previous_people = previous_index
-                .as_ref()
-                .map(|loaded| loaded.people.values().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            let previous_assignments = previous_index
-                .as_ref()
-                .map(|loaded| loaded.assignments.values().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            // Finished reusing prior faces/people — free the merged old index before DBSCAN.
-            *previous_index = None;
-            let (people, assignments) = rebuild_people_assignments(
-                &cluster_faces,
-                previous_people,
-                previous_assignments,
-                DEFAULT_CLUSTER_EPS,
-                DEFAULT_CLUSTER_MIN_SAMPLES,
-            );
-            Ok((face_records, face_embeddings, people, assignments))
-        } else if let Some(previous) = previous_index.as_ref() {
-            let face_records = previous.faces.values().cloned().collect::<Vec<_>>();
-            let face_embeddings = face_records
-                .iter()
-                .map(|face| previous.face_embeddings.get(&face.face_id).cloned())
-                .collect::<Vec<_>>();
-            let people = previous.people.values().cloned().collect::<Vec<_>>();
-            let assignments = previous.assignments.values().cloned().collect::<Vec<_>>();
-            Ok((face_records, face_embeddings, people, assignments))
-        } else {
-            Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()))
-        }
-    }
-
-    async fn write_generations_and_finish(
-        &self,
-        provider_health: &AiProviderHealth,
-        indexed_albums: &[AiIndexedAlbumSummary],
-        indexed_photos: &[AiIndexedPhotoRecord],
-        indexed_embeddings: &HashMap<String, Vec<f32>>,
-        face_records: &[AiFaceRecord],
-        face_embeddings: &[Option<Vec<f32>>],
-        people: &[PersonRecord],
-        assignments: &[FaceAssignment],
-    ) {
-        let mut cache_ids = indexed_photos
-            .iter()
-            .map(|photo| photo.cache_id.clone())
-            .filter(|cache_id| !cache_id.is_empty())
-            .collect::<BTreeSet<_>>();
-        if cache_ids.is_empty() {
-            for album in indexed_albums {
-                if !album.cache_id.is_empty() {
-                    cache_ids.insert(album.cache_id.clone());
-                }
-            }
-        }
-
-        let write_total = cache_ids.len().max(1);
-        let mut write_error = None;
-        let mut committed = Vec::new();
-        for (write_index, cache_id) in cache_ids.into_iter().enumerate() {
-            if self.should_stop().await {
-                return;
-            }
-            let album_label = indexed_albums
-                .iter()
-                .find(|album| album.cache_id == cache_id)
-                .map(|album| album.album.as_str())
-                .unwrap_or(cache_id.as_str());
-            self.base
-                .set_cur_task(format_subtask(
-                    "writing index",
-                    album_label,
-                    write_index + 1,
-                    write_total,
-                ))
-                .await;
-            let mut album_photos = Vec::new();
-            let mut old_photo_id_to_new = HashMap::<usize, usize>::new();
-            for photo in indexed_photos.iter().cloned() {
-                if photo.cache_id != cache_id {
-                    continue;
-                }
-                let new_id = album_photos.len();
-                old_photo_id_to_new.insert(photo.photo_id, new_id);
-                let mut photo = photo;
-                photo.photo_id = new_id;
-                album_photos.push(photo);
-            }
-            let mut album_faces = Vec::new();
-            let mut album_face_embeddings = Vec::new();
-            for (face, embedding) in face_records.iter().zip(face_embeddings.iter()) {
-                let Some(&new_photo_id) = old_photo_id_to_new.get(&face.photo_id) else {
-                    continue;
-                };
-                let mut face = face.clone();
-                face.photo_id = new_photo_id;
-                album_faces.push(face);
-                album_face_embeddings.push(embedding.clone());
-            }
-            let album_summaries = indexed_albums
-                .iter()
-                .filter(|album| album.cache_id == cache_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            let album_photo_count = album_photos.len();
-            match self
-                .cfg
-                .ai_service
-                .bootstrap_owner_index(
-                    self.base.owner.as_str(),
-                    cache_id.as_str(),
-                    &self.request,
-                    provider_health,
-                    &album_summaries,
-                    &mut album_photos,
-                    indexed_embeddings,
-                    &mut album_faces,
-                    &album_face_embeddings,
-                    &[],
-                    &[],
-                    album_photo_count,
-                )
-                .await
-            {
-                Ok(generation_id) => committed.push((cache_id, generation_id, album_photo_count)),
-                Err(error) => {
-                    write_error = Some(error);
-                    break;
-                }
-            }
-        }
-
-        if write_error.is_none() {
-            if let Err(error) = self
-                .cfg
-                .ai_service
-                .bootstrap_people_index(self.base.owner.as_str(), people, assignments)
-                .await
-            {
-                write_error = Some(error);
-            }
-        }
-
-        if self.abort_if_cancelled().await {
-            return;
-        }
-
-        match write_error {
-            None => {
-                self.base.add_processed_cost(WRITE_COST);
-                let summary = committed
-                    .iter()
-                    .map(|(cache_id, generation_id, count)| {
-                        format!("{cache_id}:{generation_id}({count})")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.base
-                    .set_cur_task(format!(
-                        "committed {} album index(es): {summary}",
-                        committed.len()
-                    ))
-                    .await;
-                self.base.set_status(TaskStatus::Finished).await;
-            }
-            Some(error) => {
-                self.fail(error).await;
-            }
-        }
     }
 }
 
@@ -1396,7 +779,8 @@ impl Task for AiIndexTask {
             .cfg
             .ai_service
             .store()
-            .load_current_index(self.base.owner.as_str());
+            .load_current_index_async(self.base.owner.as_str())
+            .await;
 
         let Ok(targets) = self.collect_scan_targets().await else {
             return;
@@ -1454,67 +838,103 @@ impl Task for AiIndexTask {
         };
         self.recalibrate_progress(photos_total, pending_image_embeds.len(), face_work);
 
-        if image_requested {
-            let Ok(()) = self
-                .embed_pending_images(
-                    provider.as_ref(),
-                    &pending_image_embeds,
-                    &mut indexed_photos,
-                    &mut indexed_embeddings,
-                )
-                .await
-            else {
+        let decode_parallelism = self.cfg.settings_manager.ai_cpu_threads().await.max(1);
+
+        if duplicates_requested
+            || indexed_photos
+                .iter()
+                .any(|photo| photo.duplicate_phash_valid)
+        {
+            if run_duplicate_pipeline(
+                self.cfg.ai_service.store().root(),
+                self.base.owner.as_str(),
+                &indexed_albums,
+                &indexed_photos,
+                &self.base,
+                &self.cancel,
+                &self.paused,
+            )
+            .await
+            .is_err()
+            {
+                if !self.abort_if_cancelled().await {
+                    self.fail("failed to publish duplicates index".to_string())
+                        .await;
+                }
                 return;
-            };
+            }
         }
 
-        // Durable checkpoint: next run can reuse image embeddings if we die during faces.
         if image_requested {
-            let Ok(()) = self
-                .checkpoint_image_embeddings(
-                    &provider_health,
-                    &indexed_albums,
-                    &indexed_photos,
-                    &indexed_embeddings,
-                )
-                .await
-            else {
+            if run_embedding_pipeline(
+                self.cfg.ai_service.store().root(),
+                Arc::clone(&provider),
+                &pending_image_embeds,
+                &mut indexed_photos,
+                &mut indexed_embeddings,
+                &self.base,
+                Arc::clone(&self.cancel),
+                decode_parallelism,
+            )
+            .await
+            .is_err()
+            {
+                let _ = self.abort_if_cancelled().await;
                 return;
-            };
+            }
+            // Per-photo embeddings/*.json are already durable; no mid-run generation rewrite.
         }
 
         if self.abort_if_cancelled().await {
             return;
         }
 
-        let Ok((face_records, face_embeddings, people, assignments)) = self
-            .build_faces_and_people(
-                provider.as_ref(),
-                faces_requested,
-                &mut indexed_photos,
-                &mut previous_index,
-                &photo_disk_paths,
-            )
-            .await
-        else {
-            return;
+        let face_out = match run_face_pipeline(
+            self.cfg.as_ref(),
+            Arc::clone(&provider),
+            faces_requested,
+            &mut indexed_photos,
+            &mut previous_index,
+            &photo_disk_paths,
+            &self.base,
+            Arc::clone(&self.cancel),
+            &self.paused,
+            decode_parallelism,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(()) => {
+                let _ = self.abort_if_cancelled().await;
+                return;
+            }
         };
 
         if self.should_stop().await {
             return;
         }
 
-        self.write_generations_and_finish(
+        match run_finalize_pipeline(
+            self.cfg.as_ref(),
+            self.base.owner.as_str(),
+            &self.request,
             &provider_health,
             &indexed_albums,
             &indexed_photos,
-            &indexed_embeddings,
-            &face_records,
-            &face_embeddings,
-            &people,
-            &assignments,
+            &face_out.face_records,
+            &self.base,
+            &self.cancel,
         )
-        .await;
+        .await
+        {
+            Ok(()) => {}
+            Err(error) if error == "cancelled" => {
+                let _ = self.abort_if_cancelled().await;
+            }
+            Err(error) => {
+                self.fail(error).await;
+            }
+        }
     }
 
     async fn cancel(&self) {
@@ -1561,7 +981,10 @@ pub async fn queue_owner_ai_index(
     locale: &str,
 ) -> Option<Uuid> {
     let ai_enabled = cfg.settings_manager.ai_enabled().await;
-    let has_index = cfg.ai_service.store().owner_has_current_index(owner.as_str());
+    let has_index = cfg
+        .ai_service
+        .store()
+        .owner_has_current_index(owner.as_str());
     if !ai_enabled && !has_index {
         return None;
     }
@@ -1588,4 +1011,3 @@ pub async fn queue_owner_ai_index(
     let (task_id, _) = cfg.task_mgr.add_task_if_absent(task).await;
     Some(task_id)
 }
-

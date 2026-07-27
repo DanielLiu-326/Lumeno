@@ -194,12 +194,7 @@ mod tests {
             "outdoor landscape",
         ];
         let query_embeds = runtime
-            .embed_texts(
-                &queries
-                    .iter()
-                    .map(|q| (*q).to_string())
-                    .collect::<Vec<_>>(),
-            )
+            .embed_texts(&queries.iter().map(|q| (*q).to_string()).collect::<Vec<_>>())
             .expect("text embeds");
 
         let mut processed = 0usize;
@@ -316,8 +311,11 @@ mod tests {
             "results": results,
         });
         let out_path = testdata.join("results.json");
-        std::fs::write(&out_path, serde_json::to_string_pretty(&summary).unwrap() + "\n")
-            .expect("write results");
+        std::fs::write(
+            &out_path,
+            serde_json::to_string_pretty(&summary).unwrap() + "\n",
+        )
+        .expect("write results");
         eprintln!("[smoke] wrote {}", out_path.display());
         eprintln!(
             "[smoke] summary scenes={scene_ok}/{}/{} faces={face_ok}/{} detected={faces_detected} embed_avg_ms={:?} detect_avg_ms={:?}",

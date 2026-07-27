@@ -1,28 +1,22 @@
+//! Inference providers: decoded images / texts in, vectors / faces out.
+//!
+//! Providers must not read paths, decode images, own pipelines, or touch cache.
+
 use async_trait::async_trait;
+use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::album::decoder::{
-    create_decoder, DecodeOptions, DecoderCreateOptions, ImageDecoder,
-};
 use super::embedding::{
     TEXT_HASH_REVISION, VISUAL_EMBED_REVISION, compute_text_hash_embedding,
+    compute_visual_embedding_rgb,
 };
-use super::faces::{
-    DetectedFace, FACE_DETECTOR_REVISION, detect_and_embed_faces_from_image,
-};
-use super::models::backend::selected_ai_device;
+use super::faces::{DetectedFace, FACE_DETECTOR_REVISION, detect_and_embed_faces_from_image};
 use super::models::runtime::LocalModelRuntime;
-
-#[path = "pipeline.rs"]
-mod pipeline;
-
-pub use pipeline::PipelineProgressTx;
-pub use pipeline::{PipelineProgressRx, progress_channel};
-use pipeline::{PipelineConfig, run_image_pipeline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProviderKind {
@@ -108,9 +102,10 @@ pub trait AiInferenceProvider: Send + Sync {
     fn model_revision(&self) -> Option<String>;
     async fn health(&self) -> AiProviderHealth;
 
+    /// Embed already-decoded images (order-preserving, per-item errors).
     async fn embed_images(
         &self,
-        paths: &[PathBuf],
+        images: &[DynamicImage],
     ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String>;
 
     async fn embed_texts(
@@ -118,30 +113,11 @@ pub trait AiInferenceProvider: Send + Sync {
         texts: &[String],
     ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String>;
 
+    /// Detect faces on already-decoded images (order-preserving, per-item errors).
     async fn detect_and_embed_faces(
         &self,
-        paths: &[PathBuf],
+        images: &[DynamicImage],
     ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String>;
-
-    async fn detect_and_embed_faces_progress(
-        &self,
-        paths: &[PathBuf],
-        progress: Option<PipelineProgressTx>,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
-        let _ = (progress, cancel);
-        self.detect_and_embed_faces(paths).await
-    }
-
-    async fn embed_images_progress(
-        &self,
-        paths: &[PathBuf],
-        progress: Option<PipelineProgressTx>,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        let _ = (progress, cancel);
-        self.embed_images(paths).await
-    }
 }
 
 enum LocalInferenceMode {
@@ -154,45 +130,20 @@ pub struct LocalBurnProvider {
     model_root: PathBuf,
     capabilities: AiCapabilities,
     revision: Option<String>,
-    /// GPU infer batch size (`ai_batch_size`).
-    gpu_batch_size: usize,
-    /// Max concurrent CPU decode workers (`ai_cpu_threads`).
-    cpu_threads: usize,
-    decoder: Arc<dyn ImageDecoder>,
-    decode_apply_exif: bool,
     mode: LocalInferenceMode,
-    fallback_interim: bool,
 }
 
 impl LocalBurnProvider {
     pub fn new(model_root: PathBuf, batch_size: usize) -> Self {
-        Self::with_options(
-            model_root,
-            batch_size,
-            crate::backend::settings::SettingsManager::default_ai_cpu_threads(),
-            false,
-        )
+        Self::with_options(model_root, batch_size, false)
     }
 
     pub fn with_interim_fallback(model_root: PathBuf, batch_size: usize) -> Self {
-        Self::with_options(
-            model_root,
-            batch_size,
-            crate::backend::settings::SettingsManager::default_ai_cpu_threads(),
-            true,
-        )
+        Self::with_options(model_root, batch_size, true)
     }
 
-    pub fn with_options(
-        model_root: PathBuf,
-        batch_size: usize,
-        cpu_threads: usize,
-        fallback_interim: bool,
-    ) -> Self {
-        // `gpu_batch_size`: infer consumer batch; `cpu_threads`: decode worker pool.
-        let gpu_batch_size = batch_size.clamp(1, 64);
-        let cpu_threads = cpu_threads.max(1);
-        let decode_apply_exif = true;
+    pub fn with_options(model_root: PathBuf, batch_size: usize, fallback_interim: bool) -> Self {
+        let max_batch_size = batch_size.clamp(1, 64);
         match LocalModelRuntime::try_load(&model_root) {
             Ok(runtime) => {
                 let image_dim = runtime.info.image_dim;
@@ -205,20 +156,12 @@ impl LocalBurnProvider {
                         text_search: true,
                         duplicates: true,
                         faces: true,
-                        max_batch_size: Some(gpu_batch_size),
+                        max_batch_size: Some(max_batch_size),
                         image_embedding_dimension: Some(image_dim),
                         face_embedding_dimension: Some(face_dim),
                     },
                     revision: Some(revision),
-                    gpu_batch_size,
-                    cpu_threads,
-                    decoder: Arc::from(
-                        create_decoder(DecoderCreateOptions::auto())
-                            .expect("ai inference decoder"),
-                    ),
-                    decode_apply_exif,
                     mode: LocalInferenceMode::Real(runtime),
-                    fallback_interim,
                 }
             }
             Err(_error) if fallback_interim => Self {
@@ -228,23 +171,15 @@ impl LocalBurnProvider {
                     text_search: true,
                     duplicates: true,
                     faces: true,
-                    max_batch_size: Some(gpu_batch_size),
+                    max_batch_size: Some(max_batch_size),
                     image_embedding_dimension: Some(super::embedding::INTERIM_EMBEDDING_DIM),
                     face_embedding_dimension: Some(super::embedding::INTERIM_EMBEDDING_DIM),
                 },
                 revision: Some(format!(
                     "{VISUAL_EMBED_REVISION}+{TEXT_HASH_REVISION}+{FACE_DETECTOR_REVISION}"
                 )),
-                gpu_batch_size,
-                cpu_threads,
-                decoder: Arc::from(
-                    create_decoder(DecoderCreateOptions::auto()).expect("auto decoder"),
-                ),
-                decode_apply_exif,
                 mode: LocalInferenceMode::Interim,
-                fallback_interim,
             },
-            // keep error message for fail-closed health
             Err(error) => Self {
                 model_root,
                 capabilities: AiCapabilities {
@@ -252,19 +187,12 @@ impl LocalBurnProvider {
                     text_search: false,
                     duplicates: true,
                     faces: false,
-                    max_batch_size: Some(gpu_batch_size),
+                    max_batch_size: Some(max_batch_size),
                     image_embedding_dimension: None,
                     face_embedding_dimension: None,
                 },
                 revision: None,
-                gpu_batch_size,
-                cpu_threads,
-                decoder: Arc::from(
-                    create_decoder(DecoderCreateOptions::auto()).expect("auto decoder"),
-                ),
-                decode_apply_exif,
                 mode: LocalInferenceMode::Unavailable(error),
-                fallback_interim,
             },
         }
     }
@@ -284,82 +212,6 @@ impl LocalBurnProvider {
         }
     }
 
-    fn pipeline_config(&self) -> PipelineConfig {
-        PipelineConfig {
-            decode_parallelism: self.cpu_threads,
-            gpu_batch_size: self.gpu_batch_size,
-        }
-    }
-
-    async fn run_real_pipeline<R, F>(
-        &self,
-        paths: &[PathBuf],
-        infer_fn: F,
-        progress: Option<PipelineProgressTx>,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<R>, String>
-    where
-        R: Send + 'static,
-        F: Fn(Result<image::DynamicImage, AiItemError>) -> R + Send + Sync + 'static,
-    {
-        run_image_pipeline(
-            paths,
-            self.pipeline_config(),
-            Arc::clone(&self.decoder),
-            self.decode_apply_exif,
-            infer_fn,
-            progress,
-            cancel,
-        )
-        .await
-    }
-
-    async fn run_interim_embed_pipeline(
-        &self,
-        paths: &[PathBuf],
-        progress: Option<PipelineProgressTx>,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        self.run_real_pipeline(
-            paths,
-            |decoded| match decoded {
-                Ok(image) => compute_visual_embedding_from_prepared(&image.to_rgb8()).map_err(
-                    |message| AiItemError {
-                        code: "invalid_output".to_string(),
-                        message,
-                    },
-                ),
-                Err(error) => Err(error),
-            },
-            progress,
-            cancel,
-        )
-        .await
-    }
-
-    async fn run_interim_face_pipeline(
-        &self,
-        paths: &[PathBuf],
-        progress: Option<PipelineProgressTx>,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
-        self.run_real_pipeline(
-            paths,
-            |decoded| match decoded {
-                Ok(image) => detect_and_embed_faces_from_image(&image).map_err(|message| {
-                    AiItemError {
-                        code: "provider_rejected".to_string(),
-                        message,
-                    }
-                }),
-                Err(error) => Err(error),
-            },
-            progress,
-            cancel,
-        )
-        .await
-    }
-
     fn unavailable_error(&self) -> AiItemError {
         let message = match &self.mode {
             LocalInferenceMode::Unavailable(reason) => reason.clone(),
@@ -370,11 +222,6 @@ impl LocalBurnProvider {
             message,
         }
     }
-
-}
-
-fn compute_visual_embedding_from_prepared(rgb: &image::RgbImage) -> Result<Vec<f32>, String> {
-    super::embedding::compute_visual_embedding_rgb(rgb)
 }
 
 #[async_trait]
@@ -397,15 +244,11 @@ impl AiInferenceProvider for LocalBurnProvider {
             LocalInferenceMode::Real(_) => (true, None),
             LocalInferenceMode::Interim => (
                 true,
-                Some(
-                    "ai_fallback_interim=true; using Burn Flex DCT / heuristic faces".to_string(),
-                ),
+                Some("ai_fallback_interim=true; using Burn Flex DCT / heuristic faces".to_string()),
             ),
             LocalInferenceMode::Unavailable(error) => (
                 false,
-                Some(format!(
-                    "local models unavailable (fail-closed): {error}"
-                )),
+                Some(format!("local models unavailable (fail-closed): {error}")),
             ),
         };
         AiProviderHealth {
@@ -421,48 +264,58 @@ impl AiInferenceProvider for LocalBurnProvider {
 
     async fn embed_images(
         &self,
-        paths: &[PathBuf],
+        images: &[DynamicImage],
     ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
-        self.embed_images_progress(paths, None, None).await
-    }
-
-    async fn embed_images_progress(
-        &self,
-        paths: &[PathBuf],
-        progress: Option<PipelineProgressTx>,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
         match &self.mode {
-            LocalInferenceMode::Unavailable(_) => Ok(paths
+            LocalInferenceMode::Unavailable(_) => Ok(images
                 .iter()
                 .map(|_| Err(self.unavailable_error()))
                 .collect()),
             LocalInferenceMode::Interim => {
-                self.run_interim_embed_pipeline(paths, progress, cancel)
-                    .await
+                let images = images.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    Ok(images
+                        .iter()
+                        .map(|image| {
+                            compute_visual_embedding_rgb(&image.to_rgb8()).map_err(|message| {
+                                AiItemError {
+                                    code: "invalid_output".to_string(),
+                                    message,
+                                }
+                            })
+                        })
+                        .collect())
+                })
+                .await
+                .map_err(|error| format!("interim embed_images join failed: {error}"))?
             }
             LocalInferenceMode::Real(runtime) => {
                 let runtime = Arc::clone(runtime);
-                self.run_real_pipeline(
-                    paths,
-                    move |decoded| match decoded {
-                        Ok(image) => runtime
-                            .embed_images(std::slice::from_ref(&image))
-                            .and_then(|mut vectors| {
-                                vectors.pop().ok_or_else(|| {
-                                    "missing embedding for decoded image".to_string()
-                                })
-                            })
-                            .map_err(|message| AiItemError {
+                let images = images.to_vec();
+                tokio::task::spawn_blocking(move || match runtime.embed_images(&images) {
+                    Ok(vectors) if vectors.len() == images.len() => {
+                        Ok(vectors.into_iter().map(Ok).collect())
+                    }
+                    Ok(vectors) => Err(format!(
+                        "image embedding count mismatch: got {} expected {}",
+                        vectors.len(),
+                        images.len()
+                    )),
+                    Err(message) => Ok(images
+                        .iter()
+                        .map(|_| {
+                            Err(AiItemError {
                                 code: "provider_rejected".to_string(),
-                                message,
-                            }),
-                        Err(error) => Err(error),
-                    },
-                    progress,
-                    cancel,
-                )
+                                message: message.clone(),
+                            })
+                        })
+                        .collect()),
+                })
                 .await
+                .map_err(|error| format!("embed_images join failed: {error}"))?
             }
         }
     }
@@ -476,15 +329,22 @@ impl AiInferenceProvider for LocalBurnProvider {
                 .iter()
                 .map(|_| Err(self.unavailable_error()))
                 .collect()),
-            LocalInferenceMode::Interim => Ok(texts
-                .iter()
-                .map(|text| {
-                    compute_text_hash_embedding(text).map_err(|message| AiItemError {
-                        code: "invalid_output".to_string(),
-                        message,
-                    })
+            LocalInferenceMode::Interim => {
+                let texts = texts.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    Ok(texts
+                        .iter()
+                        .map(|text| {
+                            compute_text_hash_embedding(text).map_err(|message| AiItemError {
+                                code: "invalid_output".to_string(),
+                                message,
+                            })
+                        })
+                        .collect())
                 })
-                .collect()),
+                .await
+                .map_err(|error| format!("interim embed_texts join failed: {error}"))?
+            }
             LocalInferenceMode::Real(runtime) => {
                 let runtime = Arc::clone(runtime);
                 let texts = texts.to_vec();
@@ -508,48 +368,56 @@ impl AiInferenceProvider for LocalBurnProvider {
 
     async fn detect_and_embed_faces(
         &self,
-        paths: &[PathBuf],
+        images: &[DynamicImage],
     ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
-        self.detect_and_embed_faces_progress(paths, None, None).await
-    }
-
-    async fn detect_and_embed_faces_progress(
-        &self,
-        paths: &[PathBuf],
-        progress: Option<PipelineProgressTx>,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
         match &self.mode {
-            LocalInferenceMode::Unavailable(_) => Ok(paths
+            LocalInferenceMode::Unavailable(_) => Ok(images
                 .iter()
                 .map(|_| Err(self.unavailable_error()))
                 .collect()),
             LocalInferenceMode::Interim => {
-                self.run_interim_face_pipeline(paths, progress, cancel)
-                    .await
+                let images = images.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    Ok(images
+                        .iter()
+                        .map(|image| {
+                            detect_and_embed_faces_from_image(image).map_err(|message| {
+                                AiItemError {
+                                    code: "provider_rejected".to_string(),
+                                    message,
+                                }
+                            })
+                        })
+                        .collect())
+                })
+                .await
+                .map_err(|error| format!("interim face inference join failed: {error}"))?
             }
             LocalInferenceMode::Real(runtime) => {
                 let runtime = Arc::clone(runtime);
-                self.run_real_pipeline(
-                    paths,
-                    move |decoded| match decoded {
-                        Ok(image) => runtime.detect_and_embed_faces(&image).map_err(|message| {
-                            AiItemError {
-                                code: "provider_rejected".to_string(),
-                                message,
-                            }
-                        }),
-                        Err(error) => Err(error),
-                    },
-                    progress,
-                    cancel,
-                )
+                let images = images.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    Ok(images
+                        .iter()
+                        .map(|image| {
+                            runtime
+                                .detect_and_embed_faces(image)
+                                .map_err(|message| AiItemError {
+                                    code: "provider_rejected".to_string(),
+                                    message,
+                                })
+                        })
+                        .collect())
+                })
                 .await
+                .map_err(|error| format!("detect_and_embed_faces join failed: {error}"))?
             }
         }
     }
 }
-
 
 pub struct RemoteInferenceProvider {
     remote_url: Option<String>,
@@ -591,9 +459,7 @@ impl RemoteInferenceProvider {
     }
 
     fn auth_header(&self) -> Option<String> {
-        self.token
-            .as_ref()
-            .map(|token| format!("Bearer {token}"))
+        self.token.as_ref().map(|token| format!("Bearer {token}"))
     }
 
     async fn refresh_capabilities(&mut self) -> Result<(), String> {
@@ -627,6 +493,17 @@ impl RemoteInferenceProvider {
         self.revision = body.revision;
         Ok(())
     }
+}
+
+fn encode_image_png(image: &DynamicImage) -> Result<Vec<u8>, AiItemError> {
+    let mut bytes = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+        .map_err(|error| AiItemError {
+            code: "encode_failed".to_string(),
+            message: error.to_string(),
+        })?;
+    Ok(bytes)
 }
 
 #[derive(Debug, Deserialize)]
@@ -735,24 +612,17 @@ impl AiInferenceProvider for RemoteInferenceProvider {
 
     async fn embed_images(
         &self,
-        paths: &[PathBuf],
+        images: &[DynamicImage],
     ) -> Result<Vec<Result<Vec<f32>, AiItemError>>, String> {
         let Some(base) = self.base_url() else {
             return Err("remote url missing".to_string());
         };
         let mut form = reqwest::multipart::Form::new();
-        for (index, path) in paths.iter().enumerate() {
-            let bytes = tokio::fs::read(path)
-                .await
-                .map_err(|error| format!("read image failed: {error}"))?;
+        for (index, image) in images.iter().enumerate() {
+            let bytes = encode_image_png(image).map_err(|error| error.to_string())?;
             let part = reqwest::multipart::Part::bytes(bytes)
-                .file_name(
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("image.bin")
-                        .to_string(),
-                )
-                .mime_str("application/octet-stream")
+                .file_name(format!("image-{index}.png"))
+                .mime_str("image/png")
                 .map_err(|error| format!("multipart part failed: {error}"))?;
             form = form.part(format!("images[{index}]"), part);
         }
@@ -774,11 +644,11 @@ impl AiInferenceProvider for RemoteInferenceProvider {
             .json()
             .await
             .map_err(|error| format!("image embedding decode failed: {error}"))?;
-        if body.embeddings.len() != paths.len() {
+        if body.embeddings.len() != images.len() {
             return Err(format!(
                 "image embedding count mismatch: got {} expected {}",
                 body.embeddings.len(),
-                paths.len()
+                images.len()
             ));
         }
         Ok(body
@@ -847,24 +717,17 @@ impl AiInferenceProvider for RemoteInferenceProvider {
 
     async fn detect_and_embed_faces(
         &self,
-        paths: &[PathBuf],
+        images: &[DynamicImage],
     ) -> Result<Vec<Result<Vec<DetectedFace>, AiItemError>>, String> {
         let Some(base) = self.base_url() else {
             return Err("remote url missing".to_string());
         };
         let mut form = reqwest::multipart::Form::new();
-        for (index, path) in paths.iter().enumerate() {
-            let bytes = tokio::fs::read(path)
-                .await
-                .map_err(|error| format!("read image failed: {error}"))?;
+        for (index, image) in images.iter().enumerate() {
+            let bytes = encode_image_png(image).map_err(|error| error.to_string())?;
             let part = reqwest::multipart::Part::bytes(bytes)
-                .file_name(
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("image.bin")
-                        .to_string(),
-                )
-                .mime_str("application/octet-stream")
+                .file_name(format!("image-{index}.png"))
+                .mime_str("image/png")
                 .map_err(|error| format!("multipart part failed: {error}"))?;
             form = form.part(format!("images[{index}]"), part);
         }
@@ -886,11 +749,11 @@ impl AiInferenceProvider for RemoteInferenceProvider {
             .json()
             .await
             .map_err(|error| format!("face analyze decode failed: {error}"))?;
-        if body.faces.len() != paths.len() {
+        if body.faces.len() != images.len() {
             return Err(format!(
                 "face analyze count mismatch: got {} expected {}",
                 body.faces.len(),
-                paths.len()
+                images.len()
             ));
         }
         Ok(body
@@ -921,7 +784,6 @@ pub async fn build_provider_from_settings(
         .and_then(|value| value.as_u64())
         .map(|value| value as usize)
         .unwrap_or(64);
-    let cpu_threads = crate::backend::settings::SettingsManager::ai_cpu_threads_from(settings);
     match AiProviderKind::from_settings(settings) {
         AiProviderKind::Local => {
             let fallback_interim = settings
@@ -931,7 +793,6 @@ pub async fn build_provider_from_settings(
             Arc::new(LocalBurnProvider::with_options(
                 models_root,
                 batch_size,
-                cpu_threads,
                 fallback_interim,
             ))
         }
@@ -988,10 +849,10 @@ pub fn provider_supports_path(_path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router};
     use axum::extract::Multipart;
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::{get, post};
+    use axum::{Json, Router};
     use serde_json::json;
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
@@ -1007,10 +868,7 @@ mod tests {
         assert!(!provider.capabilities().image_search);
         assert!(!provider.capabilities().faces);
         assert!(provider.capabilities().duplicates);
-        let embeds = provider
-            .embed_texts(&["hello".to_string()])
-            .await
-            .unwrap();
+        let embeds = provider.embed_texts(&["hello".to_string()]).await.unwrap();
         assert!(embeds[0].is_err());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1028,6 +886,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(embeds[0].as_ref().unwrap().len(), 128);
+        let mut tiny = image::RgbImage::new(32, 32);
+        for (x, y, pixel) in tiny.enumerate_pixels_mut() {
+            *pixel = image::Rgb([(x * 7 + y * 3) as u8, (x * 5) as u8, (y * 11) as u8]);
+        }
+        let tiny = DynamicImage::ImageRgb8(tiny);
+        let images = provider.embed_images(&[tiny.clone()]).await.unwrap();
+        assert!(images[0].as_ref().unwrap().len() > 0);
+        let faces = provider.detect_and_embed_faces(&[tiny]).await.unwrap();
+        assert!(faces[0].is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1056,7 +923,11 @@ mod tests {
 
     async fn embed_images(mut multipart: Multipart) -> Result<Json<Value>, StatusCode> {
         let mut count = 0usize;
-        while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+        {
             let _ = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
             count += 1;
         }
@@ -1077,24 +948,23 @@ mod tests {
         })))
     }
 
-    async fn faces_analyze(mut multipart: Multipart) -> Result<Json<Value>, StatusCode> {
+    async fn analyze_faces(mut multipart: Multipart) -> Result<Json<Value>, StatusCode> {
         let mut count = 0usize;
-        while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+        {
             let _ = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
             count += 1;
         }
-        let faces = (0..count)
-            .map(|_| {
-                json!([{
-                    "box_xywh": [0.1, 0.1, 0.2, 0.2],
-                    "detection_score": 0.9,
-                    "quality_score": 0.8,
-                    "embedding": [0.1, 0.2, 0.3, 0.4]
-                }])
-            })
-            .collect::<Vec<_>>();
         Ok(Json(json!({
-            "faces": faces,
+            "faces": vec![vec![json!({
+                "box_xywh": [0.1, 0.1, 0.2, 0.2],
+                "embedding": [0.1, 0.2, 0.3, 0.4],
+                "detection_score": 0.9,
+                "quality_score": 0.8
+            })]; count],
             "revision": "remote-test-v1"
         })))
     }
@@ -1105,7 +975,7 @@ mod tests {
             .route("/v1/capabilities", get(capabilities))
             .route("/v1/embeddings/images", post(embed_images))
             .route("/v1/embeddings/texts", post(embed_texts))
-            .route("/v1/faces/analyze", post(faces_analyze));
+            .route("/v1/faces/analyze", post(analyze_faces));
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -1117,26 +987,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_ai_settings_requires_remote_url() {
-        assert!(validate_ai_settings_update(&json!({
-            "ai_provider": "remote",
-            "ai_remote_url": ""
-        }))
-        .is_err());
-        assert!(validate_ai_settings_update(&json!({
-            "ai_provider": "remote",
-            "ai_remote_url": "ftp://bad"
-        }))
-        .is_err());
-        assert!(validate_ai_settings_update(&json!({
-            "ai_provider": "remote",
-            "ai_remote_url": "https://ai.example.com"
-        }))
-        .is_ok());
-    }
-
-    #[tokio::test]
-    async fn remote_provider_contract_roundtrip() {
+    async fn remote_provider_roundtrip_decoded_images() {
         let (base, handle) = spawn_mock().await;
         let mut remote =
             RemoteInferenceProvider::with_auth(Some(base), Some("test-token".to_string()));
@@ -1148,24 +999,15 @@ mod tests {
         let health = remote.health().await;
         assert!(health.healthy);
 
-        let dir = tempfile_dir();
-        let image_path = dir.join("a.png");
-        write_tiny_png(&image_path);
-
-        let images = remote.embed_images(&[image_path.clone()]).await.unwrap();
+        let tiny = DynamicImage::new_rgb8(4, 4);
+        let images = remote.embed_images(&[tiny.clone()]).await.unwrap();
         assert_eq!(images.len(), 1);
         assert!(images[0].as_ref().unwrap().len() == 4);
 
-        let texts = remote
-            .embed_texts(&["hello".to_string()])
-            .await
-            .unwrap();
+        let texts = remote.embed_texts(&["hello".to_string()]).await.unwrap();
         assert!(texts[0].as_ref().unwrap().len() == 4);
 
-        let faces = remote
-            .detect_and_embed_faces(&[image_path])
-            .await
-            .unwrap();
+        let faces = remote.detect_and_embed_faces(&[tiny]).await.unwrap();
         assert_eq!(faces[0].as_ref().unwrap().len(), 1);
 
         handle.abort();
@@ -1178,23 +1020,5 @@ mod tests {
             RemoteInferenceProvider::with_auth(Some(base), Some("wrong-token".to_string()));
         assert!(remote.refresh_capabilities().await.is_err());
         handle.abort();
-    }
-
-    fn tempfile_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("album-ai-remote-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn write_tiny_png(path: &Path) {
-        // 1x1 PNG
-        let bytes: &[u8] = &[
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
-            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
-            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x05, 0xFE,
-            0xD4, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-        ];
-        std::fs::write(path, bytes).unwrap();
     }
 }

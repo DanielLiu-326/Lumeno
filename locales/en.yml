@@ -92,6 +92,8 @@ error:
   ai_person_not_found: "Person not found"
   ai_person_not_visible: "Person not found"
   ai_person_update_empty: "No person fields were provided to update"
+  ai_person_cover_not_found: "That face is not part of this person"
+  ai_person_center_not_found: "That cluster does not belong to this person"
   ai_person_name_invalid: "Person name is invalid"
   ai_person_merge_empty: "Select at least one person to merge"
   ai_person_split_empty: "Select at least one face to split"

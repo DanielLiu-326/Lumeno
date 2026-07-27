@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { t } from "../../i18n/index.js";
 import FaceAvatar from "../FaceAvatar.vue";
+import { personDisplayCover } from "../../utils/faceCrop.js";
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -28,6 +29,14 @@ const selectedIds = computed(() =>
 function personLabel(person) {
   const name = String(person?.name || "").trim();
   return name || t("people.unnamed");
+}
+
+function personAvatarCover(person) {
+  return personDisplayCover(
+    person,
+    props.avail.currentAlbum || "",
+    props.avail.currentUser || "",
+  );
 }
 
 function isSelected(id) {
@@ -64,7 +73,12 @@ function togglePerson(person) {
       @click="togglePerson(person)"
     >
       <div class="h-8 w-8 shrink-0 overflow-hidden rounded-full" :class="isDark ? 'bg-stone-800' : 'bg-stone-200'">
-        <FaceAvatar v-if="person.cover?.path" :cover="person.cover" :size="32" />
+        <FaceAvatar
+          v-if="personAvatarCover(person)"
+          :album="avail.currentAlbum"
+          :cover="personAvatarCover(person)"
+          :size="32"
+        />
       </div>
       <div class="min-w-0 flex-1">
         <p class="truncate text-xs font-medium">{{ personLabel(person) }}</p>

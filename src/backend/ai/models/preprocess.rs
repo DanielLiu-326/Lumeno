@@ -6,7 +6,6 @@ use image::{DynamicImage, GenericImageView, RgbImage};
 
 use super::backend::{AiBackend, AiDevice};
 
-
 /// OpenAI/CLIP-style mean/std used by many SigLIP checkpoints.
 pub const SIGLIP_MEAN: [f32; 3] = [0.5, 0.5, 0.5];
 pub const SIGLIP_STD: [f32; 3] = [0.5, 0.5, 0.5];
@@ -52,10 +51,7 @@ pub fn prepare_siglip_image(image: &DynamicImage, size: u32) -> (usize, usize, V
 /// InsightFace SCRFD preprocess: letterbox keep-aspect, mean 127.5 / std 128.
 /// Returns `(chw, det_scale)` where boxes in network space ÷ `det_scale` → original pixels.
 #[allow(dead_code)] // CPU reference path (tests / fallback)
-pub fn prepare_scrfd_image(
-    image: &DynamicImage,
-    input_size: u32,
-) -> (Vec<f32>, f32, u32, u32) {
+pub fn prepare_scrfd_image(image: &DynamicImage, input_size: u32) -> (Vec<f32>, f32, u32, u32) {
     let (orig_w, orig_h) = (image.width(), image.height());
     let (new_w, new_h, det_scale) = scrfd_letterbox_dims(orig_w, orig_h, input_size);
     let input = input_size.max(32);
@@ -150,7 +146,10 @@ fn dynamic_to_rgb8(image: &DynamicImage) -> std::borrow::Cow<'_, RgbImage> {
 }
 
 /// Shrink huge photos on CPU before GPU upload so VRAM stays bounded.
-pub(crate) fn rgb_for_gpu_upload<'a>(rgb: &'a RgbImage, max_edge: u32) -> std::borrow::Cow<'a, RgbImage> {
+pub(crate) fn rgb_for_gpu_upload<'a>(
+    rgb: &'a RgbImage,
+    max_edge: u32,
+) -> std::borrow::Cow<'a, RgbImage> {
     let max_edge = max_edge.max(32);
     let (w, h) = rgb.dimensions();
     let long = w.max(h);
@@ -277,10 +276,7 @@ struct Similarity2d {
     ty: f32,
 }
 
-fn similarity_transform(
-    src: &[[f32; 2]; 5],
-    dst: &[[f32; 2]; 5],
-) -> Result<Similarity2d, String> {
+fn similarity_transform(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Result<Similarity2d, String> {
     let mut src_mean = [0.0_f32; 2];
     let mut dst_mean = [0.0_f32; 2];
     for i in 0..5 {
@@ -302,7 +298,8 @@ fn similarity_transform(
         src_centered[i][1] = src[i][1] - src_mean[1];
         dst_centered[i][0] = dst[i][0] - dst_mean[0];
         dst_centered[i][1] = dst[i][1] - dst_mean[1];
-        src_var += src_centered[i][0] * src_centered[i][0] + src_centered[i][1] * src_centered[i][1];
+        src_var +=
+            src_centered[i][0] * src_centered[i][0] + src_centered[i][1] * src_centered[i][1];
     }
     if src_var < 1e-6 {
         return Err("degenerate face landmarks".to_string());

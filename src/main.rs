@@ -16,9 +16,10 @@ rust_i18n::i18n!("locales", fallback = "en");
 mod backend;
 
 use backend::ai::{
-    api_ai_duplicates, api_ai_index, api_ai_people, api_ai_people_merge, api_ai_people_patch,
-    api_ai_people_photos, api_ai_people_split, api_ai_search_similar, api_ai_search_text,
-    api_ai_status,
+    api_ai_duplicates, api_ai_index, api_ai_search_similar, api_ai_search_text, api_ai_status,
+    api_album_face_crop, api_album_face_hints_get, api_album_faces_adopt_cluster,
+    api_album_faces_delete, api_album_faces_get, api_album_faces_merge_clusters,
+    api_album_faces_patch, api_album_faces_remove_center, api_album_faces_split,
 };
 use backend::album::{
     api_albums_collections, api_albums_copy_photo, api_albums_create, api_albums_date_histogram,
@@ -186,16 +187,34 @@ async fn main() {
         .route("/api/ai/duplicates", get(api_ai_duplicates))
         .route("/api/ai/search/similar", post(api_ai_search_similar))
         .route("/api/ai/search/text", post(api_ai_search_text))
-        .route("/api/ai/people", get(api_ai_people))
-        .route("/api/ai/people/merge", post(api_ai_people_merge))
-        .route("/api/ai/people/split", post(api_ai_people_split))
+        .route("/api/ai/albums/{album}/faces", get(api_album_faces_get))
         .route(
-            "/api/ai/people/{person_id}",
-            patch(api_ai_people_patch),
+            "/api/ai/albums/{album}/face-hints",
+            get(api_album_face_hints_get),
         )
         .route(
-            "/api/ai/people/{person_id}/photos",
-            get(api_ai_people_photos),
+            "/api/ai/albums/{album}/faces/adopt-cluster",
+            post(api_album_faces_adopt_cluster),
+        )
+        .route(
+            "/api/ai/albums/{album}/faces/merge-clusters",
+            post(api_album_faces_merge_clusters),
+        )
+        .route(
+            "/api/ai/albums/{album}/faces/split",
+            post(api_album_faces_split),
+        )
+        .route(
+            "/api/ai/albums/{album}/faces/remove-center",
+            post(api_album_faces_remove_center),
+        )
+        .route(
+            "/api/ai/albums/{album}/faces/{person_id}",
+            patch(api_album_faces_patch).delete(api_album_faces_delete),
+        )
+        .route(
+            "/api/ai/albums/{album}/face-crop",
+            get(api_album_face_crop),
         )
         .route(
             "/api/settings",

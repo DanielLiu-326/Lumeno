@@ -1,14 +1,17 @@
 use image::{DynamicImage, GenericImageView, RgbImage};
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 use crate::backend::album::decoder::{
-    create_decoder, DecodeOptions, DecoderCreateOptions,
+    DecodeOptions, DecoderCreateOptions, create_decoder, decode_bytes_with_path,
 };
 
 use super::embedding::{compute_visual_embedding_rgb, l2_normalize};
 
+pub use crate::backend::constants::MAX_FACES_PER_PHOTO;
+
 pub const FACE_DETECTOR_REVISION: &str = "face-heuristic-v1";
-pub const MAX_FACES_PER_PHOTO: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct DetectedFace {
@@ -34,14 +37,15 @@ pub fn normalize_box_xywh(box_xywh: [f32; 4], width: u32, height: u32) -> [f32; 
     }
     let iw = width.max(1) as f32;
     let ih = height.max(1) as f32;
-    [(x / iw).clamp(0.0, 1.0), (y / ih).clamp(0.0, 1.0), (w / iw).clamp(0.0, 1.0), (h / ih).clamp(0.0, 1.0)]
+    [
+        (x / iw).clamp(0.0, 1.0),
+        (y / ih).clamp(0.0, 1.0),
+        (w / iw).clamp(0.0, 1.0),
+        (h / ih).clamp(0.0, 1.0),
+    ]
 }
 
-pub fn normalize_landmarks(
-    landmarks: [[f32; 2]; 5],
-    width: u32,
-    height: u32,
-) -> [[f32; 2]; 5] {
+pub fn normalize_landmarks(landmarks: [[f32; 2]; 5], width: u32, height: u32) -> [[f32; 2]; 5] {
     if landmarks
         .iter()
         .all(|point| point[0] <= 1.5 && point[1] <= 1.5)
@@ -72,13 +76,7 @@ fn is_skin_pixel(r: u8, g: u8, b: u8) -> bool {
     let b = f32::from(b);
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
-    r > 95.0
-        && g > 40.0
-        && b > 20.0
-        && (max - min) > 15.0
-        && (r - g).abs() > 15.0
-        && r > g
-        && r > b
+    r > 95.0 && g > 40.0 && b > 20.0 && (max - min) > 15.0 && (r - g).abs() > 15.0 && r > g && r > b
 }
 
 fn downscale_for_scan(image: &DynamicImage, max_side: u32) -> RgbImage {
@@ -256,7 +254,12 @@ fn crop_face_rgb(image: &DynamicImage, box_xywh: [f32; 4]) -> Result<RgbImage, S
     }
 
     Ok(image
-        .crop_imm(left as u32, top as u32, (right - left) as u32, (bottom - top) as u32)
+        .crop_imm(
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        )
         .to_rgb8())
 }
 
@@ -271,9 +274,8 @@ fn quality_score_for_crop(crop: &RgbImage, detection_score: f32) -> f32 {
     let mut luma_sq = 0_f32;
     let mut count = 0_f32;
     for pixel in crop.pixels() {
-        let luma = 0.299 * f32::from(pixel[0])
-            + 0.587 * f32::from(pixel[1])
-            + 0.114 * f32::from(pixel[2]);
+        let luma =
+            0.299 * f32::from(pixel[0]) + 0.587 * f32::from(pixel[1]) + 0.114 * f32::from(pixel[2]);
         luma_sum += luma;
         luma_sq += luma * luma;
         count += 1.0;
@@ -284,17 +286,19 @@ fn quality_score_for_crop(crop: &RgbImage, detection_score: f32) -> f32 {
     (detection_score * 0.55 + size_score * 0.30 + contrast_score * 0.15).clamp(0.0, 1.0)
 }
 
+#[cfg(test)]
 pub fn detect_and_embed_faces(path: &Path) -> Result<Vec<DetectedFace>, String> {
     let decoder = create_decoder(DecoderCreateOptions::auto())
         .map_err(|error| format!("create decoder failed: {error}"))?;
     let bytes = std::fs::read(path).map_err(|error| format!("read photo failed: {error}"))?;
-    let image = decoder
-        .decode_bytes(&bytes, DecodeOptions::new())
+    let image = decode_bytes_with_path(decoder.as_ref(), path, &bytes, DecodeOptions::new())
         .map_err(|error| format!("decode photo for face detection failed: {error}"))?;
     detect_and_embed_faces_from_image(&image)
 }
 
-pub fn detect_and_embed_faces_from_image(image: &DynamicImage) -> Result<Vec<DetectedFace>, String> {
+pub fn detect_and_embed_faces_from_image(
+    image: &DynamicImage,
+) -> Result<Vec<DetectedFace>, String> {
     let (orig_w, orig_h) = image.dimensions();
     if orig_w == 0 || orig_h == 0 {
         return Ok(Vec::new());

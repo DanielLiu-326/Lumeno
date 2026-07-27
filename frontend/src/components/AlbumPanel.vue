@@ -11,7 +11,7 @@ import TimelineChart from "./TimelineChart.vue";
 import ImportSourceModal from "./ImportSourceModal.vue";
 import CloudFilePicker from "./CloudFilePicker.vue";
 import FilterSidebar from "./FilterSidebar.vue";
-import AiToolsSidebar from "./AiToolsSidebar.vue";
+import AlbumAiToolsModal from "./AlbumAiToolsModal.vue";
 import VirtualGrid from "./VirtualGrid.vue";
 import LazyImage from "./LazyImage.vue";
 
@@ -44,13 +44,19 @@ const props = defineProps({
   selectedCollectionId: { type: String, default: "all" },
   albumPeople: { type: Array, default: () => [] },
   albumPeopleLoading: { type: Boolean, default: false },
-  selectedPerson: { type: Object, default: null },
-  personPhotos: { type: Array, default: () => [] },
-  personPhotosLoading: { type: Boolean, default: false },
+  albumFaceSuggestions: { type: Object, default: () => ({ clusters: [] }) },
+  albumFacesEditable: { type: Boolean, default: true },
+  albumFacesOwner: { type: String, default: "" },
   onCreateAlbum: { type: Function, default: null },
   onUpdateAlbum: { type: Function, default: null },
   onShareAlbum: { type: Function, default: null },
   onUnshareAlbum: { type: Function, default: null },
+  /** In-modal AI search; must not switch albumViewMode. */
+  onSearchTextInModal: { type: Function, default: null },
+  /** In-modal duplicates load; must not switch albumViewMode. */
+  onLoadDuplicatesInModal: { type: Function, default: null },
+  /** Fetch album-index metadata for paths (EXIF for AI-tool photo opens). */
+  fetchPhotosByPaths: { type: Function, default: null },
 });
 
 const emit = defineEmits([
@@ -78,11 +84,11 @@ const emit = defineEmits([
   "select-collection",
   "filter-person",
   "refresh-album-people",
-  "select-person",
-  "back-to-people",
-  "patch-person",
-  "merge-people",
-  "split-person",
+  "patch-album-person",
+  "remove-album-center",
+  "delete-album-person",
+  "adopt-album-cluster",
+  "merge-album-cluster",
 ]);
 
 const importSourceModalOpen = ref(false);
@@ -147,6 +153,8 @@ function toggleThumbnailPopover() {
 }
 
 const detailPhoto = ref(null);
+/** When set, detail prev/next navigates this list instead of albumPhotos (AI tools context). */
+const detailNavPhotos = ref(null);
 const detailExpanded = ref(false);
 const detailFullscreen = ref(false);
 const detailFullscreenControlsVisible = ref(false);
@@ -455,13 +463,6 @@ function closeMobileSearch() {
   mobileSearchOpen.value = false;
 }
 
-function onAiSearchText(payload) {
-  if (payload?.text) {
-    textSearchInput.value = payload.text;
-  }
-  emit('search-text', payload);
-}
-
 function enterAlbum(album) {
   emit("select-album", album.dir_name);
 }
@@ -597,12 +598,14 @@ function getThumbnail(path, size = 320, owner = null) {
   return `/api/thumbnail/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
 }
 
+const detailPhotoList = computed(() => detailNavPhotos.value || props.albumPhotos);
+
 const detailIndex = computed(() => {
   if (!detailPhoto.value) return -1;
-  return props.albumPhotos.findIndex((p) => p.path === detailPhoto.value.path);
+  return detailPhotoList.value.findIndex((p) => p.path === detailPhoto.value.path);
 });
 const hasPrev = computed(() => detailIndex.value > 0);
-const hasNext = computed(() => detailIndex.value >= 0 && detailIndex.value < props.albumPhotos.length - 1);
+const hasNext = computed(() => detailIndex.value >= 0 && detailIndex.value < detailPhotoList.value.length - 1);
 
 const detailDirty = computed(() => {
   if (!detailPhoto.value) return false;
@@ -623,7 +626,84 @@ function beginDetailImageLoad() {
   imageLoading.value = true;
 }
 
-function openDetail(photo, expanded = detailOriginalPreference.value) {
+function photoHasIndexMeta(photo) {
+  if (!photo) return false;
+  return Boolean(
+    photo.datetime
+    || photo.date
+    || photo.camera_make
+    || photo.camera_model
+    || photo.lens
+    || photo.focal_length
+    || photo.aperture
+    || photo.shutter_speed
+    || photo.iso
+    || (photo.size > 0 && photo.width > 0),
+  );
+}
+
+function mergePhotoMeta(stub, indexed) {
+  if (!stub) return null;
+  if (!indexed) return stub;
+  return {
+    ...indexed,
+    ...stub,
+    path: stub.path || indexed.path,
+    owner: stub.owner || indexed.owner,
+    name: stub.name || indexed.name,
+    datetime: indexed.datetime || indexed.date || stub.datetime || stub.date || "",
+    date: indexed.date || stub.date || "",
+    tags: indexed.tags ?? stub.tags ?? [],
+    rating: indexed.rating ?? stub.rating ?? 0,
+    color_label: indexed.color_label ?? stub.color_label ?? [],
+    width: indexed.width || stub.width || 0,
+    height: indexed.height || stub.height || 0,
+    size: indexed.size ?? stub.size ?? 0,
+    camera_make: indexed.camera_make || stub.camera_make || "",
+    camera_model: indexed.camera_model || stub.camera_model || "",
+    lens: indexed.lens || stub.lens || "",
+    focal_length: indexed.focal_length || stub.focal_length || "",
+    aperture: indexed.aperture || stub.aperture || "",
+    shutter_speed: indexed.shutter_speed || stub.shutter_speed || "",
+    iso: indexed.iso ?? stub.iso ?? null,
+  };
+}
+
+async function enrichPhotosWithIndexMeta(stubs) {
+  const list = (stubs || []).filter(Boolean);
+  if (!list.length) return [];
+
+  const byPath = new Map();
+  for (const photo of props.albumPhotos) {
+    if (photo?.path && photoHasIndexMeta(photo)) {
+      byPath.set(photo.path, photo);
+    }
+  }
+
+  const missingPaths = [...new Set(
+    list
+      .map((photo) => photo.path)
+      .filter((path) => path && !byPath.has(path)),
+  )];
+
+  if (missingPaths.length > 0 && typeof props.fetchPhotosByPaths === "function") {
+    try {
+      const fetched = await props.fetchPhotosByPaths(missingPaths);
+      for (const photo of fetched) {
+        if (photo?.path) byPath.set(photo.path, photo);
+      }
+    } catch {
+      // Fall back to stub-only metadata.
+    }
+  }
+
+  return list.map((stub) => mergePhotoMeta(stub, byPath.get(stub.path)));
+}
+
+function openDetail(photo, expanded = detailOriginalPreference.value, options = {}) {
+  if (!options.fromNav) {
+    detailNavPhotos.value = options.navPhotos ?? null;
+  }
   beginDetailImageLoad();
   detailPhoto.value = photo;
   detailExpanded.value = expanded;
@@ -639,12 +719,26 @@ function openDetail(photo, expanded = detailOriginalPreference.value) {
   checkXmpSidecar(photo.path);
 }
 
+function onAiToolsOpenPhoto({ photo, navPhotos } = {}) {
+  if (!photo?.path) return;
+  void (async () => {
+    const stubs = (navPhotos?.length ? navPhotos : [photo]).filter(Boolean);
+    const enriched = await enrichPhotosWithIndexMeta(stubs);
+    const main = enriched.find((entry) => entry.path === photo.path) || enriched[0];
+    if (!main) return;
+    openDetail(main, detailOriginalPreference.value, {
+      navPhotos: enriched.length > 1 ? enriched : null,
+    });
+  })();
+}
+
 function closeDetail() {
   if (detailDirty.value && !window.confirm(t('msg.unsavedChangesClose'))) return;
   detailOriginalPreference.value = detailExpanded.value;
   detailDarktablePreference.value = darktablePreview.value;
   saveDetailViewPreferences();
   detailPhoto.value = null;
+  detailNavPhotos.value = null;
   detailExpanded.value = false;
   detailFullscreen.value = false;
   hideFullscreenControls();
@@ -657,12 +751,12 @@ function closeDetail() {
 function goDetailPrev() {
   if (!hasPrev.value) return;
   if (detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
-  openDetail(props.albumPhotos[detailIndex.value - 1], detailExpanded.value);
+  openDetail(detailPhotoList.value[detailIndex.value - 1], detailExpanded.value, { fromNav: true });
 }
 function goDetailNext() {
   if (!hasNext.value) return;
   if (detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
-  openDetail(props.albumPhotos[detailIndex.value + 1], detailExpanded.value);
+  openDetail(detailPhotoList.value[detailIndex.value + 1], detailExpanded.value, { fromNav: true });
 }
 function toggleExpanded() {
   beginDetailImageLoad();
@@ -1489,70 +1583,30 @@ function setCoverFromPhoto(photo) {
           </template>
         </div>
 
-        <!-- Desktop AI tools sidebar -->
-        <AiToolsSidebar
-          v-if="aiToolsPanelOpen && !isMobile"
-          :is-dark="isDark"
-          :is-mobile="false"
-          :album-view-mode="albumViewMode"
-          :initial-query="textSearchInput"
-          :similar-loading="similarLoading"
-          :people="albumPeople"
-          :people-loading="albumPeopleLoading"
-          :selected-person="selectedPerson"
-          :person-photos="personPhotos"
-          :person-photos-loading="personPhotosLoading"
-          @close="aiToolsPanelOpen = false"
-          @search-text="onAiSearchText"
-          @show-duplicates="emit('show-duplicates')"
-          @show-photos="emit('show-photos')"
-          @filter-person="(person) => emit('filter-person', person)"
-          @refresh-people="emit('refresh-album-people')"
-          @select-person="(person) => emit('select-person', person)"
-          @back-to-people="emit('back-to-people')"
-          @patch-person="(id, updates) => emit('patch-person', id, updates)"
-          @merge-people="(body) => emit('merge-people', body)"
-          @split-person="(body) => emit('split-person', body)"
-        />
-
-        <!-- Mobile AI tools drawer (from right) -->
+        <!-- AI tools modal (replaces right sidebar) -->
         <teleport to="body">
-          <template v-if="isMobile">
-            <Transition name="drawer-backdrop" appear>
-              <div
-                v-show="aiToolsPanelOpen"
-                class="fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm"
-                @click="aiToolsPanelOpen = false"
-              ></div>
-            </Transition>
-            <Transition name="mobile-drawer-right" appear>
-              <AiToolsSidebar
-                v-show="aiToolsPanelOpen"
-                style="position: fixed; inset: 0 0 0 auto; z-index: 91; width: min(20rem, 90vw);"
-                :is-dark="isDark"
-                :is-mobile="true"
-                :album-view-mode="albumViewMode"
-                :initial-query="textSearchInput"
-                :similar-loading="similarLoading"
-                :people="albumPeople"
-                :people-loading="albumPeopleLoading"
-                :selected-person="selectedPerson"
-                :person-photos="personPhotos"
-                :person-photos-loading="personPhotosLoading"
-                @close="aiToolsPanelOpen = false"
-                @search-text="onAiSearchText"
-                @show-duplicates="emit('show-duplicates')"
-                @show-photos="emit('show-photos')"
-                @filter-person="(person) => emit('filter-person', person)"
-                @refresh-people="emit('refresh-album-people')"
-                @select-person="(person) => emit('select-person', person)"
-                @back-to-people="emit('back-to-people')"
-                @patch-person="(id, updates) => emit('patch-person', id, updates)"
-                @merge-people="(body) => emit('merge-people', body)"
-                @split-person="(body) => emit('split-person', body)"
-              />
-            </Transition>
-          </template>
+          <AlbumAiToolsModal
+            v-if="aiToolsPanelOpen"
+            :is-dark="isDark"
+            :album-name="currentAlbum"
+            :album-owner="albumFacesOwner || currentUser"
+            :busy="albumPeopleLoading"
+            :people="albumPeople"
+            :suggestions="albumFaceSuggestions"
+            :editable="albumFacesEditable"
+            :initial-query="textSearchInput"
+            :on-search-text="onSearchTextInModal"
+            :on-load-duplicates="onLoadDuplicatesInModal"
+            @close="aiToolsPanelOpen = false"
+            @refresh="emit('refresh-album-people')"
+            @adopt-cluster="(body) => emit('adopt-album-cluster', body)"
+            @merge-cluster="(body) => emit('merge-album-cluster', body)"
+            @patch-person="(id, updates) => emit('patch-album-person', id, updates)"
+            @remove-center="(body) => emit('remove-album-center', body)"
+            @delete-person="(id) => emit('delete-album-person', id)"
+            @filter-person="(person) => emit('filter-person', person)"
+            @open-photo="onAiToolsOpenPhoto"
+          />
         </teleport>
       </div>
     </div>
@@ -1692,7 +1746,7 @@ function setCoverFromPhoto(photo) {
          Photo Detail / Edit overlay
          ═══════════════════════════════════════════ -->
     <teleport to="body">
-      <div v-if="detailPhoto" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="closeDetail">
+      <div v-if="detailPhoto" class="fixed inset-0 z-[130] flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="closeDetail">
         <div class="relative flex overflow-hidden border shadow-2xl"
           :class="[
             detailFullscreen
@@ -1718,7 +1772,7 @@ function setCoverFromPhoto(photo) {
               <IconChevronRight class="h-4 w-4" />
             </button>
             <span class="ml-1 text-xs tabular-nums" :class="isDark ? 'text-stone-400' : 'text-stone-500'"
-              v-if="detailIndex >= 0">{{ detailIndex + 1 }} / {{ albumPhotos.length }}</span>
+              v-if="detailIndex >= 0">{{ detailIndex + 1 }} / {{ detailPhotoList.length }}</span>
             <div class="flex-1"></div>
             <button class="rounded-full p-1.5 transition"
               :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
@@ -1779,7 +1833,7 @@ function setCoverFromPhoto(photo) {
               <div v-if="detailFullscreen"
                 class="pointer-events-none absolute left-4 top-4 max-w-[calc(100%-10rem)] rounded-md bg-black/40 px-3 py-2 text-white backdrop-blur-sm transition-opacity"
                 :class="detailFullscreenControlsVisible ? 'opacity-100' : 'opacity-0'">
-                <p v-if="detailIndex >= 0" class="text-xs tabular-nums text-white/80">{{ detailIndex + 1 }} / {{ albumPhotos.length }}</p>
+                <p v-if="detailIndex >= 0" class="text-xs tabular-nums text-white/80">{{ detailIndex + 1 }} / {{ detailPhotoList.length }}</p>
                 <p class="truncate text-sm font-medium" :title="detailPhoto.name">{{ detailPhoto.name }}</p>
               </div>
 

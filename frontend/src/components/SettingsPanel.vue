@@ -529,8 +529,8 @@ function promptResetPassword(member) {
                   <p>{{ t('settings.aiCapabilityFaces') }}: {{ props.aiStatus?.capabilities?.faces ? t('settings.aiReady') : t('settings.aiPending') }}</p>
                   <p>{{ t('settings.aiIndexRoot') }}: {{ props.aiStatus?.owner_index?.root_exists ? t('settings.aiReady') : t('settings.aiPending') }}</p>
                   <p>{{ t('settings.aiIndexManifest') }}: {{ props.aiStatus?.owner_index?.manifest_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
-                  <p>{{ t('settings.aiPhotosMeta') }}: {{ props.aiStatus?.owner_index?.photos_meta_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
-                  <p>{{ t('settings.aiHashesBin') }}: {{ props.aiStatus?.owner_index?.hashes_bin_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiEmbeddings') }}: {{ props.aiStatus?.owner_index?.embeddings_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
+                  <p>{{ t('settings.aiDuplicatesIndex') }}: {{ props.aiStatus?.owner_index?.duplicates_index_present ? t('settings.aiReady') : t('settings.aiPending') }}</p>
                   <p>{{ t('settings.aiAlbumsTotal') }}: {{ props.aiStatus?.owner_index?.stats?.albums_total ?? '-' }}</p>
                   <p>{{ t('settings.aiPhotosTotal') }}: {{ props.aiStatus?.owner_index?.stats?.photos_total ?? '-' }}</p>
                   <p>{{ t('settings.aiPhotosIndexed') }}: {{ props.aiStatus?.owner_index?.stats?.photos_indexed ?? '-' }}</p>

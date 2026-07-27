@@ -6,6 +6,7 @@ import {
 } from "../utils/icons";
 import { t } from "../i18n/index.js";
 import FaceAvatar from "./FaceAvatar.vue";
+import { personDisplayCover, parseAlbumPhotoPath } from "../utils/faceCrop.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -15,6 +16,8 @@ const props = defineProps({
   similarLoading: { type: Boolean, default: false },
   people: { type: Array, default: () => [] },
   peopleLoading: { type: Boolean, default: false },
+  albumName: { type: String, default: "" },
+  albumOwner: { type: String, default: "" },
   selectedPerson: { type: Object, default: null },
   personPhotos: { type: Array, default: () => [] },
   personPhotosLoading: { type: Boolean, default: false },
@@ -90,6 +93,7 @@ const selectableFaces = computed(() => {
         faceId,
         path: photo.path,
         owner: photo.owner,
+        source: parseAlbumPhotoPath(photo.path)?.source || "",
         box: boxes[index] || null,
       });
     });
@@ -111,6 +115,10 @@ function runTextSearch() {
 function personLabel(person) {
   const name = String(person?.name || "").trim();
   return name || t("people.unnamed");
+}
+
+function personAvatarCover(person) {
+  return personDisplayCover(person, props.albumName, props.albumOwner);
 }
 
 function openManage(person) {
@@ -354,7 +362,12 @@ function confirmSplit() {
               :class="isDark ? 'hover:bg-stone-800' : 'hover:bg-stone-100'"
             >
               <button type="button" class="h-12 w-12 overflow-hidden rounded-full" :class="isDark ? 'bg-stone-800' : 'bg-stone-200'" @click="emit('filter-person', person)">
-                <FaceAvatar v-if="person.cover?.path" :cover="person.cover" :size="48" />
+                <FaceAvatar
+                  v-if="personAvatarCover(person)"
+                  :album="albumName"
+                  :cover="personAvatarCover(person)"
+                  :size="48"
+                />
               </button>
               <button type="button" class="w-full truncate text-[10px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'" @click="emit('filter-person', person)">
                 {{ personLabel(person) }}
@@ -435,7 +448,13 @@ function confirmSplit() {
               @click="toggleFaceSelection(face.faceId)"
             >
               <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                <FaceAvatar :path="face.path" :owner="face.owner" :face-box="face.box" :size="80" />
+                <FaceAvatar
+                  :album="albumName"
+                  :face-id="face.faceId"
+                  :source="face.source"
+                  :face-box="face.box"
+                  :size="80"
+                />
               </div>
               <span
                 v-if="selectedFaceIds.includes(face.faceId)"

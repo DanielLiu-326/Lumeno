@@ -78,12 +78,6 @@ export function useAlbumApp() {
     const members = ref([]);
     const settings = ref({});
     const aiStatus = ref(null);
-    const people = ref([]);
-    const peopleTotal = ref(0);
-    const peopleLoading = ref(false);
-    const selectedPerson = ref(null);
-    const personPhotos = ref([]);
-    const personPhotosLoading = ref(false);
     const webdavShares = ref([]);
     const dashboard = ref(null);
     const dashboardLoading = ref(false);
@@ -918,13 +912,16 @@ export function useAlbumApp() {
         return false;
     }
 
-    async function fetchAlbumPhotosPage({ offset = 0, limit = DEFAULT_PAGE_SIZE, filters = null } = {}) {
+    async function fetchAlbumPhotosPage({ offset = 0, limit = DEFAULT_PAGE_SIZE, filters = null, paths = null } = {}) {
         const body = {
             album: currentAlbum.value,
             filters: filters ?? albumFilters.clauses ?? [],
             offset,
             limit,
         };
+        if (Array.isArray(paths) && paths.length > 0) {
+            body.paths = paths;
+        }
         if (albumSort.value.length > 0) {
             body.sort = albumSort.value.map((s) => `${s.field}:${s.dir}`).join(",");
         }
@@ -934,6 +931,15 @@ export function useAlbumApp() {
             body: JSON.stringify(body),
         });
         return payload.data || { photos: [], total_count: 0 };
+    }
+
+    /** Load full album-index metadata (EXIF, tags, etc.) for specific paths. */
+    async function fetchAlbumPhotosByPaths(paths) {
+        if (!loggedIn.value || !currentAlbum.value) return [];
+        const unique = [...new Set((paths || []).map((p) => String(p || "").trim()).filter(Boolean))];
+        if (unique.length === 0) return [];
+        const data = await fetchAlbumPhotosPage({ offset: 0, limit: 0, filters: [], paths: unique });
+        return data.photos || [];
     }
 
     /** Paths matching current metadata filters (excludes AI text). null = no restriction. */
@@ -1127,21 +1133,24 @@ export function useAlbumApp() {
         const searchScope = "current_album";
         const limit = Math.max(1, Math.min(200, Number(options.limit) || 60));
         const minScore = options.minScore ?? options.min_score;
+        const inModal = Boolean(options.inModal);
 
         if (!loggedIn.value || !currentAlbum.value || !text) {
-            return;
+            return inModal ? { results: [], query: { text } } : undefined;
         }
 
-        aiSimilarLoading.value = true;
-        albumViewMode.value = "text";
-        aiSimilarResults.value = [];
-        aiSimilarQuery.value = {
-            text,
-            album: currentAlbum.value,
-            scope: searchScope,
-            limit,
-            min_score: minScore,
-        };
+        if (!inModal) {
+            aiSimilarLoading.value = true;
+            albumViewMode.value = "text";
+            aiSimilarResults.value = [];
+            aiSimilarQuery.value = {
+                text,
+                album: currentAlbum.value,
+                scope: searchScope,
+                limit,
+                min_score: minScore,
+            };
+        }
 
         try {
             let paths = null;
@@ -1166,19 +1175,52 @@ export function useAlbumApp() {
                 body: JSON.stringify(body),
             });
             const data = payload.data || {};
-            aiSimilarResults.value = mapAiSearchResults(data.results || []);
-            aiSimilarQuery.value = {
-                ...(aiSimilarQuery.value || {}),
+            const results = mapAiSearchResults(data.results || []);
+            const query = {
+                text,
+                album: currentAlbum.value,
+                scope: searchScope,
+                limit,
+                min_score: minScore,
                 ...(data.query || {}),
-                total: data.total ?? aiSimilarResults.value.length,
+                total: data.total ?? results.length,
             };
+            if (inModal) {
+                return { results, query, total: query.total };
+            }
+            aiSimilarResults.value = results;
+            aiSimilarQuery.value = query;
         } catch (error) {
+            if (inModal) {
+                throw error;
+            }
             aiSimilarResults.value = [];
             setMessage(error.message, "error");
             albumViewMode.value = "photos";
         } finally {
-            aiSimilarLoading.value = false;
+            if (!inModal) {
+                aiSimilarLoading.value = false;
+            }
         }
+    }
+
+    /** Load duplicates for the AI tools modal without leaving the photos view. */
+    async function loadAlbumDuplicatesForModal() {
+        if (!loggedIn.value || !currentAlbum.value) {
+            return { groups: [], total: 0 };
+        }
+        const params = new URLSearchParams();
+        params.set("album", currentAlbum.value);
+        params.set("kind", "all");
+        params.set("max_distance", "8");
+        params.set("offset", "0");
+        params.set("limit", "100");
+        const payload = await apiFetch(`/api/ai/duplicates?${params.toString()}`);
+        const data = payload.data || {};
+        return {
+            groups: data.groups || [],
+            total: data.total || 0,
+        };
     }
 
     async function loadMoreAlbumPhotos() {
@@ -1621,53 +1663,180 @@ export function useAlbumApp() {
         }
     }
 
-    async function refreshPeople(includeHidden = false) {
-        if (!loggedIn.value) {
-            people.value = [];
-            peopleTotal.value = 0;
+    const albumPeople = ref([]);
+    const albumPeopleLoading = ref(false);
+    const albumFaceSuggestions = ref({ clusters: [], noise_face_ids: [] });
+    const albumFaceHints = ref({});
+    const albumFaceHintsLoading = ref(false);
+    const albumFacesEditable = ref(true);
+    const albumFacesOwner = ref("");
+
+    const albumFaceSuggestionsDisplay = computed(() => {
+        const base = albumFaceSuggestions.value || {};
+        const hints = albumFaceHints.value || {};
+        const clusters = (base.clusters || []).map((cluster) => ({
+            ...cluster,
+            match_suggestions: hints[cluster.cluster_id] || [],
+        }));
+        return { ...base, clusters };
+    });
+
+    async function refreshFaceHintsForAlbum(albumName = currentAlbum.value) {
+        if (!loggedIn.value || !albumName) {
+            albumFaceHints.value = {};
             return;
         }
-        peopleLoading.value = true;
+        albumFaceHintsLoading.value = true;
         try {
-            const params = new URLSearchParams();
-            params.set("include_hidden", includeHidden ? "true" : "false");
-            params.set("offset", "0");
-            params.set("limit", "200");
-            const payload = await apiFetch(`/api/ai/people?${params.toString()}`);
-            const data = payload.data || {};
-            people.value = data.people || [];
-            peopleTotal.value = data.total_count ?? people.value.length;
-        } catch (error) {
-            people.value = [];
-            peopleTotal.value = 0;
-            setMessage(error.message, "error");
+            const payload = await apiFetch(
+                `/api/ai/albums/${encodeURIComponent(albumName)}/face-hints`,
+            );
+            albumFaceHints.value = payload.data?.groups || {};
+        } catch {
+            albumFaceHints.value = {};
         } finally {
-            peopleLoading.value = false;
+            albumFaceHintsLoading.value = false;
         }
     }
 
-    const albumPeople = ref([]);
-    const albumPeopleLoading = ref(false);
-
-    async function refreshPeopleForAlbum(albumName = currentAlbum.value) {
+    async function refreshPeopleForAlbum(albumName = currentAlbum.value, opts = {}) {
+        const silent = opts.silent === true;
         if (!loggedIn.value || !albumName) {
             albumPeople.value = [];
+            albumFaceSuggestions.value = { clusters: [], noise_face_ids: [] };
+            albumFaceHints.value = {};
+            albumFacesOwner.value = "";
             return;
         }
-        albumPeopleLoading.value = true;
+        if (!silent) albumPeopleLoading.value = true;
         try {
-            const params = new URLSearchParams();
-            params.set("album", albumName);
-            params.set("include_hidden", "false");
-            params.set("offset", "0");
-            params.set("limit", "200");
-            const payload = await apiFetch(`/api/ai/people?${params.toString()}`);
+            const payload = await apiFetch(`/api/ai/albums/${encodeURIComponent(albumName)}/faces`);
             const data = payload.data || {};
             albumPeople.value = data.people || [];
+            albumFaceSuggestions.value = data.suggestions || { clusters: [], noise_face_ids: [] };
+            albumFacesEditable.value = data.editable !== false;
+            albumFacesOwner.value = data.owner || currentUser.value || "";
         } catch (error) {
             albumPeople.value = [];
+            albumFaceSuggestions.value = { clusters: [], noise_face_ids: [] };
+            albumFaceHints.value = {};
+            albumFacesOwner.value = "";
+            setMessage(error.message, "error");
+        } finally {
+            if (!silent) albumPeopleLoading.value = false;
+        }
+        if (opts.awaitHints) {
+            await refreshFaceHintsForAlbum(albumName);
+        } else {
+            void refreshFaceHintsForAlbum(albumName);
+        }
+    }
+
+    async function adoptAlbumCluster(body) {
+        if (!currentAlbum.value) return;
+        albumPeopleLoading.value = true;
+        try {
+            const payload = await apiFetch(
+                `/api/ai/albums/${encodeURIComponent(currentAlbum.value)}/faces/adopt-cluster`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                },
+            );
+            setMessage(payload.message || t("msg.settingsSaved"));
+            await refreshPeopleForAlbum(currentAlbum.value, { silent: true, awaitHints: true });
+        } catch (error) {
+            setMessage(error.message, "error");
         } finally {
             albumPeopleLoading.value = false;
+        }
+    }
+
+    async function mergeAlbumCluster(body) {
+        if (!currentAlbum.value) return;
+        try {
+            const payload = await apiFetch(
+                `/api/ai/albums/${encodeURIComponent(currentAlbum.value)}/faces/merge-clusters`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                },
+            );
+            setMessage(payload.message || t("people.mergeDone"));
+            await refreshPeopleForAlbum(currentAlbum.value, { silent: true });
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
+    async function patchAlbumPerson(personId, updates) {
+        if (!currentAlbum.value) return;
+        try {
+            const payload = await apiFetch(
+                `/api/ai/albums/${encodeURIComponent(currentAlbum.value)}/faces/${encodeURIComponent(personId)}`,
+                {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(updates),
+                },
+            );
+            setMessage(payload.message || t("msg.settingsSaved"));
+            await refreshPeopleForAlbum(currentAlbum.value, { silent: true });
+        } catch (error) {
+            setMessage(error.message, "error");
+        }
+    }
+
+    async function removeAlbumPersonCenter(body) {
+        if (!currentAlbum.value || !body?.person_id || !body?.center_id) return null;
+        try {
+            const payload = await apiFetch(
+                `/api/ai/albums/${encodeURIComponent(currentAlbum.value)}/faces/remove-center`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                },
+            );
+            setMessage(payload.message || t("msg.settingsSaved"));
+            await refreshPeopleForAlbum(currentAlbum.value, { silent: true, awaitHints: true });
+            return payload.data || null;
+        } catch (error) {
+            setMessage(error.message, "error");
+            return null;
+        }
+    }
+
+    async function deleteAlbumPerson(personId) {
+        if (!currentAlbum.value || !personId) return;
+        try {
+            const payload = await apiFetch(
+                `/api/ai/albums/${encodeURIComponent(currentAlbum.value)}/faces/${encodeURIComponent(personId)}`,
+                { method: "DELETE" },
+            );
+            setMessage(payload.message || t("people.deleteDone"));
+            const personFilter = (albumFilters.clauses || []).some(
+                (clause) =>
+                    clause.type === "person"
+                    && Array.isArray(clause.value?.personIds)
+                    && clause.value.personIds.includes(String(personId)),
+            );
+            if (personFilter) {
+                albumFilters.clauses = (albumFilters.clauses || []).filter(
+                    (clause) =>
+                        !(
+                            clause.type === "person"
+                            && Array.isArray(clause.value?.personIds)
+                            && clause.value.personIds.includes(String(personId))
+                        ),
+                );
+                await refreshAlbumPhotos();
+            }
+            await refreshPeopleForAlbum(currentAlbum.value, { silent: true });
+        } catch (error) {
+            setMessage(error.message, "error");
         }
     }
 
@@ -1688,93 +1857,6 @@ export function useAlbumApp() {
             },
         ];
         await refreshAlbumPhotos();
-    }
-
-    async function selectPerson(person) {
-        if (!person?.id) return;
-        selectedPerson.value = person;
-        personPhotosLoading.value = true;
-        personPhotos.value = [];
-        try {
-            const params = new URLSearchParams();
-            params.set("offset", "0");
-            params.set("limit", "200");
-            const payload = await apiFetch(`/api/ai/people/${encodeURIComponent(person.id)}/photos?${params.toString()}`);
-            const data = payload.data || {};
-            personPhotos.value = data.photos || data.results || [];
-        } catch (error) {
-            personPhotos.value = [];
-            setMessage(error.message, "error");
-        } finally {
-            personPhotosLoading.value = false;
-        }
-    }
-
-    function backToPeople() {
-        selectedPerson.value = null;
-        personPhotos.value = [];
-    }
-
-    async function patchPerson(personId, updates) {
-        try {
-            const payload = await apiFetch(`/api/ai/people/${encodeURIComponent(personId)}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(updates),
-            });
-            // Prefer explicit request fields; API may also return the saved person.
-            // Do not spread payload.data wholesale — it contains person_id/updated metadata.
-            const fromApi = payload.data?.person && typeof payload.data.person === "object"
-                ? payload.data.person
-                : {};
-            const patched = {
-                ...(updates && typeof updates === "object" ? updates : {}),
-                ...fromApi,
-            };
-            people.value = people.value.map((person) =>
-                person.id === personId ? { ...person, ...patched } : person,
-            );
-            albumPeople.value = albumPeople.value.map((person) =>
-                person.id === personId ? { ...person, ...patched } : person,
-            );
-            if (selectedPerson.value?.id === personId) {
-                selectedPerson.value = { ...selectedPerson.value, ...patched };
-            }
-            setMessage(payload.message || t("msg.settingsSaved"));
-            await refreshPeopleForAlbum();
-        } catch (error) {
-            setMessage(error.message, "error");
-        }
-    }
-
-    async function mergePeople(body) {
-        try {
-            const payload = await apiFetch("/api/ai/people/merge", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-            });
-            setMessage(payload.message || t("people.mergeDone"));
-            backToPeople();
-            await Promise.all([refreshPeople(), refreshPeopleForAlbum()]);
-        } catch (error) {
-            setMessage(error.message, "error");
-        }
-    }
-
-    async function splitPerson(body) {
-        try {
-            const payload = await apiFetch("/api/ai/people/split", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-            });
-            setMessage(payload.message || t("people.splitDone"));
-            backToPeople();
-            await Promise.all([refreshPeople(), refreshPeopleForAlbum()]);
-        } catch (error) {
-            setMessage(error.message, "error");
-        }
     }
 
     async function updatePreferences(updates) {
@@ -1888,10 +1970,6 @@ export function useAlbumApp() {
         aiSimilarResults.value = [];
         aiSimilarQuery.value = null;
         aiSimilarLoading.value = false;
-        people.value = [];
-        peopleTotal.value = 0;
-        selectedPerson.value = null;
-        personPhotos.value = [];
         albumViewMode.value = "photos";
         dashboard.value = null;
         dashboardError.value = "";
@@ -2062,6 +2140,7 @@ export function useAlbumApp() {
         importCloudToAlbum,
         importSelectedToAlbum,
         fetchFilesForPicker,
+        fetchAlbumPhotosByPaths,
         isSelected,
         loadAllRemainingAlbumPhotos,
         loadMoreAlbumPhotos,
@@ -2073,22 +2152,21 @@ export function useAlbumApp() {
         message,
         members,
         aiStatus,
-        people,
-        peopleTotal,
-        peopleLoading,
-        selectedPerson,
-        personPhotos,
-        personPhotosLoading,
-        refreshPeople,
         albumPeople,
         albumPeopleLoading,
+        albumFaceSuggestions,
+        albumFaceSuggestionsDisplay,
+        albumFaceHintsLoading,
+        albumFacesEditable,
+        albumFacesOwner,
         refreshPeopleForAlbum,
+        refreshFaceHintsForAlbum,
         filterAlbumByPerson,
-        selectPerson,
-        backToPeople,
-        patchPerson,
-        mergePeople,
-        splitPerson,
+        adoptAlbumCluster,
+        mergeAlbumCluster,
+        patchAlbumPerson,
+        removeAlbumPersonCenter,
+        deleteAlbumPerson,
         navigateTo,
         openEntry,
         pasteHere,
@@ -2117,6 +2195,7 @@ export function useAlbumApp() {
         showAlbumPhotos,
         findSimilarPhotos,
         searchAlbumByText,
+        loadAlbumDuplicatesForModal,
         sharedAlbums,
         collections,
         selectedCollectionId,

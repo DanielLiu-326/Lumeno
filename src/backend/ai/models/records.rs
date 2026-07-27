@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::super::people::{FaceAssignment, PersonRecord};
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiGenerationStats {
     pub(crate) albums_total: usize,
@@ -26,8 +24,8 @@ pub struct OwnerIndexStatus {
     pub(crate) root_exists: bool,
     pub(crate) current_generation: Option<String>,
     pub(crate) manifest_present: bool,
-    pub(crate) photos_meta_present: bool,
-    pub(crate) hashes_bin_present: bool,
+    pub(crate) embeddings_present: bool,
+    pub(crate) duplicates_index_present: bool,
     pub(crate) state: Option<String>,
     pub(crate) created_at_unix_ms: Option<u128>,
     pub(crate) sources_total: Option<usize>,
@@ -73,8 +71,6 @@ pub(crate) struct LoadedOwnerIndex {
     pub(crate) faces: HashMap<String, AiFaceRecord>,
     pub(crate) faces_by_stable_key: HashMap<String, Vec<String>>,
     pub(crate) face_embeddings: HashMap<String, Vec<f32>>,
-    pub(crate) people: HashMap<String, PersonRecord>,
-    pub(crate) assignments: HashMap<String, FaceAssignment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,8 +85,6 @@ pub(crate) struct AiFaceRecord {
     pub(crate) detector_revision: String,
     #[serde(default = "default_ai_pending_state")]
     pub(crate) embedding_state: String,
-    #[serde(default)]
-    pub(crate) embedding_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,18 +113,10 @@ pub(crate) struct AiIndexedPhotoRecord {
     pub(crate) scan_state: String,
     #[serde(default = "default_ai_pending_state")]
     pub(crate) image_embedding_state: String,
-    #[serde(default)]
-    pub(crate) image_embedding_offset: Option<u64>,
     #[serde(default = "default_ai_pending_state")]
     pub(crate) duplicate_hash_state: String,
     #[serde(default)]
-    pub(crate) duplicate_sha256_hex: Option<String>,
-    #[serde(default)]
-    pub(crate) duplicate_sha256_offset: Option<u64>,
-    #[serde(default)]
     pub(crate) duplicate_phash_u64: Option<u64>,
-    #[serde(default)]
-    pub(crate) duplicate_phash_offset: Option<u64>,
     #[serde(default)]
     pub(crate) duplicate_phash_valid: bool,
     #[serde(default = "default_ai_pending_state")]
@@ -195,4 +181,3 @@ impl AiIndexedPhotoRecord {
         format!("{}/{}", self.cache_id, self.album_relative_path())
     }
 }
-

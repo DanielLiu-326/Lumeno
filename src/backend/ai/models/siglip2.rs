@@ -51,9 +51,8 @@ impl Siglip2Runtime {
             let device = choice.device.clone();
             let vision_bpk = resolve_bpk(root, &["siglip2_vision.bpk"])?;
             let text_bpk = resolve_bpk(root, &["siglip2_text.bpk"])?;
-            let vision = super::onnx_gen::siglip2_vision::Model::<AiBackend>::from_file(
-                vision_bpk, &device,
-            );
+            let vision =
+                super::onnx_gen::siglip2_vision::Model::<AiBackend>::from_file(vision_bpk, &device);
             let text =
                 super::onnx_gen::siglip2_text::Model::<AiBackend>::from_file(text_bpk, &device);
             let tokenizer = match tokenizer_path {
@@ -115,11 +114,10 @@ impl Siglip2Runtime {
     #[cfg(ai_onnx_generated)]
     fn embed_image_one(&self, image: &image::DynamicImage) -> Result<Vec<f32>, String> {
         let tensor = prepare_siglip_tensor(image, SIGLIP2_IMAGE_SIZE, &self.device);
-        let output = catch_unwind(AssertUnwindSafe(|| self.vision.forward(tensor))).map_err(
-            |_| {
+        let output =
+            catch_unwind(AssertUnwindSafe(|| self.vision.forward(tensor))).map_err(|_| {
                 "siglip2 vision forward panicked (check input size 256x256, batch=1)".to_string()
-            },
-        )?;
+            })?;
         let mut rows = tensor_rows_to_normalized_vectors(output, self.dimension)?;
         rows.pop()
             .ok_or_else(|| "siglip2 vision empty output".to_string())

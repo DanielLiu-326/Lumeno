@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::auth::Role;
 use super::common::{AppError, AppState, RateLimiter, Token, create_response};
 use super::i18n::{RequestLocale, SUPPORTED_LOCALES, normalize_locale, tr, trf};
+use super::constants::USER_AVATAR_SIZE;
 
 pub struct SettingsChange {
     pub changed_keys: Vec<String>,
@@ -695,7 +696,6 @@ pub async fn api_admin_reset_password(
 
 // ── Avatar constants ─────────────────────────────────────────────────────────
 
-const AVATAR_SIZE: u32 = 256;
 const AVATAR_DIR: &str = "config/avatars";
 
 // ── API: Upload avatar ───────────────────────────────────────────────────────
@@ -750,7 +750,7 @@ pub async fn api_avatar_upload(
     let output_blocking = output_path.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let img = image::load_from_memory(&data).map_err(|e| format!("open image failed: {e}"))?;
-        let thumb = img.thumbnail(AVATAR_SIZE, AVATAR_SIZE);
+        let thumb = img.thumbnail(USER_AVATAR_SIZE, USER_AVATAR_SIZE);
         thumb
             .save_with_format(&output_blocking, image::ImageFormat::WebP)
             .map_err(|e| format!("save webp avatar failed: {e}"))?;

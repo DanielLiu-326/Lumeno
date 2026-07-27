@@ -197,6 +197,9 @@ pub(crate) fn detect_format_from_bytes(bytes: &[u8]) -> ImageFormat {
     if bytes.len() >= 12 && is_heic_bytes(bytes) {
         return ImageFormat::Heic;
     }
+    if let Some(raw) = detect_raw_magic(bytes) {
+        return raw;
+    }
     image::guess_format(bytes)
         .ok()
         .and_then(|fmt| match fmt {
@@ -212,6 +215,31 @@ pub(crate) fn detect_format_from_bytes(bytes: &[u8]) -> ImageFormat {
         .unwrap_or(ImageFormat::Unknown)
 }
 
+/// Sniff common camera-RAW containers that `image::guess_format` misses.
+///
+/// Panasonic RW2 uses TIFF-like little-endian with magic `IIU\0` (not classic `II*\0`).
+fn detect_raw_magic(bytes: &[u8]) -> Option<ImageFormat> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    // Panasonic / Leica RW2
+    if bytes.starts_with(b"IIU\0") {
+        return Some(ImageFormat::Rw2);
+    }
+    // Fujifilm RAF
+    if bytes.starts_with(b"FUJIFILMCCD-RAW ") {
+        return Some(ImageFormat::Raf);
+    }
+    // Canon CR3 (ISO BMFF with 'crx ' / 'CRX ' brand variants)
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let brand = &bytes[8..12];
+        if brand == b"crx " || brand == b"CRX " || brand == b"cr3 " {
+            return Some(ImageFormat::Cr3);
+        }
+    }
+    None
+}
+
 fn is_heic_bytes(bytes: &[u8]) -> bool {
     if bytes.len() < 12 {
         return false;
@@ -221,4 +249,32 @@ fn is_heic_bytes(bytes: &[u8]) -> bool {
     }
     let brand = &bytes[8..12];
     matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" | b"avif")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn rw2_extension_resolves() {
+        assert_eq!(
+            detect_format_from_path(Path::new("photo.RW2")),
+            ImageFormat::Rw2
+        );
+    }
+
+    #[test]
+    fn panasonic_rw2_magic_resolves() {
+        let mut bytes = vec![0_u8; 16];
+        bytes[..4].copy_from_slice(b"IIU\0");
+        assert_eq!(detect_format_from_bytes(&bytes), ImageFormat::Rw2);
+    }
+
+    #[test]
+    fn resolve_prefers_path_over_unknown_bytes() {
+        let bytes = b"not an image";
+        let format = resolve_format(None, Some(Path::new("shot.rw2")), Some(bytes)).unwrap();
+        assert_eq!(format, ImageFormat::Rw2);
+    }
 }

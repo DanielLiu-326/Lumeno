@@ -232,11 +232,7 @@ fn iou_xywh(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let ih = (iy2 - iy1).max(0.0);
     let inter = iw * ih;
     let union = a[2] * a[3] + b[2] * b[3] - inter;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter / union
-    }
+    if union <= 0.0 { 0.0 } else { inter / union }
 }
 
 fn nms_xywh(detections: Vec<ScrfdDetection>, threshold: f32) -> Vec<ScrfdDetection> {

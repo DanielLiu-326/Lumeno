@@ -194,6 +194,8 @@ const avail = computed(() => ({
   availableTags:    props.availableTags,
   availablePeople:  props.availablePeople,
   dateHistogram:    props.dateHistogram,
+  currentAlbum:     props.currentAlbum,
+  currentUser:      props.currentUser,
 }));
 
 const filterItems = ref(makeDefaultFilters());

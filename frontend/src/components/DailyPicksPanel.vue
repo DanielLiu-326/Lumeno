@@ -23,7 +23,7 @@ async function load() {
   }
 }
 
-function thumbUrl(photo, size = 280) {
+function thumbUrl(photo, size = 360) {
   const ownerParam = photo.owner ? `&owner=${encodeURIComponent(photo.owner)}` : "";
   return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=${size}${ownerParam}`;
 }

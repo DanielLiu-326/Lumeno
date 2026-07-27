@@ -6,9 +6,12 @@ import {
 import { t } from "../i18n/index.js";
 import LazyImage from "./LazyImage.vue";
 import FaceAvatar from "./FaceAvatar.vue";
+import { personDisplayCover, parseAlbumPhotoPath } from "../utils/faceCrop.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
+  albumName: { type: String, default: "" },
+  albumOwner: { type: String, default: "" },
   busy: { type: Boolean, default: false },
   people: { type: Array, default: () => [] },
   peopleTotal: { type: Number, default: 0 },
@@ -49,6 +52,7 @@ const selectableFaces = computed(() => {
         faceId,
         path: photo.path,
         owner: photo.owner,
+        source: parseAlbumPhotoPath(photo.path)?.source || "",
         box: boxes[index] || null,
         label: photo.name || String(photo.path || "").split("/").pop() || faceId,
       });
@@ -70,6 +74,10 @@ watch(
 function personLabel(person) {
   const name = (person?.name || "").trim();
   return name || t("people.unnamed");
+}
+
+function personAvatarCover(person) {
+  return personDisplayCover(person, props.albumName, props.albumOwner);
 }
 
 function toggleFaceSelection(faceId) {
@@ -244,8 +252,9 @@ function photoThumb(path, owner) {
         >
           <div class="relative mx-auto mb-2 aspect-square w-full max-w-[8rem] overflow-hidden rounded-full" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
             <FaceAvatar
-              v-if="person.cover?.path"
-              :cover="person.cover"
+              v-if="personAvatarCover(person)"
+              :album="albumName"
+              :cover="personAvatarCover(person)"
               :size="128"
               img-class="transition group-hover:scale-105"
             />
@@ -329,8 +338,9 @@ function photoThumb(path, owner) {
             >
               <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
                 <FaceAvatar
-                  :path="face.path"
-                  :owner="face.owner"
+                  :album="albumName"
+                  :face-id="face.faceId"
+                  :source="face.source"
                   :face-box="face.box"
                   :size="100"
                 />

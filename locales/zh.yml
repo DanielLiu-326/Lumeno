@@ -92,6 +92,8 @@ error:
   ai_person_not_found: "未找到该人物"
   ai_person_not_visible: "未找到该人物"
   ai_person_update_empty: "未提供要更新的人物字段"
+  ai_person_cover_not_found: "该人脸不属于此人物"
+  ai_person_center_not_found: "该聚类不属于此人物"
   ai_person_name_invalid: "人物名称无效"
   ai_person_merge_empty: "请至少选择一个人物进行合并"
   ai_person_split_empty: "请至少选择一个人脸进行拆分"

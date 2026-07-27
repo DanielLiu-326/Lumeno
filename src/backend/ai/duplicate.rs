@@ -1,19 +1,22 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 
 use image::DynamicImage;
 use image::imageops::FilterType;
 
 use crate::backend::album::decoder::{
-    create_decoder, DecodeOptions, DecoderCreateOptions,
+    DecodeOptions, DecoderCreateOptions, create_decoder, decode_bytes_with_path,
 };
 
+use super::album_cache::{
+    AlbumAiCache, DEFAULT_NEAR_DUPLICATE_DISTANCE, DUPLICATES_INDEX_VERSION, PhashCacheFile,
+    phash_cache_key,
+};
 use super::models::AiIndexedPhotoRecord;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AiDuplicatePhotoItem {
     pub(crate) owner: String,
     pub(crate) album: String,
@@ -26,7 +29,7 @@ pub(crate) struct AiDuplicatePhotoItem {
     pub(crate) height: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AiDuplicateGroup {
     pub(crate) group_key: String,
     pub(crate) kind: String,
@@ -36,12 +39,19 @@ pub(crate) struct AiDuplicateGroup {
     pub(crate) photos: Vec<AiDuplicatePhotoItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DuplicatesIndexFile {
+    pub(crate) version: u32,
+    pub(crate) max_distance: u32,
+    pub(crate) algorithm: String,
+    pub(crate) groups: Vec<AiDuplicateGroup>,
+}
+
 pub(crate) fn compute_photo_phash(path: &Path) -> Result<u64, String> {
     let decoder = create_decoder(DecoderCreateOptions::auto())
         .map_err(|error| format!("create decoder failed: {error}"))?;
     let bytes = std::fs::read(path).map_err(|error| format!("read photo failed: {error}"))?;
-    let image = decoder
-        .decode_bytes(&bytes, DecodeOptions::new())
+    let image = decode_bytes_with_path(decoder.as_ref(), path, &bytes, DecodeOptions::new())
         .map_err(|error| format!("decode photo for perceptual hash failed: {error}"))?;
     Ok(compute_photo_phash_image(&image))
 }
@@ -57,7 +67,12 @@ pub(crate) fn compute_photo_phash_preferring_preview(
         let decoder = create_decoder(DecoderCreateOptions::auto())
             .map_err(|error| format!("create decoder failed: {error}"))?;
         if let Ok(bytes) = std::fs::read(preview)
-            && let Ok(image) = decoder.decode_bytes(&bytes, DecodeOptions::raw_pixels())
+            && let Ok(image) = decode_bytes_with_path(
+                decoder.as_ref(),
+                preview,
+                &bytes,
+                DecodeOptions::raw_pixels(),
+            )
         {
             return Ok(compute_photo_phash_image(&image));
         }
@@ -111,58 +126,15 @@ fn compute_photo_phash_image(image: &DynamicImage) -> u64 {
     hash
 }
 
-#[allow(dead_code)] // exact duplicate path temporarily disabled
-pub(crate) fn compute_photo_sha256(path: &Path) -> Result<String, String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| format!("open photo for sha256 failed: {error}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-
-    loop {
-        let bytes_read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("read photo for sha256 failed: {error}"))?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>())
-}
-
 /// Perceptual hash for near-duplicate detection.
-/// Exact (SHA256) duplicate checks are disabled for now — full-file hashing is too costly.
 pub(crate) fn compute_duplicate_hash_pair(
     photo_path: &Path,
     preview: Option<&Path>,
-) -> (
-    String,
-    Option<String>,
-    Option<u64>,
-    bool,
-    Option<String>,
-) {
+) -> (String, Option<u64>, bool, Option<String>) {
     match compute_photo_phash_preferring_preview(photo_path, preview) {
-        Ok(phash) => ("ready".to_string(), None, Some(phash), true, None),
-        Err(error) => ("error".to_string(), None, None, false, Some(error)),
+        Ok(phash) => ("ready".to_string(), Some(phash), true, None),
+        Err(error) => ("error".to_string(), None, false, Some(error)),
     }
-}
-
-pub(crate) fn decode_sha256_hex(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let hex = std::str::from_utf8(chunk).ok()?;
-        bytes[index] = u8::from_str_radix(hex, 16).ok()?;
-    }
-    Some(bytes)
 }
 
 struct PhashBkNode {
@@ -205,41 +177,112 @@ impl PhashBkNode {
     }
 }
 
-struct DuplicateUnionFind {
-    parent: Vec<usize>,
-    rank: Vec<u8>,
+/// Undirected adjacency for pairs with Hamming distance ≤ `max_distance`.
+fn build_phash_adjacency(
+    candidates: &[(&AiIndexedPhotoRecord, u64)],
+    max_distance: u32,
+) -> Vec<std::collections::HashSet<usize>> {
+    let n = candidates.len();
+    let mut neighbors = vec![std::collections::HashSet::<usize>::new(); n];
+    let mut tree: Option<PhashBkNode> = None;
+
+    for (index, (_, phash)) in candidates.iter().enumerate() {
+        if let Some(root) = tree.as_ref() {
+            let mut matches = Vec::new();
+            root.search(*phash, max_distance, &mut matches);
+            for matched_index in matches {
+                if matched_index == index {
+                    continue;
+                }
+                neighbors[index].insert(matched_index);
+                neighbors[matched_index].insert(index);
+            }
+        }
+        if let Some(root) = tree.as_mut() {
+            root.insert(*phash, index);
+        } else {
+            tree = Some(PhashBkNode::new(*phash, index));
+        }
+    }
+    neighbors
 }
 
-impl DuplicateUnionFind {
-    fn new(len: usize) -> Self {
-        Self {
-            parent: (0..len).collect(),
-            rank: vec![0; len],
-        }
-    }
+/// Bron–Kerbosch with pivoting: enumerate maximal cliques in an undirected graph.
+fn bron_kerbosch_maximal_cliques(
+    neighbors: &[std::collections::HashSet<usize>],
+) -> Vec<Vec<usize>> {
+    use std::collections::BTreeSet;
 
-    fn find(&mut self, index: usize) -> usize {
-        if self.parent[index] != index {
-            self.parent[index] = self.find(self.parent[index]);
-        }
-        self.parent[index]
-    }
+    let n = neighbors.len();
+    let mut cliques = Vec::new();
+    let mut r = Vec::new();
+    let mut p: BTreeSet<usize> = (0..n).collect();
+    let mut x: BTreeSet<usize> = BTreeSet::new();
 
-    fn union(&mut self, left: usize, right: usize) {
-        let left_root = self.find(left);
-        let right_root = self.find(right);
-        if left_root == right_root {
+    fn recurse(
+        neighbors: &[std::collections::HashSet<usize>],
+        r: &mut Vec<usize>,
+        p: &mut BTreeSet<usize>,
+        x: &mut BTreeSet<usize>,
+        cliques: &mut Vec<Vec<usize>>,
+    ) {
+        if p.is_empty() && x.is_empty() {
+            if r.len() >= 2 {
+                let mut clique = r.clone();
+                clique.sort_unstable();
+                cliques.push(clique);
+            }
             return;
         }
-        if self.rank[left_root] < self.rank[right_root] {
-            self.parent[left_root] = right_root;
-        } else if self.rank[left_root] > self.rank[right_root] {
-            self.parent[right_root] = left_root;
-        } else {
-            self.parent[right_root] = left_root;
-            self.rank[left_root] += 1;
+
+        let pivot = p
+            .iter()
+            .chain(x.iter())
+            .max_by_key(|&&u| neighbors[u].iter().filter(|v| p.contains(v)).count())
+            .copied();
+
+        let candidates: Vec<usize> = match pivot {
+            Some(u) => p
+                .iter()
+                .copied()
+                .filter(|v| !neighbors[u].contains(v))
+                .collect(),
+            None => p.iter().copied().collect(),
+        };
+
+        for v in candidates {
+            r.push(v);
+            let n_v = &neighbors[v];
+            let mut p_new: BTreeSet<usize> =
+                p.iter().copied().filter(|u| n_v.contains(u)).collect();
+            let mut x_new: BTreeSet<usize> =
+                x.iter().copied().filter(|u| n_v.contains(u)).collect();
+            recurse(neighbors, r, &mut p_new, &mut x_new, cliques);
+            r.pop();
+            p.remove(&v);
+            x.insert(v);
         }
     }
+
+    recurse(neighbors, &mut r, &mut p, &mut x, &mut cliques);
+    cliques
+}
+
+/// Greedy set cover of vertices by largest maximal cliques (non-overlapping).
+fn select_cliques_greedy(mut cliques: Vec<Vec<usize>>, vertex_count: usize) -> Vec<Vec<usize>> {
+    cliques.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    let mut used = vec![false; vertex_count];
+    let mut selected = Vec::new();
+    for clique in cliques {
+        if clique.iter().any(|&v| used[v]) {
+            continue;
+        }
+        for &v in &clique {
+            used[v] = true;
+        }
+        selected.push(clique);
+    }
+    selected
 }
 
 fn duplicate_photo_item(record: &AiIndexedPhotoRecord) -> AiDuplicatePhotoItem {
@@ -264,38 +307,113 @@ fn sort_duplicate_photos(photos: &mut [AiDuplicatePhotoItem]) {
     });
 }
 
-#[allow(dead_code)] // exact duplicate path temporarily disabled
-pub(crate) fn build_exact_duplicate_groups(records: &[AiIndexedPhotoRecord]) -> Vec<AiDuplicateGroup> {
-    let mut grouped = HashMap::<String, Vec<AiDuplicatePhotoItem>>::new();
-    for record in records {
-        let Some(sha256) = record.duplicate_sha256_hex.as_ref() else {
-            continue;
-        };
-        grouped
-            .entry(sha256.clone())
-            .or_default()
-            .push(duplicate_photo_item(record));
-    }
-
-    grouped
-        .into_iter()
-        .filter_map(|(sha256, mut photos)| {
-            if photos.len() < 2 {
-                return None;
-            }
-            sort_duplicate_photos(&mut photos);
-            Some(AiDuplicateGroup {
-                group_key: format!("exact:{sha256}"),
-                kind: "exact".to_string(),
-                sha256: Some(sha256),
-                max_hamming_distance: Some(0),
-                photo_count: photos.len(),
-                photos,
-            })
-        })
-        .collect()
+pub(crate) async fn write_photo_phash_cache_async(
+    ai_root: &Path,
+    owner: &str,
+    cache_id: &str,
+    photo: &AiIndexedPhotoRecord,
+) -> Result<(), String> {
+    let Some(phash) = photo
+        .duplicate_phash_u64
+        .filter(|_| photo.duplicate_phash_valid)
+    else {
+        return Ok(());
+    };
+    let cache = AlbumAiCache::new(ai_root, owner, cache_id);
+    let key = phash_cache_key(&photo.stable_key, &photo.content_signature);
+    let file = PhashCacheFile::new(
+        &photo.stable_key,
+        &photo.album_relative_path(),
+        phash,
+        Some(photo.content_signature.as_str()),
+    );
+    cache.write_phash_async(&key, &file).await
 }
 
+pub(crate) async fn lookup_photo_phash_async(
+    ai_root: &Path,
+    owner: &str,
+    cache_id: &str,
+    stable_key: &str,
+    content_signature: &str,
+) -> Option<u64> {
+    if cache_id.is_empty() || content_signature.is_empty() {
+        return None;
+    }
+    let cache = AlbumAiCache::new(ai_root, owner, cache_id);
+    let key = phash_cache_key(stable_key, content_signature);
+    let file = cache.read_phash_async(&key).await?;
+    if let Some(sig) = file.content_signature.as_deref()
+        && sig != content_signature
+    {
+        return None;
+    }
+    Some(file.phash_u64)
+}
+
+pub(crate) async fn publish_duplicates_index_async(
+    ai_root: &Path,
+    owner: &str,
+    cache_id: &str,
+    photos: &[AiIndexedPhotoRecord],
+    max_distance: u32,
+) -> Result<usize, String> {
+    let cache = AlbumAiCache::new(ai_root, owner, cache_id);
+    let mut album_photos: Vec<_> = photos
+        .iter()
+        .filter(|p| p.cache_id == cache_id)
+        .cloned()
+        .collect();
+    for photo in &mut album_photos {
+        if photo.duplicate_phash_valid && photo.duplicate_phash_u64.is_some() {
+            write_photo_phash_cache_async(ai_root, owner, cache_id, photo).await?;
+            continue;
+        }
+        if let Some(phash) = lookup_photo_phash_async(
+            ai_root,
+            owner,
+            cache_id,
+            &photo.stable_key,
+            &photo.content_signature,
+        )
+        .await
+        {
+            photo.duplicate_phash_u64 = Some(phash);
+            photo.duplicate_phash_valid = true;
+            photo.duplicate_hash_state = "ready".to_string();
+        }
+    }
+    let groups = build_near_duplicate_groups(&album_photos, max_distance);
+    let index = DuplicatesIndexFile {
+        version: DUPLICATES_INDEX_VERSION,
+        max_distance,
+        algorithm: "bron-kerbosch".to_string(),
+        groups,
+    };
+    let value =
+        serde_json::to_value(&index).map_err(|e| format!("serialize duplicates index: {e}"))?;
+    cache.write_duplicates_index_json_async(&value).await?;
+    Ok(index.groups.len())
+}
+
+pub(crate) async fn read_duplicates_index_async(
+    ai_root: &Path,
+    owner: &str,
+    cache_id: &str,
+) -> Option<DuplicatesIndexFile> {
+    let cache = AlbumAiCache::new(ai_root, owner, cache_id);
+    let value = cache.read_duplicates_index_json_async().await?;
+    serde_json::from_value(value).ok()
+}
+
+pub(crate) fn default_near_duplicate_distance() -> u32 {
+    DEFAULT_NEAR_DUPLICATE_DISTANCE
+}
+
+/// Near-duplicate groups via Bron–Kerbosch maximal cliques + greedy non-overlapping selection.
+///
+/// Graph edge = Hamming(pHash) ≤ `max_distance`. Each group is a true clique (every pair
+/// within threshold), avoiding union-find transitive chaining.
 pub(crate) fn build_near_duplicate_groups(
     records: &[AiIndexedPhotoRecord],
     max_distance: u32,
@@ -309,44 +427,16 @@ pub(crate) fn build_near_duplicate_groups(
                 .map(|phash| (record, phash))
         })
         .collect::<Vec<_>>();
-    let mut union_find = DuplicateUnionFind::new(candidates.len());
-    let mut tree: Option<PhashBkNode> = None;
-
-    for (index, (record, phash)) in candidates.iter().enumerate() {
-        if let Some(root) = tree.as_ref() {
-            let mut matches = Vec::new();
-            root.search(*phash, max_distance, &mut matches);
-            for matched_index in matches {
-                let matched_record = candidates[matched_index].0;
-                // Exact SHA256 grouping is disabled; only skip merge when both still
-                // carry the same non-empty digest from an older index.
-                let same_exact = matches!(
-                    (
-                        record.duplicate_sha256_hex.as_deref(),
-                        matched_record.duplicate_sha256_hex.as_deref()
-                    ),
-                    (Some(left), Some(right)) if left == right
-                );
-                if !same_exact {
-                    union_find.union(index, matched_index);
-                }
-            }
-        }
-        if let Some(root) = tree.as_mut() {
-            root.insert(*phash, index);
-        } else {
-            tree = Some(PhashBkNode::new(*phash, index));
-        }
+    if candidates.len() < 2 {
+        return Vec::new();
     }
 
-    let mut components = HashMap::<usize, Vec<usize>>::new();
-    for index in 0..candidates.len() {
-        let root = union_find.find(index);
-        components.entry(root).or_default().push(index);
-    }
+    let neighbors = build_phash_adjacency(&candidates, max_distance);
+    let cliques = bron_kerbosch_maximal_cliques(&neighbors);
+    let selected = select_cliques_greedy(cliques, candidates.len());
 
-    components
-        .into_values()
+    selected
+        .into_iter()
         .filter_map(|indices| {
             if indices.len() < 2 {
                 return None;
@@ -385,3 +475,75 @@ pub(crate) fn build_near_duplicate_groups(
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn photo_with_phash(path: &str, phash: u64) -> AiIndexedPhotoRecord {
+        let stable_key = format!("o|a|{path}");
+        AiIndexedPhotoRecord {
+            photo_id: 0,
+            owner: "o".into(),
+            album: "a".into(),
+            source_key: "a".into(),
+            cache_id: "a".into(),
+            path: path.into(),
+            stable_key: stable_key.clone(),
+            stable_id: stable_key,
+            size_bytes: 1,
+            modified_unix_seconds: None,
+            content_signature: String::new(),
+            width: Some(1),
+            height: Some(1),
+            provider_revision: None,
+            scan_state: "ready".into(),
+            image_embedding_state: "ready".into(),
+            duplicate_hash_state: "ready".into(),
+            duplicate_phash_u64: Some(phash),
+            duplicate_phash_valid: true,
+            face_embedding_state: "ready".into(),
+            reused_from_generation: None,
+            record_error: None,
+            indexed_at_unix_ms: 0,
+        }
+    }
+
+    #[test]
+    fn chain_does_not_form_one_clique() {
+        // A--B--C with edges only A-B and B-C (distance 1), A-C distance 2 > threshold 1.
+        let a = photo_with_phash("a.jpg", 0b000);
+        let b = photo_with_phash("b.jpg", 0b001);
+        let c = photo_with_phash("c.jpg", 0b011);
+        let groups = build_near_duplicate_groups(&[a, b, c], 1);
+        assert_eq!(
+            groups.len(),
+            1,
+            "greedy keeps one edge-clique, leaves one vertex out"
+        );
+        assert_eq!(groups[0].photo_count, 2);
+        assert!(groups[0].max_hamming_distance.unwrap() <= 1);
+    }
+
+    #[test]
+    fn triangle_forms_one_clique() {
+        // All pairs within distance 2 → one triangle (hypercube has no 3-cycles at dist 1).
+        let a = photo_with_phash("a.jpg", 0b000);
+        let b = photo_with_phash("b.jpg", 0b001);
+        let c = photo_with_phash("c.jpg", 0b011);
+        let groups = build_near_duplicate_groups(&[a, b, c], 2);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].photo_count, 3);
+        assert!(groups[0].max_hamming_distance.unwrap() <= 2);
+    }
+
+    #[test]
+    fn identical_phash_forms_one_group() {
+        let a = photo_with_phash("a.jpg", 0xABCD);
+        let b = photo_with_phash("b.jpg", 0xABCD);
+        let c = photo_with_phash("c.jpg", 0xABCD);
+        let groups = build_near_duplicate_groups(&[a, b, c], 8);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].photo_count, 3);
+        assert_eq!(groups[0].max_hamming_distance, Some(0));
+    }
+}

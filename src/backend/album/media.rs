@@ -29,6 +29,11 @@ use crate::backend::common::{
     AppError, AppState, ConcurrencyLimiter, Token, create_response, into_host_path_safely,
     move_file_or_dir,
 };
+use crate::backend::constants::{
+    DARKTABLE_PREVIEW_DEFAULT_SIZE, DARKTABLE_PREVIEW_SIZE_MAX, DARKTABLE_PREVIEW_SIZE_MIN,
+    FACE_AVATAR_PAD, FACE_CROP_SIZE, FACE_THUMBNAIL_SIZE_MAX, FACE_THUMBNAIL_SIZE_MIN,
+    PREVIEW_THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN,
+};
 use crate::backend::i18n::{RequestLocale, tr, trf};
 use crate::backend::tasks::{
     Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused,
@@ -300,9 +305,6 @@ fn write_webp_thumbnail_from_bytes(
     Ok(())
 }
 
-/// Padding around the face box when cropping avatars (matches frontend `faceCrop.js`).
-const FACE_AVATAR_PAD: f32 = 0.15;
-
 fn parse_face_box_query(raw: &str, locale: &str) -> Result<[f32; 4], AppError> {
     let mut values = [0_f32; 4];
     for (index, part) in raw.split(',').take(4).enumerate() {
@@ -334,7 +336,7 @@ fn parse_face_box_query(raw: &str, locale: &str) -> Result<[f32; 4], AppError> {
     ])
 }
 
-fn crop_face_avatar(image: &image::DynamicImage, box_xywh: [f32; 4]) -> Result<image::DynamicImage, String> {
+pub(crate) fn crop_face_avatar(image: &image::DynamicImage, box_xywh: [f32; 4]) -> Result<image::DynamicImage, String> {
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         return Err("empty image".to_string());
@@ -409,7 +411,7 @@ fn face_thumbnail_cache_file(
         ))
 }
 
-fn write_face_webp_thumbnail_from_image(
+pub(crate) fn write_face_webp_thumbnail_from_image(
     image: &image::DynamicImage,
     output: &std::path::Path,
     size: u32,
@@ -421,6 +423,117 @@ fn write_face_webp_thumbnail_from_image(
         .save_with_format(output, image::ImageFormat::WebP)
         .map_err(|e| format!("save face webp thumbnail failed: {e}"))?;
     Ok(())
+}
+
+fn is_readable_face_crop_sync(path: &FsPath) -> bool {
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    std::fs::File::open(path).is_ok()
+}
+
+pub(crate) async fn is_readable_face_crop(path: &FsPath) -> bool {
+    let Ok(meta) = tokio::fs::metadata(path).await else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    tokio::fs::File::open(path).await.is_ok()
+}
+
+async fn clear_unusable_face_crop(path: &FsPath) {
+    if tokio::fs::try_exists(path).await.unwrap_or(false)
+        && !is_readable_face_crop(path).await
+    {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+/// Write a face crop under AI cache from an already-decoded image (miss only).
+pub(crate) fn write_cached_face_crop_from_image(
+    image: &image::DynamicImage,
+    crop_output: &FsPath,
+    size: u32,
+    box_xywh: [f32; 4],
+) -> Result<(), String> {
+    if is_readable_face_crop_sync(crop_output) {
+        return Ok(());
+    }
+    if crop_output.exists() {
+        let _ = std::fs::remove_file(crop_output);
+    }
+    if let Some(parent) = crop_output.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create face-crops dir: {e}"))?;
+    }
+    write_face_webp_thumbnail_from_image(image, crop_output, size, box_xywh)
+}
+
+/// Ensure `face-crops/{face_id}.webp` exists and is readable.
+///
+/// Cache hits bypass the limiter. On miss (or unreadable entry): acquire
+/// [`thumbnail_limiter`] (or [`darktable_limiter`] for RAW), decode, and write at `size`.
+pub(crate) async fn ensure_cached_face_crop(
+    album_dir: &FsPath,
+    crop_output: &FsPath,
+    source_relative: &str,
+    box_xywh: [f32; 4],
+    size: u32,
+    thumbnail_limiter: &Arc<ConcurrencyLimiter>,
+    darktable_limiter: &Arc<ConcurrencyLimiter>,
+) -> Result<(), String> {
+    if is_readable_face_crop(crop_output).await {
+        return Ok(());
+    }
+
+    let source = album_dir.join(source_relative.replace('\\', "/").trim_start_matches('/'));
+    if !source.is_file() {
+        return Err(format!("source missing: {}", source.display()));
+    }
+
+    let limiter = if is_raw_path(&source) {
+        darktable_limiter
+    } else {
+        thumbnail_limiter
+    };
+    let permit = limiter.acquire().await;
+    if is_readable_face_crop(crop_output).await {
+        return Ok(());
+    }
+    clear_unusable_face_crop(crop_output).await;
+    if let Some(parent) = crop_output.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create face-crops dir: {e}"))?;
+    }
+    let source_for_decode = source.clone();
+    let output_blocking = crop_output.to_path_buf();
+    let result = async {
+        let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|e| e.message)?;
+        let image = decoder
+            .decode_path(&source_for_decode, DecodeOptions::new())
+            .await
+            .map_err(|e| e.message)?;
+        tokio::task::spawn_blocking(move || {
+            write_face_webp_thumbnail_from_image(&image, &output_blocking, size, box_xywh)
+        })
+        .await
+        .map_err(|e| format!("face crop join: {e}"))??;
+        if !is_readable_face_crop_sync(&crop_output) {
+            return Err(format!(
+                "face crop not readable after write: {}",
+                crop_output.display()
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    drop(permit);
+    result
 }
 
 fn write_face_webp_thumbnail_from_bytes(
@@ -474,12 +587,6 @@ async fn ensure_face_thumbnail_cached(
     result.map_err(AppError::Unknown)
 }
 
-const BACKGROUND_THUMBNAIL_SIZE: u32 = 360;
-
-/// Default preview size used by background thumbnail warming / UI mid-size thumbs.
-/// Large enough for AI scan pHash (needs only 32×32).
-pub(crate) const PREVIEW_THUMBNAIL_SIZE: u32 = BACKGROUND_THUMBNAIL_SIZE;
-
 pub(crate) fn preview_thumbnail_cache_path(
     data_path: &std::path::Path,
     username: &str,
@@ -532,7 +639,7 @@ pub(crate) async fn generate_thumbnail_batch(
             let error = ensure_thumbnail_cached(
                 source.clone(),
                 output,
-                BACKGROUND_THUMBNAIL_SIZE,
+                THUMBNAIL_SIZE,
                 ThumbnailGenerator::Lumeno,
                 &cfg.thumbnail_limiter,
                 &cfg.darktable_limiter,
@@ -658,7 +765,7 @@ impl Task for BackgroundThumbnailTask {
             let cache_key = thumbnail_cache_key(
                 &self.base.owner,
                 &source,
-                BACKGROUND_THUMBNAIL_SIZE,
+                THUMBNAIL_SIZE,
                 &metadata,
                 ThumbnailGenerator::Lumeno,
             );
@@ -667,7 +774,7 @@ impl Task for BackgroundThumbnailTask {
                 self.cfg.data_path.as_path(),
                 &self.base.owner,
                 &source,
-                BACKGROUND_THUMBNAIL_SIZE,
+                THUMBNAIL_SIZE,
                 &metadata,
                 ThumbnailGenerator::Lumeno,
             );
@@ -879,10 +986,11 @@ pub async fn api_thumbnail(
     }
 
     // size=0 means full resolution (same semantics as darktable_preview).
+    // Default matches THUMBNAIL_SIZE / album grid prewarm.
     let size = match query.size {
         Some(0) => 0,
-        Some(s) => s.clamp(64, 1024),
-        None => 256,
+        Some(s) => s.clamp(THUMBNAIL_SIZE_MIN, THUMBNAIL_SIZE_MAX),
+        None => THUMBNAIL_SIZE,
     };
     let generator = ThumbnailGenerator::parse(query.generator.as_deref()).ok_or_else(|| {
         AppError::BadRequest(tr(
@@ -981,7 +1089,10 @@ pub async fn api_face_thumbnail(
     }
 
     let box_xywh = parse_face_box_query(query.r#box.as_str(), locale.as_str())?;
-    let size = query.size.unwrap_or(256).clamp(64, 512);
+    let size = query
+        .size
+        .unwrap_or(FACE_CROP_SIZE)
+        .clamp(FACE_THUMBNAIL_SIZE_MIN, FACE_THUMBNAIL_SIZE_MAX);
     let metadata = tokio::fs::metadata(&source)
         .await
         .map_err(|_| AppError::NotFound(source.display().to_string()))?;
@@ -1085,8 +1196,12 @@ pub async fn api_darktable_preview(
     let xmp_path = find_xmp_sidecar(&source);
 
     // size=0 means full resolution (no --width/--height)
-    let size = query.size.unwrap_or(1600);
-    let size = if size == 0 { 0 } else { size.clamp(256, 4096) };
+    let size = query.size.unwrap_or(DARKTABLE_PREVIEW_DEFAULT_SIZE);
+    let size = if size == 0 {
+        0
+    } else {
+        size.clamp(DARKTABLE_PREVIEW_SIZE_MIN, DARKTABLE_PREVIEW_SIZE_MAX)
+    };
 
     // Build a cache key that includes the XMP modification time (if any)
     let src_meta = tokio::fs::metadata(&source)
