@@ -3,14 +3,14 @@ use std::sync::Once;
 
 use async_trait::async_trait;
 use image::{DynamicImage, RgbImage};
-use rsraw::{RawImage, ThumbFormat, BIT_DEPTH_8};
+use rsraw::{BIT_DEPTH_8, RawImage, ThumbFormat};
 
 use super::exif::apply_exif_from_bytes;
-use super::formats::{format_from_hint_or_path, require_format, ImageFormat, ImageFormatSet};
+use super::formats::{ImageFormat, ImageFormatSet, format_from_hint_or_path, require_format};
 use super::gpu::GpuImageDecoder;
 use super::{
-    apply_max_edge, DecodeError, DecodeOptions, DecoderBackendKind, DecoderCreateOptions,
-    ImageDecoder,
+    DecodeError, DecodeOptions, DecoderBackendKind, DecoderCreateOptions, ImageDecoder,
+    apply_max_edge,
 };
 
 static REGISTER_HEIC: Once = Once::new();
@@ -64,7 +64,11 @@ impl ImageDecoder for CpuImageDecoder {
         Self::SUPPORTED
     }
 
-    fn decode_bytes(&self, bytes: &[u8], options: DecodeOptions) -> Result<DynamicImage, DecodeError> {
+    fn decode_bytes(
+        &self,
+        bytes: &[u8],
+        options: DecodeOptions,
+    ) -> Result<DynamicImage, DecodeError> {
         let format = require_format(options.format)?;
         let image = if format.is_camera_raw() {
             decode_libraw_bytes(bytes, options.apply_exif)?
@@ -149,12 +153,10 @@ fn decode_libraw_bytes(bytes: &[u8], apply_exif: bool) -> Result<DynamicImage, D
         code: "libraw_failed",
         message: error.to_string(),
     })?;
-    let processed = raw
-        .process::<BIT_DEPTH_8>()
-        .map_err(|error| DecodeError {
-            code: "libraw_failed",
-            message: error.to_string(),
-        })?;
+    let processed = raw.process::<BIT_DEPTH_8>().map_err(|error| DecodeError {
+        code: "libraw_failed",
+        message: error.to_string(),
+    })?;
     processed_to_dynamic(&processed)
 }
 

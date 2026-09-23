@@ -19,15 +19,19 @@ pub const THUMBNAIL_SIZE_MAX: u32 = 1024;
 /// AI face-crop edge length written at detection save time (`face-crops/…webp`).
 pub const FACE_CROP_SIZE: u32 = 256;
 
-/// `/api/face-thumbnail` size bounds (default [`FACE_CROP_SIZE`]).
-pub const FACE_THUMBNAIL_SIZE_MIN: u32 = 64;
-pub const FACE_THUMBNAIL_SIZE_MAX: u32 = 512;
-
 /// Padding around the face box when cropping avatars (matches frontend `faceCrop.js`).
 pub const FACE_AVATAR_PAD: f32 = 0.15;
 
 /// User profile avatar edge length (px).
 pub const USER_AVATAR_SIZE: u32 = 256;
+
+/// Long-edge cap for user wallpaper images (px).
+pub const USER_WALLPAPER_MAX_EDGE: u32 = 2560;
+
+/// Default / clamp for album grid and file-list page size (`photos_per_page` setting).
+pub const DEFAULT_PHOTOS_PER_PAGE: u32 = 100;
+pub const PHOTOS_PER_PAGE_MIN: u32 = 10;
+pub const PHOTOS_PER_PAGE_MAX: u32 = 500;
 
 /// Darktable RAW preview default / clamp (`size=0` = full res).
 pub const DARKTABLE_PREVIEW_DEFAULT_SIZE: u32 = 1600;
@@ -44,7 +48,6 @@ pub const MAX_FACES_PER_PHOTO: usize = 8;
 #[allow(dead_code)]
 pub const FACE_SUGGESTION_PREVIEW_LIMIT: usize = 16;
 
-
 /// DBSCAN cosine-distance eps for face clustering suggestions.
 pub const DEFAULT_CLUSTER_EPS: f32 = 0.38;
 /// DBSCAN min_samples for face clustering suggestions.
@@ -52,6 +55,9 @@ pub const DEFAULT_CLUSTER_MIN_SAMPLES: usize = 2;
 
 /// Min cosine similarity to suggest merging an unnamed cluster into a named person.
 pub const DEFAULT_PERSON_MATCH_MIN_SCORE: f32 = 0.45;
+
+/// Min IoU between old and new face boxes when reconciling `faces.json` after re-detect.
+pub const RECONCILE_FACE_IOU_MIN: f32 = 0.3;
 
 /// Max named-person merge suggestions attached to one cluster / noise face.
 pub const MAX_PERSON_MATCH_SUGGESTIONS: usize = 3;

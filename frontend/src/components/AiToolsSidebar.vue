@@ -6,7 +6,9 @@ import {
 } from "../utils/icons";
 import { t } from "../i18n/index.js";
 import FaceAvatar from "./FaceAvatar.vue";
-import { personDisplayCover, parseAlbumPhotoPath } from "../utils/faceCrop.js";
+import { personDisplayCover, parseAlbumPhotoPath, personPhotoCount } from "../utils/faceCrop.js";
+import AppDialog from "./AppDialog.vue";
+import AppSlider from "./AppSlider.vue";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -172,9 +174,9 @@ function confirmSplit() {
 
 <template>
   <aside
-    class="app-scrollbar flex h-full shrink-0 flex-col overflow-y-auto border-l"
+    class="app-scrollbar app-frost flex h-full shrink-0 flex-col overflow-y-auto border-l"
     :class="[
-      isDark ? 'border-stone-700/60 bg-stone-900' : 'border-stone-200/60 bg-stone-50',
+      isDark ? 'border-stone-700/50' : 'border-white/40',
       isMobile ? 'w-full' : 'w-72',
     ]"
   >
@@ -213,9 +215,9 @@ function confirmSplit() {
             <span>{{ t("albums.aiMinScore") }}</span>
             <span class="tabular-nums">{{ Number(minScore).toFixed(2) }}</span>
           </span>
-          <input v-model.number="minScore" type="range" min="0" max="1" step="0.01" class="w-full accent-amber-500" />
-          <span class="text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t("albums.aiMinScoreHint") }}</span>
+          <AppSlider class="w-full shrink-0 grow-0" v-model="minScore" :min="0" :max="1" :step="0.01" :is-dark="isDark" />
         </label>
+        <span class="text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t("albums.aiMinScoreHint") }}</span>
         <label class="flex flex-col gap-1">
           <span class="text-[11px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t("albums.aiResultLimit") }}</span>
           <input
@@ -325,15 +327,8 @@ function confirmSplit() {
               {{ t("people.split") }}
             </button>
           </div>
-          <button
-            class="rounded-xl px-3 py-2 text-left text-xs font-medium transition"
-            :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
-            @click="emit('filter-person', selectedPerson)"
-          >
-            {{ t("albums.aiFilterByPerson") }}
-          </button>
           <p class="text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
-            {{ t("people.photoCount", { count: selectedPerson.visible_photo_count ?? personPhotos.length }) }}
+            {{ t("people.photoCount", { count: personPhotoCount(selectedPerson) || personPhotos.length }) }}
           </p>
           <div v-if="personPhotosLoading" class="py-3 text-center text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
             {{ t("people.loadingPhotos") }}
@@ -386,9 +381,8 @@ function confirmSplit() {
       </section>
     </div>
 
-    <teleport to="body">
-      <div v-if="renameOpen" class="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4" @click.self="renameOpen = false">
-        <div class="w-full max-w-md rounded-2xl border p-4 shadow-xl" :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'">
+    <AppDialog :show="renameOpen" :z-index="120" @close="renameOpen = false">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-md rounded-2xl border p-4" :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-3 text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t("people.rename") }}</h3>
           <input
             v-model="renameValue"
@@ -402,12 +396,10 @@ function confirmSplit() {
             <button class="rounded-xl px-3 py-1.5 text-xs font-medium bg-amber-600 text-white" @click="saveRename">{{ t("albums.save") }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
 
-    <teleport to="body">
-      <div v-if="mergeOpen" class="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4" @click.self="mergeOpen = false">
-        <div class="w-full max-w-md rounded-2xl border p-4 shadow-xl" :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'">
+    <AppDialog :show="mergeOpen" :z-index="120" @close="mergeOpen = false">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-md rounded-2xl border p-4" :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-3 text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t("people.merge") }}</h3>
           <p class="mb-3 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t("people.mergeHint") }}</p>
           <select
@@ -425,12 +417,10 @@ function confirmSplit() {
             <button class="rounded-xl px-3 py-1.5 text-xs font-medium bg-amber-600 text-white" :disabled="!mergeTargetId" @click="confirmMerge">{{ t("people.merge") }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
 
-    <teleport to="body">
-      <div v-if="splitOpen" class="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4" @click.self="splitOpen = false">
-        <div class="w-full max-w-lg rounded-2xl border p-4 shadow-xl" :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'">
+    <AppDialog :show="splitOpen" :z-index="120" @close="splitOpen = false">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-lg rounded-2xl border p-4" :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-3 text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t("people.split") }}</h3>
           <p class="mb-3 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t("people.splitHint") }}</p>
           <div v-if="selectableFaces.length === 0" class="mb-4 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -480,7 +470,6 @@ function confirmSplit() {
             >{{ t("people.split") }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
   </aside>
 </template>

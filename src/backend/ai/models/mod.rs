@@ -8,5 +8,5 @@ pub mod runtime;
 pub mod scrfd;
 pub mod siglip2;
 
-pub use backend::selected_ai_device;
+pub use backend::{cpu_flex_device, selected_ai_device};
 pub use records::*;

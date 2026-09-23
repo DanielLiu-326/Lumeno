@@ -9,9 +9,9 @@ mod gpu;
 
 pub use auto::AutoImageDecoder;
 pub use cpu::CpuImageDecoder;
-pub use darktable::{darktable_export, find_xmp_sidecar, DarktableImageDecoder};
-pub use formats::{format_from_path, is_raw_path, ImageFormat, ImageFormatSet};
-pub use gpu::{GpuDevice, GpuImageDecoder};
+pub use darktable::{DarktableImageDecoder, darktable_export, find_xmp_sidecar};
+pub use formats::{ImageFormat, ImageFormatSet, format_from_path, is_raw_path};
+pub use gpu::GpuDevice;
 
 use std::path::Path;
 
@@ -171,7 +171,11 @@ pub trait ImageDecoder: Send + Sync {
         format != ImageFormat::Unknown && self.supported_formats().contains(format)
     }
 
-    fn decode_bytes(&self, bytes: &[u8], options: DecodeOptions) -> Result<DynamicImage, DecodeError>;
+    fn decode_bytes(
+        &self,
+        bytes: &[u8],
+        options: DecodeOptions,
+    ) -> Result<DynamicImage, DecodeError>;
 
     async fn decode_path(
         &self,

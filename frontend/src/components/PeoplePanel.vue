@@ -6,7 +6,8 @@ import {
 import { t } from "../i18n/index.js";
 import LazyImage from "./LazyImage.vue";
 import FaceAvatar from "./FaceAvatar.vue";
-import { personDisplayCover, parseAlbumPhotoPath } from "../utils/faceCrop.js";
+import { personDisplayCover, parseAlbumPhotoPath, personPhotoCount } from "../utils/faceCrop.js";
+import AppDialog from "./AppDialog.vue";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -136,7 +137,7 @@ function photoThumb(path, owner) {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <div class="flex items-center gap-2 border-b px-3 py-3 md:px-4" :class="isDark ? 'border-stone-700/60' : 'border-stone-200/60'">
+    <div class="app-frost-toolbar flex items-center gap-2 app-split-b px-3 py-3 md:px-4">
       <button
         v-if="selectedPerson"
         class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition"
@@ -204,7 +205,7 @@ function photoThumb(path, owner) {
       </p>
 
       <p class="mb-3 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
-        {{ t("people.photoCount", { count: selectedPerson.visible_photo_count ?? personPhotos.length }) }}
+        {{ t("people.photoCount", { count: personPhotoCount(selectedPerson) || personPhotos.length }) }}
       </p>
 
       <div v-if="personPhotosLoading" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
@@ -217,8 +218,7 @@ function photoThumb(path, owner) {
         <article
           v-for="photo in personPhotos"
           :key="photo.path || photo.stable_id"
-          class="rounded-xl border p-1.5 sm:p-2"
-          :class="isDark ? 'border-stone-700 bg-stone-900/80' : 'border-stone-200 bg-white/80'"
+          class="rounded-xl app-surface app-card p-1.5 sm:p-2"
         >
           <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
             <LazyImage
@@ -246,8 +246,7 @@ function photoThumb(path, owner) {
         <article
           v-for="person in visiblePeople"
           :key="person.id"
-          class="group cursor-pointer rounded-2xl border p-3 transition hover:shadow-md"
-          :class="isDark ? 'border-stone-700 bg-stone-900/70 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
+          class="group cursor-pointer rounded-2xl app-surface app-card p-3 transition"
           @click="openPerson(person)"
         >
           <div class="relative mx-auto mb-2 aspect-square w-full max-w-[8rem] overflow-hidden rounded-full" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
@@ -266,16 +265,15 @@ function photoThumb(path, owner) {
             {{ personLabel(person) }}
           </p>
           <p class="text-center text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
-            {{ t("people.photoCount", { count: person.visible_photo_count ?? 0 }) }}
+            {{ t("people.photoCount", { count: personPhotoCount(person) }) }}
           </p>
         </article>
       </div>
     </div>
 
     <!-- Rename dialog -->
-    <teleport to="body">
-      <div v-if="renameOpen" class="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4" @click.self="renameOpen = false">
-        <div class="w-full max-w-md rounded-2xl border p-4 shadow-xl" :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'">
+    <AppDialog :show="renameOpen" :z-index="120" @close="renameOpen = false">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-md rounded-2xl border p-4" :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-3 text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t("people.rename") }}</h3>
           <input
             v-model="renameValue"
@@ -289,13 +287,11 @@ function photoThumb(path, owner) {
             <button class="rounded-xl px-3 py-1.5 text-xs font-medium" :class="isDark ? 'bg-amber-600 text-white' : 'bg-amber-600 text-white'" @click="saveRename">{{ t("albums.save") }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
 
     <!-- Merge dialog (simplified) -->
-    <teleport to="body">
-      <div v-if="mergeOpen" class="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4" @click.self="mergeOpen = false">
-        <div class="w-full max-w-md rounded-2xl border p-4 shadow-xl" :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'">
+    <AppDialog :show="mergeOpen" :z-index="120" @close="mergeOpen = false">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-md rounded-2xl border p-4" :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-3 text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t("people.merge") }}</h3>
           <p class="mb-3 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t("people.mergeHint") }}</p>
           <select
@@ -313,13 +309,11 @@ function photoThumb(path, owner) {
             <button class="rounded-xl px-3 py-1.5 text-xs font-medium bg-amber-600 text-white" :disabled="!mergeTargetId" @click="confirmMerge">{{ t("people.merge") }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
 
     <!-- Split dialog -->
-    <teleport to="body">
-      <div v-if="splitOpen" class="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 p-4" @click.self="splitOpen = false">
-        <div class="w-full max-w-lg rounded-2xl border p-4 shadow-xl" :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'">
+    <AppDialog :show="splitOpen" :z-index="120" @close="splitOpen = false">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-lg rounded-2xl border p-4" :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-3 text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t("people.split") }}</h3>
           <p class="mb-3 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t("people.splitHint") }}</p>
           <div v-if="selectableFaces.length === 0" class="mb-4 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -369,7 +363,6 @@ function photoThumb(path, owner) {
             >{{ t("people.split") }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
   </div>
 </template>

@@ -29,9 +29,25 @@ pub struct AiDeviceChoice {
 
 static SELECTED: OnceLock<AiDeviceChoice> = OnceLock::new();
 
-/// Selected once per process; shared by SigLIP / SCRFD / ArcFace.
+/// Selected once per process; used by SigLIP vision, SCRFD, and ArcFace.
+/// SigLIP **text** always uses [`cpu_flex_device`] — see that fn.
 pub fn selected_ai_device() -> AiDeviceChoice {
     SELECTED.get_or_init(select_ai_device).clone()
+}
+
+/// Flex CPU device for the SigLIP text tower (token embedding gather + transformer).
+///
+/// Gemma's input embedding is `[256000, 768] f32` ≈ 750 MiB. wgpu/Intel iGPU
+/// `max_*_buffer_binding_size` is 128 MiB, so binding that table on Vulkan
+/// fails (`Buffer binding range 786432000 exceeds limit 134217728`) on a
+/// worker thread that `catch_unwind` cannot see. Forward then returns a
+/// constant vector and every text query ranks the same photos.
+///
+/// Lookup and the rest of the text tower run here instead. Vision stays on
+/// [`selected_ai_device`] (Vulkan/CUDA). Same `Dispatch` backend, different
+/// device; vectors are L2-normalized in host memory so mixing is fine.
+pub fn cpu_flex_device() -> AiDevice {
+    DispatchDevice::Flex(Default::default())
 }
 
 fn select_ai_device() -> AiDeviceChoice {
@@ -83,8 +99,8 @@ fn select_ai_device() -> AiDeviceChoice {
 
 /// Exclusive-page buckets capped below full VRAM, with aggressive reclaim.
 ///
-/// Max alloc (~1.5 GiB) still fits SigLIP text weights (~1.1 GiB) while preventing
-/// the default SubSlices habit of growing toward heap/4 on large cards.
+/// Max alloc (~1.5 GiB) covers vision / SCRFD / ArcFace on GPU. The SigLIP
+/// text tower (including the 750 MiB token embedding) stays on CPU Flex.
 ///
 /// On Intel iGPU (shared RAM), prefer a short `dealloc_period` so idle activation
 /// pages return quickly instead of ratcheting RSS for the whole index run.
@@ -136,7 +152,7 @@ fn init_vulkan_tight_memory(device: &WgpuDevice) -> bool {
 
 fn cpu_choice() -> AiDeviceChoice {
     AiDeviceChoice {
-        device: DispatchDevice::Flex(Default::default()),
+        device: cpu_flex_device(),
         label: "cpu".to_string(),
     }
 }

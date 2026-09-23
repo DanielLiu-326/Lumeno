@@ -65,13 +65,19 @@ impl LocalModelRuntime {
         let scrfd = ScrfdRuntime::load(&root, &manifest.face_detector)?;
         let arcface = ArcFaceRuntime::load(&root, &manifest.face_embedder)?;
         let revision = manifest.combined_revision();
+        // Vision/faces on `device`; SigLIP text is always Flex CPU (embedding table).
+        let device_label = if device.label == "cpu" {
+            device.label
+        } else {
+            format!("{}+flex-text", device.label)
+        };
         Ok(Self {
             info: LocalModelInfo {
                 revision,
                 image_dim: manifest.image_text.dimension.max(siglip2.dimension),
                 face_dim: manifest.face_embedder.dimension.max(arcface.dimension),
                 model_root: root,
-                device_label: device.label,
+                device_label,
             },
             siglip2,
             scrfd,
@@ -79,7 +85,7 @@ impl LocalModelRuntime {
         })
     }
 
-    pub fn embed_images(&self, images: &[DynamicImage]) -> Result<Vec<Vec<f32>>, String> {
+    pub fn embed_images(&self, images: &[DynamicImage]) -> Vec<Result<Vec<f32>, String>> {
         self.siglip2.embed_images(images)
     }
 
@@ -259,11 +265,10 @@ mod tests {
                 }
             } else {
                 let started = Instant::now();
-                match runtime.embed_images(&[image]) {
-                    Ok(mut embeds) => {
+                match runtime.embed_images(&[image]).into_iter().next() {
+                    Some(Ok(emb)) => {
                         let ms = started.elapsed().as_millis();
                         embed_ms.push(ms);
-                        let emb = embeds.pop().expect("embed");
                         assert_eq!(emb.len(), runtime.info.image_dim);
                         scene_ok += 1;
                         let mut best = (0usize, f32::NEG_INFINITY);
@@ -286,11 +291,18 @@ mod tests {
                             "ok": true,
                         }));
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
                         scene_fail += 1;
                         eprintln!("[smoke] scene fail {rel}: {error}");
                         results.push(serde_json::json!({
                             "file": rel, "split": split, "ok": false, "error": error,
+                        }));
+                    }
+                    None => {
+                        scene_fail += 1;
+                        eprintln!("[smoke] scene fail {rel}: empty embed result");
+                        results.push(serde_json::json!({
+                            "file": rel, "split": split, "ok": false, "error": "empty embed result",
                         }));
                     }
                 }

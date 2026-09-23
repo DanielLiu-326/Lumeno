@@ -1,9 +1,177 @@
 @import "tailwindcss";
 
+@theme {
+    --font-sans: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    --font-display: "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+@property --photo-gap {
+    syntax: "<length>";
+    inherits: true;
+    initial-value: 0px;
+}
+
+@property --info-open {
+    syntax: "<number>";
+    inherits: true;
+    initial-value: 0;
+}
+
+html {
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    background-color: #f4efe7;
+    color-scheme: light;
+    font-family: var(--font-sans);
+    font-size: calc(16px * var(--ui-scale, 1));
+    letter-spacing: 0.01em;
+    --accent: #f59e0b;
+    --accent-rgb: 245 158 11;
+    --safe-top-js: 0px;
+    --safe-right-js: 0px;
+    --safe-bottom-js: 0px;
+    --safe-left-js: 0px;
+    --safe-top-env: env(safe-area-inset-top, 0px);
+    --safe-right-env: env(safe-area-inset-right, 0px);
+    --safe-bottom-env: env(safe-area-inset-bottom, 0px);
+    --safe-left-env: env(safe-area-inset-left, 0px);
+    --safe-top: max(var(--safe-top-js), var(--safe-top-env));
+    --safe-right: max(var(--safe-right-js), var(--safe-right-env));
+    --safe-bottom: max(var(--safe-bottom-js), var(--safe-bottom-env));
+    --safe-left: max(var(--safe-left-js), var(--safe-left-env));
+    --ui-scale: 1;
+    --ui-zoom-inv: 1;
+}
+
+html.is-ui-scaled {
+    width: calc(100lvw * var(--ui-zoom-inv, 1));
+    height: var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1)));
+    max-height: none;
+}
+
+html.dark {
+    background-color: #0f172a;
+    color-scheme: dark;
+}
+
+html.theme-vt::view-transition-old(root),
+html.theme-vt::view-transition-new(root) {
+    animation-duration: 0.45s;
+    animation-timing-function: ease;
+    mix-blend-mode: normal;
+}
+
+html.theme-fade,
+html.theme-fade body,
+html.theme-fade #app,
+html.theme-fade #app * {
+    transition:
+        background-color 0.45s ease,
+        color 0.45s ease,
+        border-color 0.45s ease,
+        outline-color 0.45s ease,
+        fill 0.45s ease,
+        stroke 0.45s ease,
+        box-shadow 0.45s ease !important;
+}
+
+@media (max-width: 767.98px) {
+    html {
+        font-size: calc(16px * var(--ui-scale, 1));
+        letter-spacing: normal;
+        font-synthesis: none;
+        font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+        height: auto;
+        max-height: none;
+        min-height: calc(100lvh + 1px);
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
+    html.is-ui-scaled:not([data-shell="mobile"]) {
+        width: calc(100lvw * var(--ui-zoom-inv, 1));
+        height: auto;
+        min-height: calc((100lvh + 1px) * var(--ui-zoom-inv, 1));
+        max-height: none;
+    }
+
+    .font-display {
+        font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", system-ui, sans-serif;
+        letter-spacing: 0;
+    }
+}
+
+@media (hover: none) and (pointer: coarse) {
+
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="color"]):not([type="button"]):not([type="submit"]):not([type="reset"]),
+    textarea,
+    select {
+        font-size: 16px !important;
+        line-height: 1.25 !important;
+    }
+}
+
+html[data-shell="mobile"] select {
+    max-width: 100%;
+    -webkit-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%2378716c' stroke-width='2' viewBox='0 0 24 24'><path stroke-linecap='round' stroke-linejoin='round' d='m6 9 6 6 6-6'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.65rem center;
+    background-size: 1rem;
+    padding-right: 2rem;
+}
+
+html.dark[data-shell="mobile"] select {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%23a8a29e' stroke-width='2' viewBox='0 0 24 24'><path stroke-linecap='round' stroke-linejoin='round' d='m6 9 6 6 6-6'/></svg>");
+}
+
+body,
+#app {
+    min-width: 0;
+    max-width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    background-color: inherit;
+}
+
+@media (max-width: 767.98px) {
+
+    html:not([data-shell="mobile"]) body,
+    html:not([data-shell="mobile"]) #app {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1)));
+        max-height: none;
+    }
+}
+
+button,
+input,
+textarea,
+select {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
 @layer utilities {
     .app-scrollbar {
+        touch-action: pan-x pan-y;
+        overscroll-behavior: contain;
         scrollbar-width: thin;
-        scrollbar-color: rgba(245, 158, 11, 0.55) rgba(120, 113, 108, 0.14);
+        scrollbar-color: rgb(var(--accent-rgb) / 0.55) rgba(120, 113, 108, 0.14);
     }
 
     .app-scrollbar::-webkit-scrollbar {
@@ -17,14 +185,14 @@
     }
 
     .app-scrollbar::-webkit-scrollbar-thumb {
-        background: linear-gradient(180deg, rgba(245, 158, 11, 0.85), rgba(234, 88, 12, 0.82));
+        background: linear-gradient(180deg, rgb(var(--accent-rgb) / 0.85), rgb(var(--accent-rgb) / 0.72));
         border-radius: 999px;
         border: 2px solid transparent;
         background-clip: padding-box;
     }
 
     .app-scrollbar::-webkit-scrollbar-thumb:hover {
-        background: linear-gradient(180deg, rgba(251, 191, 36, 0.92), rgba(249, 115, 22, 0.88));
+        background: linear-gradient(180deg, rgb(var(--accent-rgb) / 0.92), rgb(var(--accent-rgb) / 0.82));
         border-radius: 999px;
         border: 2px solid transparent;
         background-clip: padding-box;
@@ -32,9 +200,2798 @@
 }
 
 .dark .app-scrollbar {
-    scrollbar-color: rgba(251, 191, 36, 0.62) rgba(28, 25, 23, 0.52);
+    scrollbar-color: rgb(var(--accent-rgb) / 0.62) rgba(28, 25, 23, 0.52);
 }
 
 .dark .app-scrollbar::-webkit-scrollbar-track {
     background: rgba(28, 25, 23, 0.52);
+}
+
+.app-dialog-root {
+    position: fixed;
+    inset: 0;
+}
+
+.app-dialog-safe {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    pointer-events: none;
+    padding-top: var(--safe-top, 0px);
+    padding-right: var(--safe-right, 0px);
+    padding-bottom: var(--safe-bottom, 0px);
+    padding-left: var(--safe-left, 0px);
+}
+
+.app-dialog-stage {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    pointer-events: none;
+}
+
+.app-dialog-stage>* {
+    max-height: 100%;
+}
+
+.app-dialog-stage > .app-photo-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    height: 100dvh;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: #000;
+    overflow: hidden;
+}
+
+.app-photo-fullscreen-body {
+    position: relative;
+    flex: 1 1 auto;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    background: #000;
+}
+
+.app-photo-fullscreen-stage {
+    position: absolute;
+    inset: 0;
+    background: #000;
+}
+
+.app-photo-fullscreen .app-photo-fullscreen-img {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    object-fit: contain;
+    border-radius: 0;
+    background: #000;
+}
+
+.app-overlay-screen {
+    box-sizing: border-box;
+    padding-top: var(--safe-top, 0px);
+    padding-right: var(--safe-right, 0px);
+    padding-bottom: var(--safe-bottom, 0px);
+    padding-left: var(--safe-left, 0px);
+}
+
+.app-frost-glass {
+    --frost-blur: 22px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 22px)) saturate(1.45);
+    backdrop-filter: blur(var(--frost-blur, 22px)) saturate(1.45);
+    background: rgb(255 255 255 / 0.4);
+}
+
+html.dark .app-frost-glass {
+    background: rgb(8 10 16 / 0.5);
+}
+
+.app-frost {
+    --frost-blur: 20px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 20px)) saturate(1.35);
+    backdrop-filter: blur(var(--frost-blur, 20px)) saturate(1.35);
+    background: rgb(252 250 247 / 0.86);
+}
+
+html.dark .app-frost {
+    background: rgb(16 18 26 / 0.86);
+}
+
+.app-frost-toolbar {
+    --frost-blur: 22px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 22px)) saturate(1.5);
+    backdrop-filter: blur(var(--frost-blur, 22px)) saturate(1.5);
+    background: rgb(255 255 255 / 0.48);
+}
+
+html.dark .app-frost-toolbar {
+    background: rgb(8 10 16 / 0.52);
+}
+
+.app-frost-dense {
+    --frost-blur: 36px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 36px)) saturate(1.7);
+    backdrop-filter: blur(var(--frost-blur, 36px)) saturate(1.7);
+    background: rgb(255 255 255 / 0.82);
+}
+
+html.dark .app-frost-dense {
+    background: rgb(12 16 24 / 0.86);
+}
+
+.app-surface {
+    --frost-blur: 16px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 16px)) saturate(1.3);
+    backdrop-filter: blur(var(--frost-blur, 16px)) saturate(1.3);
+    background: rgb(255 255 255 / 0.78);
+}
+
+/* Photo and file tiles sit inside an already frosted panel. A second
+   backdrop-filter on every card forces a blur readback per tile while
+   scrolling and will lock the desktop compositor. */
+.virtual-grid-scroller .app-surface {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgb(255 252 249 / 0.94);
+}
+
+html.dark .app-surface {
+    background: rgb(22 24 32 / 0.78);
+}
+
+html.dark .virtual-grid-scroller .app-surface {
+    background: rgb(22 24 32 / 0.96);
+}
+
+.app-surface-soft {
+    --frost-blur: 18px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 18px)) saturate(1.4);
+    backdrop-filter: blur(var(--frost-blur, 18px)) saturate(1.4);
+    background: rgb(255 255 255 / 0.32);
+}
+
+html.dark .app-surface-soft {
+    background: rgb(255 255 255 / 0.07);
+}
+
+.app-control {
+    --frost-blur: 12px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 12px)) saturate(1.2);
+    backdrop-filter: blur(var(--frost-blur, 12px)) saturate(1.2);
+    background-color: rgb(255 255 255 / 0.48);
+    border-color: rgb(28 25 23 / 0.18);
+}
+
+html.dark .app-control {
+    background-color: rgb(8 12 20 / 0.42);
+    border-color: rgb(255 255 255 / 0.16);
+}
+
+.app-frost-sidebar {
+    --frost-blur: 30px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 30px)) saturate(1.4);
+    backdrop-filter: blur(var(--frost-blur, 30px)) saturate(1.4);
+    background: rgb(255 255 255 / 0.62);
+}
+
+html.dark .app-frost-sidebar {
+    background: rgb(8 10 16 / 0.66);
+}
+
+.app-card {
+    border: 1px solid rgb(28 25 23 / 0.18);
+}
+
+/* Left-drag across the virtual album grid must not start a text selection
+   or native image drag; both walk every row and lock the page. */
+.album-no-drag {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.album-no-drag img {
+    -webkit-user-drag: none;
+}
+
+html.dark .app-card {
+    border-color: rgb(255 255 255 / 0.14);
+}
+
+.app-split-r {
+    border-right: 1px solid rgb(28 25 23 / 0.16);
+}
+
+html.dark .app-split-r {
+    border-right-color: rgb(255 255 255 / 0.12);
+}
+
+.app-split-b {
+    border-bottom: 1px solid rgb(28 25 23 / 0.16);
+}
+
+html.dark .app-split-b {
+    border-bottom-color: rgb(255 255 255 / 0.12);
+}
+
+.app-split-t {
+    border-top: 1px solid rgb(28 25 23 / 0.16);
+}
+
+html.dark .app-split-t {
+    border-top-color: rgb(255 255 255 / 0.12);
+}
+
+.app-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    border-radius: 0.85rem;
+    font-weight: 550;
+    letter-spacing: 0.01em;
+    transition:
+        background 160ms ease,
+        border-color 160ms ease,
+        color 160ms ease;
+}
+
+.app-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.app-accent {
+    color: var(--accent, var(--color-amber-500));
+}
+
+.app-accent-ink {
+    color: var(--color-amber-700);
+}
+
+html.dark .app-accent-ink {
+    color: var(--color-amber-300);
+}
+
+.app-btn-primary {
+    color: #fff;
+    background: var(--color-amber-600);
+    border: 1px solid color-mix(in srgb, var(--color-amber-800) 28%, transparent);
+}
+
+.app-btn-primary:hover {
+    background: var(--color-amber-700);
+}
+
+.app-btn-secondary {
+    color: rgb(41 37 36);
+    background: rgb(231 229 228);
+    border: 1px solid rgb(214 211 209);
+}
+
+.app-btn-secondary:hover:not(:disabled) {
+    background: rgb(214 211 209);
+    border-color: rgb(168 162 158);
+}
+
+html.dark .app-btn-secondary {
+    color: rgb(231 229 228);
+    background: rgb(255 255 255 / 0.14);
+    border: 1px solid rgb(255 255 255 / 0.1);
+}
+
+html.dark .app-btn-secondary:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.22);
+}
+
+.app-btn-accent {
+    color: var(--color-amber-900);
+    background: color-mix(in srgb, var(--color-amber-200) 72%, white);
+    border: 1px solid color-mix(in srgb, var(--color-amber-400) 45%, transparent);
+}
+
+.app-btn-accent:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-amber-300) 88%, white);
+    border-color: color-mix(in srgb, var(--color-amber-500) 55%, transparent);
+}
+
+html.dark .app-btn-accent {
+    color: var(--color-amber-200);
+    background: color-mix(in srgb, var(--color-amber-500) 20%, rgb(255 255 255 / 0.08));
+    border-color: color-mix(in srgb, var(--color-amber-400) 36%, transparent);
+}
+
+html.dark .app-btn-accent:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-amber-500) 34%, rgb(255 255 255 / 0.1));
+}
+
+.app-btn-icon {
+    border-radius: 0.75rem;
+    border: 1px solid rgb(214 211 209);
+    background: rgb(231 229 228);
+    color: rgb(68 64 60);
+}
+
+.app-btn-icon:hover:not(:disabled) {
+    background: rgb(214 211 209);
+    border-color: rgb(168 162 158);
+}
+
+html.dark .app-btn-icon {
+    border-color: rgb(255 255 255 / 0.1);
+    background: rgb(255 255 255 / 0.14);
+    color: rgb(226 232 240);
+}
+
+html.dark .app-btn-icon:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.22);
+}
+
+@media (max-width: 767.98px) {
+    .album-toolbar {
+        min-height: 3.875rem;
+        padding-top: 0.625rem;
+        padding-bottom: 0.625rem;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+    }
+
+    .album-toolbar .app-btn,
+    .album-toolbar>button,
+    .album-toolbar button.inline-flex {
+        min-height: 2.75rem;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+    }
+}
+
+.app-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.app-switch input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.app-switch-track {
+    position: relative;
+    flex-shrink: 0;
+    width: 1.85rem;
+    height: 1.05rem;
+    border-radius: 999px;
+    background: rgb(214 211 209);
+    transition: background 160ms ease;
+}
+
+.app-switch-track::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 0.8rem;
+    height: 0.8rem;
+    border-radius: 999px;
+    background: #fff;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
+    transition: transform 160ms ease;
+}
+
+.app-switch input:checked+.app-switch-track {
+    background: var(--color-amber-500);
+}
+
+.app-switch input:focus-visible+.app-switch-track {
+    outline: 2px solid var(--color-amber-500);
+    outline-offset: 2px;
+}
+
+html.dark .app-switch-track {
+    background: rgb(68 64 60);
+}
+
+html.dark .app-switch input:checked+.app-switch-track {
+    background: var(--color-amber-500);
+}
+
+.app-switch input:checked+.app-switch-track::after {
+    transform: translateX(0.8rem);
+}
+
+.app-switch:has(input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+.app-switch-label {
+    font-size: 0.75rem;
+    font-weight: 550;
+    line-height: 1.2;
+}
+
+.font-display {
+    font-family: var(--font-display);
+    letter-spacing: -0.025em;
+}
+
+.app-dialog-mask {
+    position: absolute;
+    inset: 0;
+    background: rgb(12 10 8 / 0.42);
+}
+
+html.dark .app-dialog-mask {
+    background: rgb(0 0 0 / 0.5);
+}
+
+.app-dialog-shell {
+    position: relative;
+    z-index: 1;
+    pointer-events: auto;
+    border-color: transparent;
+}
+
+/* Full-bleed inside AppDialog: stage uses align-items:center so h-full
+   collapses to content. Stretch past that for mobile screens. */
+.app-dialog-shell.app-dialog-fill {
+    align-self: stretch;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    min-height: 0;
+    border-radius: 0;
+}
+
+.app-dialog-panel {
+    position: relative;
+    z-index: 1;
+    pointer-events: auto;
+    background: rgb(255 252 249 / 0.96);
+    border-color: rgb(120 113 108 / 0.22);
+    color: rgb(41 37 36);
+}
+
+html.dark .app-dialog-panel {
+    background: rgb(32 36 48 / 0.96);
+    border-color: rgb(255 255 255 / 0.12);
+    color: rgb(231 229 228);
+}
+
+.app-dialog-panel-soft {
+    background: rgb(255 252 249 / 0.94);
+}
+
+html.dark .app-dialog-panel-soft {
+    background: rgb(32 36 48 / 0.94);
+}
+
+.app-dialog-panel-dense {
+    background: rgb(255 252 249 / 0.98);
+}
+
+html.dark .app-dialog-panel-dense {
+    background: rgb(32 36 48 / 0.94);
+}
+
+.app-frost-popover {
+    isolation: isolate;
+    background: rgb(255 252 249 / 0.96);
+    border: 1px solid rgb(120 113 108 / 0.16);
+}
+
+html.dark .app-frost-popover {
+    background: rgb(16 18 28 / 0.96);
+    border-color: rgb(255 255 255 / 0.10);
+}
+
+.app-dash-island {
+    isolation: isolate;
+    border-radius: 1.15rem;
+    --frost-blur: 42px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 42px)) saturate(1.7);
+    backdrop-filter: blur(var(--frost-blur, 42px)) saturate(1.7);
+    background: rgb(255 255 255 / 0.48);
+    border: 1px solid rgb(120 113 108 / 0.16);
+}
+
+html.dark .app-dash-island {
+    background: rgb(12 16 26 / 0.46);
+    border-color: rgb(255 255 255 / 0.10);
+}
+
+.app-dash-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    isolation: isolate;
+    border-radius: 999px;
+    padding: 0.28rem 0.75rem;
+    --frost-blur: 36px;
+    -webkit-backdrop-filter: blur(var(--frost-blur, 36px)) saturate(1.6);
+    backdrop-filter: blur(var(--frost-blur, 36px)) saturate(1.6);
+    background: rgb(255 255 255 / 0.5);
+    border: 1px solid rgb(120 113 108 / 0.16);
+}
+
+html.dark .app-dash-chip {
+    background: rgb(12 16 26 / 0.48);
+    border-color: rgb(255 255 255 / 0.10);
+}
+
+.app-dialog-panel.app-dialog-solid {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: #000;
+    border-color: transparent;
+    color: #fff;
+}
+
+html:not(.dark) .app-dialog-panel:not(.app-dialog-solid) [class*="border-stone-100"],
+html:not(.dark) .app-dialog-panel:not(.app-dialog-solid) [class*="border-stone-200"],
+html:not(.dark) .app-dialog-shell [class*="border-stone-100"],
+html:not(.dark) .app-dialog-shell [class*="border-stone-200"],
+html:not(.dark) .app-frost-popover [class*="border-stone-100"],
+html:not(.dark) .app-frost-popover [class*="border-stone-200"] {
+    border-color: rgb(120 113 108 / 0.26);
+}
+
+html:not(.dark) .app-dialog-panel:not(.app-dialog-solid) .text-stone-400,
+html:not(.dark) .app-dialog-panel:not(.app-dialog-solid) .text-stone-500,
+html:not(.dark) .app-dialog-shell .text-stone-400,
+html:not(.dark) .app-dialog-shell .text-stone-500,
+html:not(.dark) .app-frost-popover .text-stone-400,
+html:not(.dark) .app-frost-popover .text-stone-500 {
+    color: rgb(87 83 78);
+}
+
+.app-frost-popover .app-scrollbar>.app-split-b:last-child {
+    border-bottom: none;
+}
+
+.app-dialog-panel:not(.app-dialog-solid) :is(input, textarea, select):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="color"]):not([type="range"]):not([type="hidden"]),
+.app-dialog-panel:not(.app-dialog-solid) .app-control {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgb(255 255 255 / 0.62);
+    border-color: rgb(28 25 23 / 0.16);
+}
+
+html.dark .app-dialog-panel:not(.app-dialog-solid) :is(input, textarea, select):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="color"]):not([type="range"]):not([type="hidden"]),
+html.dark .app-dialog-panel:not(.app-dialog-solid) .app-control {
+    background: rgb(255 255 255 / 0.08);
+    border-color: rgb(255 255 255 / 0.16);
+}
+
+.app-dialog-panel:not(.app-dialog-solid) .app-btn-secondary,
+.app-dialog-panel:not(.app-dialog-solid) .app-btn-icon,
+.app-dialog-panel:not(.app-dialog-solid) button[class~="bg-white"],
+.app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-200"],
+.app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-700"],
+.app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-800"] {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgb(231 229 228);
+    border: 1px solid rgb(214 211 209);
+}
+
+html.dark .app-dialog-panel:not(.app-dialog-solid) .app-btn-secondary,
+html.dark .app-dialog-panel:not(.app-dialog-solid) .app-btn-icon,
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-white"],
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-200"],
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-700"],
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-800"] {
+    background: rgb(255 255 255 / 0.14);
+    border-color: rgb(255 255 255 / 0.1);
+}
+
+.app-dialog-panel:not(.app-dialog-solid) .app-btn-secondary:hover:not(:disabled),
+.app-dialog-panel:not(.app-dialog-solid) .app-btn-icon:hover:not(:disabled),
+.app-dialog-panel:not(.app-dialog-solid) button[class~="bg-white"]:hover:not(:disabled),
+.app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-200"]:hover:not(:disabled) {
+    background: rgb(214 211 209);
+    border-color: rgb(168 162 158);
+}
+
+html.dark .app-dialog-panel:not(.app-dialog-solid) .app-btn-secondary:hover:not(:disabled),
+html.dark .app-dialog-panel:not(.app-dialog-solid) .app-btn-icon:hover:not(:disabled),
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-white"]:hover:not(:disabled),
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-200"]:hover:not(:disabled),
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-700"]:hover:not(:disabled),
+html.dark .app-dialog-panel:not(.app-dialog-solid) button[class~="bg-stone-800"]:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.22);
+}
+
+.app-dialog-panel:not(.app-dialog-solid) thead tr,
+.app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-50"],
+.app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-950"],
+.app-dialog-panel:not(.app-dialog-solid) [class*="bg-white/"],
+.app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-800/"],
+.app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-900/"] {
+    background: rgb(255 255 255 / 0.42);
+}
+
+html.dark .app-dialog-panel:not(.app-dialog-solid) thead tr,
+html.dark .app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-50"],
+html.dark .app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-950"],
+html.dark .app-dialog-panel:not(.app-dialog-solid) [class*="bg-white/"],
+html.dark .app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-800/"],
+html.dark .app-dialog-panel:not(.app-dialog-solid) [class*="bg-stone-900/"] {
+    background: rgb(255 255 255 / 0.08);
+}
+
+.app-dialog-enter-active,
+.app-dialog-leave-active {
+    pointer-events: none;
+}
+
+.app-dialog-enter-active .app-dialog-mask,
+.app-dialog-enter-active .app-dialog-panel,
+.app-dialog-enter-active .app-dialog-shell {
+    transition: opacity 280ms ease;
+}
+
+.app-dialog-leave-active .app-dialog-mask,
+.app-dialog-leave-active .app-dialog-panel,
+.app-dialog-leave-active .app-dialog-shell {
+    transition: opacity 180ms ease;
+}
+
+.app-dialog-enter-from .app-dialog-mask,
+.app-dialog-leave-to .app-dialog-mask,
+.app-dialog-enter-from .app-dialog-panel,
+.app-dialog-leave-to .app-dialog-panel,
+.app-dialog-enter-from .app-dialog-shell,
+.app-dialog-leave-to .app-dialog-shell {
+    opacity: 0;
+}
+
+/* A fading layer that still blurs the photo grid re-samples every frame.
+   Repeated open/close piles those samples up until the tab locks. */
+.app-dialog-enter-active,
+.app-dialog-leave-active,
+.app-dropdown-enter-active,
+.app-dropdown-leave-active,
+.app-dialog-enter-active *,
+.app-dialog-leave-active *,
+.app-dropdown-enter-active *,
+.app-dropdown-leave-active * {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+}
+
+.app-dropdown-leave-active {
+    pointer-events: none;
+}
+
+.app-dropdown-enter-active.app-dropdown-surface,
+.app-dropdown-enter-active .app-dropdown-surface {
+    transform-origin: top center;
+    transition:
+        opacity 300ms cubic-bezier(0.16, 1, 0.3, 1),
+        transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app-dropdown-leave-active.app-dropdown-surface,
+.app-dropdown-leave-active .app-dropdown-surface {
+    transform-origin: top center;
+    transition:
+        opacity 200ms ease-in,
+        transform 200ms ease-in;
+}
+
+.app-dropdown-enter-from.app-dropdown-surface,
+.app-dropdown-leave-to.app-dropdown-surface,
+.app-dropdown-enter-from .app-dropdown-surface,
+.app-dropdown-leave-to .app-dropdown-surface {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.96);
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+    animation-duration: 240ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+::view-transition-group(album-hero) {
+    z-index: 80;
+    /* Keep in sync with ALBUM_VT_MS in AlbumPanel.vue */
+    animation-duration: 340ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+::view-transition-old(album-hero),
+::view-transition-new(album-hero) {
+    animation-duration: 340ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    height: 100%;
+    object-fit: cover;
+    overflow: clip;
+}
+
+/* Opacity modifiers bake hex at build time; retarget them at the live accent. */
+.border-amber-200\/40 {
+    border-color: color-mix(in srgb, var(--color-amber-200) 40%, transparent);
+}
+
+.border-amber-200\/50 {
+    border-color: color-mix(in srgb, var(--color-amber-200) 50%, transparent);
+}
+
+.border-amber-400\/70 {
+    border-color: color-mix(in srgb, var(--color-amber-400) 70%, transparent);
+}
+
+.border-amber-500\/70 {
+    border-color: color-mix(in srgb, var(--color-amber-500) 70%, transparent);
+}
+
+.border-amber-700\/35 {
+    border-color: color-mix(in srgb, var(--color-amber-700) 35%, transparent);
+}
+
+.border-amber-800\/25 {
+    border-color: color-mix(in srgb, var(--color-amber-800) 25%, transparent);
+}
+
+.bg-amber-100\/70 {
+    background-color: color-mix(in srgb, var(--color-amber-100) 70%, transparent);
+}
+
+.bg-amber-500\/15 {
+    background-color: color-mix(in srgb, var(--color-amber-500) 15%, transparent);
+}
+
+.bg-amber-500\/20 {
+    background-color: color-mix(in srgb, var(--color-amber-500) 20%, transparent);
+}
+
+.bg-amber-500\/25 {
+    background-color: color-mix(in srgb, var(--color-amber-500) 25%, transparent);
+}
+
+.bg-amber-600\/90 {
+    background-color: color-mix(in srgb, var(--color-amber-600) 90%, transparent);
+}
+
+.bg-amber-900\/20 {
+    background-color: color-mix(in srgb, var(--color-amber-900) 20%, transparent);
+}
+
+.bg-amber-900\/40 {
+    background-color: color-mix(in srgb, var(--color-amber-900) 40%, transparent);
+}
+
+.bg-amber-900\/50 {
+    background-color: color-mix(in srgb, var(--color-amber-900) 50%, transparent);
+}
+
+.bg-amber-950\/30 {
+    background-color: color-mix(in srgb, var(--color-amber-950) 30%, transparent);
+}
+
+.to-amber-950\/70 {
+    --tw-gradient-to: color-mix(in srgb, var(--color-amber-950) 70%, transparent);
+}
+
+.text-amber-300\/80 {
+    color: color-mix(in srgb, var(--color-amber-300) 80%, transparent);
+}
+
+.ring-amber-400\/40 {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-400) 40%, transparent);
+}
+
+.ring-amber-400\/60 {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-400) 60%, transparent);
+}
+
+.ring-amber-400\/70 {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-400) 70%, transparent);
+}
+
+.ring-amber-500\/30 {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-500) 30%, transparent);
+}
+
+.ring-amber-500\/50 {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-500) 50%, transparent);
+}
+
+.ring-amber-500\/60 {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-500) 60%, transparent);
+}
+
+.hover\:bg-amber-500\/40:hover {
+    background-color: color-mix(in srgb, var(--color-amber-500) 40%, transparent);
+}
+
+.hover\:bg-amber-800\/60:hover {
+    background-color: color-mix(in srgb, var(--color-amber-800) 60%, transparent);
+}
+
+.hover\:ring-amber-400\/70:hover {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-400) 70%, transparent);
+}
+
+.focus\:ring-amber-900\/40:focus {
+    --tw-ring-color: color-mix(in srgb, var(--color-amber-900) 40%, transparent);
+}
+
+html[data-shell="mobile"].is-frost-deferred * {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+}
+
+/* Do not promote these with translate3d. On iOS that leaves the top
+   of the first screen blurred until the next navigation. */
+html.is-layer-kick .mobile-page-host > * {
+    position: absolute !important;
+    inset: 0;
+    overflow: hidden;
+}
+
+html.is-layer-kick .mobile-app,
+html.is-layer-kick .mobile-tabbar,
+html.is-layer-kick .mobile-notch-cap {
+    backface-visibility: visible;
+    -webkit-backface-visibility: visible;
+}
+
+html[data-shell="mobile"] {
+    width: calc(100lvw * var(--ui-zoom-inv, 1));
+    height: var(--app-height, calc(100lvh * var(--ui-zoom-inv, 1)));
+    min-height: var(--app-height, calc(100lvh * var(--ui-zoom-inv, 1)));
+    max-height: none;
+    overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+html[data-shell="mobile"] :is(
+    button,
+    a,
+    .mobile-row,
+    .mobile-sheet-action,
+    .mobile-sheet-cancel,
+    .mobile-tabbar-item,
+    .mobile-quick,
+    .mobile-chip-btn,
+    .mobile-logout,
+    .mobile-profile,
+    .mobile-album-card,
+    .mobile-album-chip,
+    .file-path-nav,
+    .mobile-sheet-segment-btn,
+    .mobile-sort-dir-chip,
+    [data-entry-card]
+) {
+    cursor: pointer;
+}
+
+/* A huge inset shadow ignores border-radius and flashes on as a hard
+   rectangle. Paint a wash on a pseudo-element so it follows the control's
+   own corners and can fade in and out. */
+html[data-shell="mobile"] :is(
+    button,
+    a,
+    .mobile-row,
+    .mobile-sheet-action,
+    .mobile-sheet-cancel,
+    .mobile-quick,
+    .mobile-chip-btn,
+    .mobile-logout,
+    .mobile-profile,
+    .mobile-album-card,
+    .mobile-album-chip,
+    .file-path-nav,
+    .mobile-sheet-segment-btn,
+    .mobile-sort-dir-chip,
+    [data-entry-card]
+):where(:not(.mobile-tabbar-item, .mobile-sheet-mask, [data-press="off"], .absolute, .fixed, .sticky, .mobile-photo-nav, .mobile-photo-peek)) {
+    position: relative;
+}
+
+html[data-shell="mobile"] :is(
+    button,
+    a,
+    .mobile-row,
+    .mobile-sheet-action,
+    .mobile-sheet-cancel,
+    .mobile-quick,
+    .mobile-chip-btn,
+    .mobile-logout,
+    .mobile-profile,
+    .mobile-album-card,
+    .mobile-album-chip,
+    .file-path-nav,
+    .mobile-sheet-segment-btn,
+    .mobile-sort-dir-chip,
+    [data-entry-card]
+):where(:not(.mobile-tabbar-item, .mobile-sheet-mask, [data-press="off"]))::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+    pointer-events: none;
+    background: rgb(0 0 0 / 0.08);
+    opacity: 0;
+    transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html.dark[data-shell="mobile"] :is(
+    button,
+    a,
+    .mobile-row,
+    .mobile-sheet-action,
+    .mobile-sheet-cancel,
+    .mobile-quick,
+    .mobile-chip-btn,
+    .mobile-logout,
+    .mobile-profile,
+    .mobile-album-card,
+    .mobile-album-chip,
+    .file-path-nav,
+    .mobile-sheet-segment-btn,
+    .mobile-sort-dir-chip,
+    [data-entry-card]
+):where(:not(.mobile-tabbar-item, .mobile-sheet-mask, [data-press="off"]))::after {
+    background: rgb(255 255 255 / 0.12);
+}
+
+html[data-shell="mobile"] :is(.mobile-icon-btn, .file-path-nav, .mobile-press-soft)::after {
+    background: radial-gradient(circle, rgb(0 0 0 / 0.16) 0%, rgb(0 0 0 / 0.05) 46%, transparent 74%);
+}
+
+html.dark[data-shell="mobile"] :is(.mobile-icon-btn, .file-path-nav, .mobile-press-soft)::after {
+    background: radial-gradient(circle, rgb(255 255 255 / 0.2) 0%, rgb(255 255 255 / 0.06) 46%, transparent 74%);
+}
+
+html[data-shell="mobile"] :is(
+    button,
+    a,
+    .mobile-row,
+    .mobile-sheet-action,
+    .mobile-sheet-cancel,
+    .mobile-quick,
+    .mobile-chip-btn,
+    .mobile-logout,
+    .mobile-profile,
+    .mobile-album-card,
+    .mobile-album-chip,
+    .file-path-nav,
+    .mobile-sheet-segment-btn,
+    .mobile-sort-dir-chip,
+    [data-entry-card]
+):where(:not(.mobile-tabbar-item, .mobile-sheet-mask, [data-press="off"])):is(:active, .is-pressed):where(:not(:disabled))::after {
+    opacity: 1;
+    transition-duration: 90ms;
+}
+
+html[data-shell="mobile"] img,
+html[data-shell="mobile"] svg,
+html[data-shell="mobile"] video,
+html[data-shell="mobile"] canvas {
+    -webkit-user-drag: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+}
+
+html[data-shell="mobile"] input,
+html[data-shell="mobile"] textarea,
+html[data-shell="mobile"] select,
+html[data-shell="mobile"] [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+}
+
+html[data-shell="mobile"] body,
+html[data-shell="mobile"] #app {
+    position: relative;
+    height: 100%;
+    max-height: none;
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
+html[data-shell="mobile"].is-keyboard {
+    height: var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1)));
+    min-height: 0;
+    max-height: var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1)));
+}
+
+.mobile-app {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+    isolation: isolate;
+}
+
+.mobile-notch-cap {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 24;
+    height: var(--safe-top, 0px);
+    overflow: hidden;
+    pointer-events: none;
+    background: #f4efe7;
+}
+
+html.dark .mobile-notch-cap {
+    background: #0f172a;
+}
+
+.mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.75rem;
+    padding: calc(0.5rem + var(--safe-top, 0px)) 1rem 0.5rem;
+    background: #f4efe7;
+}
+
+html.dark .mobile-topbar {
+    background: #0f172a;
+}
+
+.mobile-tabbar {
+    display: flex;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-top: 1px solid rgb(120 113 108 / 0.18);
+    background: rgb(255 255 255 / 0.72);
+    -webkit-backdrop-filter: blur(22px) saturate(1.5);
+    backdrop-filter: blur(22px) saturate(1.5);
+    padding: 0.25rem 0.5rem calc(0.35rem + var(--safe-bottom, 0px));
+}
+
+html.dark .mobile-tabbar,
+.mobile-tabbar-dark {
+    border-top-color: rgb(255 255 255 / 0.08);
+    background: rgb(8 10 16 / 0.72);
+}
+
+.mobile-tabbar-item {
+    display: flex;
+    min-height: 2.75rem;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: rgb(120 113 108);
+    transition: color 180ms ease;
+}
+
+.mobile-tabbar-item svg {
+    transition: transform 180ms ease;
+}
+
+.mobile-tabbar-item.is-active {
+    color: var(--accent, #d97706);
+}
+
+.mobile-tabbar-item.is-active svg {
+    transform: scale(1.08);
+}
+
+.mobile-icon-btn {
+    display: inline-flex;
+    height: 2.75rem;
+    width: 2.75rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+}
+
+.mobile-icon-btn.is-accent {
+    color: var(--accent, #d97706);
+}
+
+.mobile-icon-btn.is-danger {
+    color: #e11d48;
+}
+
+.mobile-icon-btn:disabled {
+    opacity: 0.28;
+}
+
+.mobile-toast {
+    position: fixed;
+    top: calc(var(--safe-top, 0px) + 1rem);
+    left: 50%;
+    z-index: 140;
+    width: min(32rem, calc(100% - 2rem));
+    overflow: hidden;
+    border-radius: 1rem;
+    padding: 0.75rem 1rem;
+    text-align: left;
+    transform: translate3d(-50%, 0, 0);
+    touch-action: none;
+    will-change: transform, opacity;
+    transition: transform 180ms ease, opacity 180ms ease;
+}
+
+.mobile-toast.is-dragging {
+    transition: none;
+}
+
+.mobile-toast-enter-active,
+.mobile-toast-leave-active {
+    transition: transform 200ms ease, opacity 200ms ease;
+}
+
+.mobile-toast-enter-from,
+.mobile-toast-leave-to {
+    opacity: 0;
+    transform: translate3d(-50%, -12px, 0);
+}
+
+.file-path-bar {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    align-items: center;
+    gap: 0.1rem;
+}
+
+.file-path-nav {
+    display: inline-flex;
+    height: 2.25rem;
+    width: 2.25rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+}
+
+.file-path-bar.is-compact .file-path-nav {
+    height: 2.5rem;
+    width: 2.5rem;
+}
+
+.file-path-nav:disabled {
+    opacity: 0.28;
+}
+
+.file-path-field {
+    display: flex;
+    min-width: 0;
+    min-height: 2.25rem;
+    flex: 1;
+    align-items: center;
+    border-radius: 999px;
+    padding: 0 0.85rem;
+    cursor: text;
+    background: rgb(0 0 0 / 0.07);
+}
+
+html.dark .file-path-field {
+    background: rgb(255 255 255 / 0.1);
+}
+
+.file-path-text,
+.file-path-input {
+    min-width: 0;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    background: transparent;
+    border: 0;
+    outline: none;
+}
+
+.file-path-input {
+    overflow: visible;
+    text-overflow: clip;
+}
+
+.mobile-scroll {
+    height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+.mobile-path-scroll {
+    overflow-x: scroll;
+    overflow-y: hidden;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+.mobile-stat,
+.mobile-quick,
+.mobile-album-card,
+.mobile-album-chip,
+.mobile-profile,
+.mobile-group,
+.mobile-row {
+    overflow: hidden;
+    background: rgb(255 255 255 / 0.94);
+}
+
+html.dark .mobile-stat,
+html.dark .mobile-quick,
+html.dark .mobile-album-card,
+html.dark .mobile-album-chip,
+html.dark .mobile-profile,
+html.dark .mobile-group,
+html.dark .mobile-row {
+    background: rgb(16 18 26 / 0.94);
+}
+
+.mobile-stat {
+    border-radius: 1.25rem;
+    padding: 0.9rem 1rem;
+    text-align: left;
+}
+
+.mobile-stat-label {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 11px;
+    color: rgb(120 113 108);
+}
+
+html.dark .mobile-stat-label {
+    color: rgb(168 162 158);
+}
+
+.mobile-stat-value {
+    margin-top: 0.35rem;
+    font-size: 1.35rem;
+    font-weight: 700;
+}
+
+.mobile-stat-note {
+    margin-top: 0.2rem;
+    font-size: 11px;
+    opacity: 0.5;
+}
+
+.mobile-quick {
+    display: flex;
+    min-height: 2.75rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    border-radius: 1rem;
+    padding: 0.7rem 0.75rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.mobile-quick.is-secondary {
+    background: rgb(255 255 255 / 0.28);
+}
+
+.mobile-h-scroll {
+    display: flex;
+    gap: 0.7rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    padding-bottom: 0.25rem;
+}
+
+.mobile-cover-tile {
+    position: relative;
+    height: 8.5rem;
+    width: 8.5rem;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-radius: 1rem;
+    background: rgb(168 162 158 / 0.35);
+}
+
+.mobile-cover-caption {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: rgb(0 0 0 / 0.5);
+    padding: 0.25rem 0.45rem;
+    font-size: 10px;
+    color: white;
+}
+
+.mobile-album-chip {
+    display: flex;
+    width: 12.75rem;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.75rem;
+    border-radius: 1.1rem;
+    padding: 0.55rem;
+}
+
+.mobile-album-card {
+    overflow: hidden;
+    border-radius: 1.25rem;
+}
+
+.mobile-push-layer {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translate3d(100%, 0, 0);
+    background: #f4efe7;
+    box-shadow: -16px 0 40px rgb(0 0 0 / 0.16);
+    transition:
+        transform 340ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0s linear 340ms;
+}
+
+.mobile-push-layer.is-open {
+    visibility: visible;
+    pointer-events: auto;
+    transform: translate3d(0, 0, 0);
+    transition:
+        transform 340ms cubic-bezier(0.32, 0.72, 0, 1),
+        visibility 0s;
+}
+
+.mobile-push-frame {
+    display: flex;
+    min-height: 0;
+    height: 100%;
+    flex: 1 1 auto;
+    flex-direction: column;
+    overflow: hidden;
+    background: #f4efe7;
+}
+
+html.dark .mobile-push-frame {
+    background: #0f172a;
+}
+
+/* iOS keeps a soft raster of any layer that rests on translate3d(0,0,0),
+   including after a back-swipe cancel animation. display:contents drops
+   that box so the page paints in the normal layer again. */
+.mobile-push-layer.is-open.is-settled {
+    display: contents;
+    transform: none;
+    transition: none;
+}
+
+.mobile-settings-layer.is-open.is-settled > .mobile-push-frame {
+    z-index: 28;
+}
+
+.mobile-album-layer.is-open.is-settled > .mobile-push-frame {
+    z-index: 30;
+}
+
+.mobile-ai-layer.is-open.is-settled > .mobile-push-frame {
+    z-index: 32;
+}
+
+.mobile-face-layer.is-open.is-settled > .mobile-push-frame {
+    z-index: 34;
+}
+
+.mobile-face-center-layer.is-open.is-settled > .mobile-push-frame {
+    z-index: 35;
+}
+
+.mobile-view-layer.is-open.is-settled > .mobile-push-frame {
+    z-index: 33;
+}
+
+.mobile-push-layer.is-open.is-settled > .mobile-push-frame {
+    position: absolute;
+    inset: 0;
+    height: auto;
+    transform: none;
+    -webkit-transform: none;
+}
+
+.mobile-app.is-repaint {
+    animation: mobile-sharpen 1ms linear;
+}
+
+@keyframes mobile-sharpen {
+    from { opacity: 0.99; }
+    to { opacity: 1; }
+}
+
+.mobile-push-layer.is-instant {
+    transition: none !important;
+}
+
+.mobile-push-layer:not(.is-open) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+}
+
+.mobile-push-layer:not(.is-open) * {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+}
+
+.mobile-settings-layer {
+    z-index: 28;
+}
+
+.mobile-album-layer {
+    z-index: 30;
+}
+
+.mobile-ai-layer {
+    z-index: 32;
+}
+
+.mobile-face-layer {
+    z-index: 34;
+}
+
+.mobile-face-center-layer {
+    z-index: 35;
+}
+
+.mobile-view-layer {
+    z-index: 33;
+}
+
+.mobile-ai-tool-layer {
+    z-index: 1;
+}
+
+html.dark .mobile-push-layer {
+    background: #0f172a;
+}
+
+html:not(.dark) .mobile-push-layer {
+    background: #f4efe7;
+}
+
+.mobile-page-push-enter-active,
+.mobile-page-push-leave-active,
+.mobile-page-pop-enter-active,
+.mobile-page-pop-leave-active,
+.mobile-page-tab-next-enter-active,
+.mobile-page-tab-next-leave-active,
+.mobile-page-tab-prev-enter-active,
+.mobile-page-tab-prev-leave-active,
+.mobile-page-fade-enter-active,
+.mobile-page-fade-leave-active {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    transition:
+        transform 320ms cubic-bezier(0.32, 0.72, 0, 1),
+        opacity 240ms ease;
+}
+
+.mobile-page-push-enter-active,
+.mobile-page-pop-leave-active {
+    z-index: 2;
+}
+
+.mobile-page-push-leave-active,
+.mobile-page-pop-enter-active {
+    z-index: 1;
+}
+
+.mobile-page-push-enter-from {
+    transform: translate3d(100%, 0, 0);
+}
+
+.mobile-page-push-leave-to {
+    opacity: 0.55;
+    transform: translate3d(-24%, 0, 0);
+}
+
+.mobile-page-pop-enter-from {
+    opacity: 0.55;
+    transform: translate3d(-24%, 0, 0);
+}
+
+.mobile-page-pop-leave-to {
+    transform: translate3d(100%, 0, 0);
+}
+
+.mobile-page-tab-next-enter-from {
+    opacity: 0;
+    transform: translate3d(18%, 0, 0);
+}
+
+.mobile-page-tab-next-leave-to {
+    opacity: 0;
+    transform: translate3d(-12%, 0, 0);
+}
+
+.mobile-page-tab-prev-enter-from {
+    opacity: 0;
+    transform: translate3d(-18%, 0, 0);
+}
+
+.mobile-page-tab-prev-leave-to {
+    opacity: 0;
+    transform: translate3d(12%, 0, 0);
+}
+
+.mobile-page-fade-enter-from,
+.mobile-page-fade-leave-to {
+    opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    .mobile-page-push-enter-active,
+    .mobile-page-push-leave-active,
+    .mobile-page-pop-enter-active,
+    .mobile-page-pop-leave-active,
+    .mobile-page-tab-next-enter-active,
+    .mobile-page-tab-next-leave-active,
+    .mobile-page-tab-prev-enter-active,
+    .mobile-page-tab-prev-leave-active,
+    .mobile-page-fade-enter-active,
+    .mobile-page-fade-leave-active,
+    .mobile-push-layer {
+        transition: opacity 160ms ease;
+    }
+
+    .mobile-page-push-enter-from,
+    .mobile-page-push-leave-to,
+    .mobile-page-pop-enter-from,
+    .mobile-page-pop-leave-to,
+    .mobile-page-tab-next-enter-from,
+    .mobile-page-tab-next-leave-to,
+    .mobile-page-tab-prev-enter-from,
+    .mobile-page-tab-prev-leave-to {
+        opacity: 0;
+        transform: none;
+    }
+
+    .mobile-push-layer {
+        transform: none;
+    }
+
+    .mobile-push-layer:not(.is-open) {
+        opacity: 0;
+    }
+}
+
+.mobile-search-input {
+    min-width: 0;
+    flex: 1;
+    border-radius: 0.9rem;
+    border: 1px solid rgb(168 162 158 / 0.35);
+    background: rgb(255 255 255 / 0.7);
+    padding: 0.55rem 0.75rem;
+    font-size: 16px;
+}
+
+.mobile-search-standby {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+
+html.dark .mobile-search-input {
+    background: rgb(15 23 42 / 0.7);
+}
+
+.mobile-sheet-root {
+    position: fixed;
+    top: var(--app-top, 0px);
+    right: 0;
+    left: 0;
+    z-index: 120;
+    display: flex;
+    height: var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1)));
+    flex-direction: column;
+    justify-content: flex-end;
+}
+
+.mobile-sheet-root.is-stacked {
+    z-index: 130;
+}
+
+.mobile-sheet-mask {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: rgb(0 0 0 / 0.4);
+}
+
+.mobile-sheet-panel {
+    --sheet-surface: rgb(252 250 247);
+    position: relative;
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    padding: 0.4rem 0 calc(0.75rem + var(--safe-bottom, 0px));
+    border-radius: 1.35rem 1.35rem 0 0;
+    background: rgb(252 250 247 / 0.96);
+    -webkit-backdrop-filter: blur(24px) saturate(1.4);
+    backdrop-filter: blur(24px) saturate(1.4);
+    transform: translate3d(0, var(--sheet-drag, 0px), 0);
+    transition:
+        transform 240ms cubic-bezier(0.32, 0.72, 0, 1),
+        height 240ms cubic-bezier(0.32, 0.72, 0, 1),
+        max-height 240ms cubic-bezier(0.32, 0.72, 0, 1),
+        border-radius 220ms ease;
+    touch-action: pan-y;
+}
+
+.mobile-sheet-panel.is-dragging {
+    transition: none;
+}
+
+.mobile-sheet-panel.is-expanded {
+    height: 100%;
+    max-height: none;
+    padding-top: max(0.4rem, var(--safe-top, 0px));
+    border-radius: 0.9rem 0.9rem 0 0;
+}
+
+html.dark .mobile-sheet-panel {
+    --sheet-surface: rgb(16 18 26);
+    background: rgb(16 18 26 / 0.96);
+}
+
+.mobile-sheet-panel-tall:not(.is-expanded) {
+    height: min(calc(var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1))) * 0.78), 40rem);
+    max-height: min(calc(var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1))) * 0.78), 40rem);
+    overflow: hidden;
+}
+
+.mobile-sheet-panel-half:not(.is-expanded) {
+    height: 50%;
+    min-height: 50%;
+    overflow: hidden;
+}
+
+.mobile-sheet-panel-half {
+    overflow: hidden;
+}
+
+.mobile-sheet-panel-auto {
+    overflow: hidden;
+}
+
+.mobile-sheet-panel-auto:not(.is-expanded) {
+    max-height: min(calc(var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1))) * 0.78), 40rem);
+}
+
+.mobile-sheet-handle {
+    width: 2.5rem;
+    height: 0.3rem;
+    margin: 0.35rem auto 0.65rem;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: rgb(120 113 108 / 0.35);
+    touch-action: none;
+}
+
+.mobile-sheet-action,
+.mobile-sheet-cancel,
+.mobile-chip-btn {
+    min-height: 2.75rem;
+}
+
+.mobile-sheet-action {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    border-radius: 0.95rem;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.95rem;
+    font-weight: 550;
+    background: rgb(0 0 0 / 0.04);
+}
+
+html.dark .mobile-sheet-action {
+    background: rgb(255 255 255 / 0.06);
+}
+
+.mobile-sheet-action.is-danger {
+    color: #e11d48;
+}
+
+.mobile-sheet-toggle {
+    display: flex;
+    width: 100%;
+    min-height: 3.25rem;
+    align-items: center;
+    gap: 0.75rem;
+    border-radius: 0.95rem;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.95rem;
+    font-weight: 550;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    background: rgb(0 0 0 / 0.04);
+}
+
+html.dark .mobile-sheet-toggle {
+    background: rgb(255 255 255 / 0.06);
+}
+
+.mobile-sheet-toggle .app-switch-track {
+    width: 2.4rem;
+    height: 1.4rem;
+}
+
+.mobile-sheet-toggle .app-switch-track::after {
+    width: 1.1rem;
+    height: 1.1rem;
+}
+
+.mobile-sheet-toggle .app-switch input:checked+.app-switch-track::after {
+    transform: translateX(1rem);
+}
+
+.mobile-sheet-toggle .app-switch input:checked+.app-switch-track {
+    background: var(--accent, var(--color-amber-500));
+}
+
+.mobile-sheet-view {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    margin-bottom: 0.35rem;
+    padding: 0.85rem 0.9rem 0.95rem;
+    border-radius: 0.95rem;
+    background: rgb(0 0 0 / 0.04);
+    touch-action: auto;
+}
+
+html.dark .mobile-sheet-view {
+    background: rgb(255 255 255 / 0.06);
+}
+
+.mobile-sheet-view-label {
+    font-size: 0.7rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    opacity: 0.55;
+}
+
+.mobile-sheet-view-reset {
+    display: inline-flex;
+    height: 2rem;
+    width: 2rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.55rem;
+    opacity: 0.55;
+}
+
+.mobile-sheet-segment {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.2rem;
+    padding: 0.2rem;
+    border-radius: 0.8rem;
+    background: rgb(0 0 0 / 0.06);
+}
+
+html.dark .mobile-sheet-segment {
+    background: rgb(255 255 255 / 0.08);
+}
+
+.mobile-sheet-segment-btn {
+    position: relative;
+    display: inline-flex;
+    min-height: 2.4rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    border-radius: 0.65rem;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    opacity: 0.55;
+}
+
+.mobile-sheet-segment-btn.is-active {
+    opacity: 1;
+    background: rgb(255 255 255 / 0.92);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+html.dark .mobile-sheet-segment-btn.is-active {
+    background: rgb(255 255 255 / 0.12);
+    box-shadow: none;
+}
+
+.mobile-sheet-cancel {
+    display: flex;
+    width: calc(100% - 1.5rem);
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    margin: 0.65rem 0.75rem 0;
+    border-radius: 0.95rem;
+    font-weight: 650;
+    background: rgb(0 0 0 / 0.06);
+}
+
+html.dark .mobile-sheet-cancel {
+    background: rgb(255 255 255 / 0.08);
+}
+
+.mobile-sheet-scroll {
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+}
+
+.mobile-sheet-panel-tall .mobile-sheet-scroll,
+.mobile-sheet-panel-half .mobile-sheet-scroll,
+.mobile-sheet-panel.is-expanded .mobile-sheet-scroll {
+    flex: 1;
+}
+
+.mobile-sheet-panel-auto:not(.is-expanded) .mobile-sheet-scroll {
+    flex: 0 1 auto;
+    min-height: auto;
+}
+
+.mobile-filter-add {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.35rem 0.15rem 0.55rem;
+}
+
+.mobile-filter-collections {
+    flex-shrink: 0;
+    padding: 0 1rem 0.7rem;
+    box-shadow: 0 1px 0 rgb(0 0 0 / 0.08);
+    touch-action: pan-y;
+}
+
+.mobile-filter-collections .app-scrollbar {
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+}
+
+html.dark .mobile-filter-collections {
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.1);
+}
+
+.mobile-filter-card,
+.mobile-filter-swipe {
+    position: relative;
+    overflow: hidden;
+    clip-path: inset(0);
+}
+
+.mobile-filter-swipe+.mobile-filter-swipe .mobile-filter-front::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 1rem;
+    height: 1px;
+    background: rgb(0 0 0 / 0.08);
+    pointer-events: none;
+}
+
+html.dark .mobile-filter-swipe+.mobile-filter-swipe .mobile-filter-front::before {
+    background: rgb(255 255 255 / 0.1);
+}
+
+.mobile-filter-swipe.is-off .mobile-filter-head,
+.mobile-filter-swipe.is-off .mobile-filter-body {
+    opacity: 0.42;
+}
+
+.mobile-filter-actions {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 0;
+    display: flex;
+    width: 148px;
+    visibility: hidden;
+    touch-action: manipulation;
+}
+
+.mobile-filter-swipe.is-open .mobile-filter-actions,
+.mobile-filter-swipe.is-revealing .mobile-filter-actions {
+    visibility: visible;
+}
+
+.mobile-filter-action {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    font-size: 0.68rem;
+    font-weight: 650;
+    color: #fff;
+    touch-action: manipulation;
+}
+
+.mobile-filter-action.is-reset {
+    background: rgb(120 113 108);
+}
+
+.mobile-filter-action.is-delete {
+    background: #e11d48;
+}
+
+.mobile-filter-actions.is-single {
+    width: 88px;
+}
+
+.mobile-filter-front {
+    position: relative;
+    z-index: 1;
+    width: calc(100% + 3px);
+    margin-right: -3px;
+    overflow: hidden;
+    background: var(--sheet-surface, rgb(252 250 247));
+    transition: transform 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.mobile-filter-front.is-busy {
+    transition: none;
+}
+
+.mobile-filter-front .mobile-filter-body {
+    border-top: 1px solid rgb(0 0 0 / 0.07);
+}
+
+html.dark .mobile-filter-front .mobile-filter-body {
+    border-top-color: rgb(255 255 255 / 0.08);
+}
+
+.mobile-filter-head {
+    display: flex;
+    min-height: 3.25rem;
+    width: 100%;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 1rem;
+    user-select: none;
+    touch-action: pan-y;
+}
+
+.mobile-filter-logic {
+    flex-shrink: 0;
+    min-height: 2rem;
+    min-width: 2.4rem;
+    border-radius: 0.5rem;
+    padding: 0.3rem 0.55rem;
+    font-size: 0.85rem;
+    font-weight: 750;
+    line-height: 1.2;
+}
+
+.mobile-filter-body {
+    padding: 0.75rem 0.85rem 0.85rem;
+}
+
+.mobile-filter-head .app-switch-track {
+    width: 2.4rem;
+    height: 1.4rem;
+}
+
+.mobile-filter-head .app-switch-track::after {
+    width: 1.1rem;
+    height: 1.1rem;
+}
+
+.mobile-filter-head .app-switch input:checked+.app-switch-track::after {
+    transform: translateX(1rem);
+}
+
+.mobile-filter-head .app-switch input:checked+.app-switch-track {
+    background: var(--accent, var(--color-amber-500));
+}
+
+.mobile-sort-dir-chip {
+    display: inline-flex;
+    height: 2rem;
+    min-width: 3.6rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    padding: 0 0.75rem;
+    font-size: 0.78rem;
+    font-weight: 650;
+    background: rgb(0 0 0 / 0.06);
+    touch-action: manipulation;
+}
+
+html.dark .mobile-sort-dir-chip {
+    background: rgb(255 255 255 / 0.1);
+}
+
+.mobile-chip-btn {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 0 0.8rem;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgb(0 0 0 / 0.06);
+}
+
+.mobile-profile {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.85rem;
+    margin-top: 0.5rem;
+    border-radius: 1.35rem;
+    padding: 1rem;
+}
+
+.mobile-avatar {
+    display: flex;
+    height: 3.5rem;
+    width: 3.5rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgb(168 162 158 / 0.25);
+}
+
+.mobile-avatar.is-placeholder {
+    background: linear-gradient(to bottom right, var(--color-amber-500), var(--color-orange-600));
+    color: #fff;
+}
+
+.mobile-group {
+    margin-top: 1.25rem;
+    overflow: hidden;
+    border-radius: 1.25rem;
+}
+
+.mobile-group-label {
+    padding: 0.85rem 1rem 0.15rem;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.45;
+}
+
+.mobile-row {
+    display: flex;
+    width: 100%;
+    min-height: 3rem;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.7rem 1rem;
+}
+
+.mobile-logout {
+    display: flex;
+    width: 100%;
+    min-height: 3rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 1.5rem;
+    border-radius: 1.15rem;
+    font-weight: 650;
+    color: #e11d48;
+    background: rgb(225 29 72 / 0.08);
+}
+
+.mobile-login {
+    position: relative;
+    display: flex;
+    height: var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1)));
+    flex-direction: column;
+    overflow: hidden;
+    padding-top: var(--safe-top, 0px);
+    padding-bottom: var(--safe-bottom, 0px);
+}
+
+.mobile-login-input {
+    border-radius: 1rem;
+    border: 1px solid rgb(168 162 158 / 0.35);
+    background: rgb(255 255 255 / 0.78);
+    padding: 0.9rem 1rem;
+    font-size: 16px;
+    outline: none;
+}
+
+html.dark .mobile-login-input {
+    background: rgb(15 23 42 / 0.7);
+}
+
+.mobile-login-submit {
+    min-height: 3rem;
+    border-radius: 1rem;
+    background: #1c1917;
+    color: white;
+    font-size: 1rem;
+    font-weight: 650;
+}
+
+html.dark .mobile-login-submit {
+    background: #f5f5f4;
+    color: #1c1917;
+}
+
+.drawer-backdrop-enter-active,
+.drawer-backdrop-leave-active {
+    transition: opacity 180ms ease;
+}
+
+.drawer-backdrop-enter-from,
+.drawer-backdrop-leave-to {
+    opacity: 0;
+}
+
+.mobile-drawer-enter-active,
+.mobile-drawer-leave-active {
+    transition: transform 220ms ease-out;
+}
+
+.mobile-drawer-enter-from,
+.mobile-drawer-leave-to {
+    transform: translateX(-100%);
+}
+
+.mobile-drawer-right-enter-active,
+.mobile-drawer-right-leave-active {
+    transition: transform 220ms ease-out;
+}
+
+.mobile-drawer-right-enter-from,
+.mobile-drawer-right-leave-to {
+    transform: translateX(100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    .drawer-backdrop-enter-active,
+    .drawer-backdrop-leave-active,
+    .mobile-drawer-enter-active,
+    .mobile-drawer-leave-active,
+    .mobile-drawer-right-enter-active,
+    .mobile-drawer-right-leave-active {
+        transition: none;
+    }
+}
+
+.mobile-sheet-enter-active,
+.mobile-sheet-leave-active {
+    transition: opacity 200ms ease;
+}
+
+.mobile-sheet-enter-active .mobile-sheet-panel,
+.mobile-sheet-leave-active .mobile-sheet-panel {
+    transition: transform 240ms ease;
+}
+
+.mobile-sheet-enter-from,
+.mobile-sheet-leave-to {
+    opacity: 0;
+}
+
+.mobile-sheet-enter-from .mobile-sheet-panel,
+.mobile-sheet-leave-to .mobile-sheet-panel {
+    transform: translate3d(0, 100%, 0);
+}
+
+.mobile-photo-viewer {
+    --info-open: 0;
+    --info-ratio: 0.46;
+    position: fixed;
+    inset: 0;
+    z-index: 110;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: #0b0d12;
+    color: #f5f5f4;
+}
+
+.mobile-photo-viewer.is-info-open {
+    --info-open: 1;
+}
+
+.mobile-photo-viewer.is-dismiss-snap,
+.mobile-photo-viewer.is-dismiss-out {
+    transition: background-color 240ms ease;
+}
+
+.mobile-photo-viewer.is-dismiss-drag .mobile-photo-stage {
+    transition: none;
+    will-change: transform;
+}
+
+.mobile-photo-viewer.is-dismiss-snap .mobile-photo-stage,
+.mobile-photo-viewer.is-dismiss-out .mobile-photo-stage {
+    will-change: transform;
+    transition: transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.mobile-photo-viewer:not(.is-fullscreen) {
+    background: #111318;
+}
+
+.mobile-photo-chrome {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: 2.75rem;
+    padding: calc(0.35rem + var(--safe-top, 0px)) 0.5rem 0.85rem;
+    background: linear-gradient(to bottom, rgb(0 0 0 / 0.62), rgb(0 0 0 / 0));
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.mobile-photo-chrome.is-hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translate3d(0, -12px, 0);
+}
+
+.mobile-photo-stage {
+    position: relative;
+    min-height: 0;
+    flex: 1;
+    overflow: hidden;
+    background: #000;
+    touch-action: none;
+    transform-origin: center 18%;
+}
+
+.mobile-photo-fit {
+    position: absolute;
+    inset: 0;
+    transform-origin: center center;
+}
+
+.mobile-photo-viewer.is-info-open .mobile-photo-fit,
+.mobile-photo-viewer.is-info-dragging .mobile-photo-fit,
+.mobile-photo-viewer.is-info-snapping .mobile-photo-fit {
+    transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.mobile-photo-viewer.is-info-dragging .mobile-photo-fit,
+.mobile-photo-viewer.is-info-dragging .mobile-photo-info {
+    transition: none;
+    will-change: transform;
+}
+
+.mobile-photo-viewer.is-info-snapping .mobile-photo-fit,
+.mobile-photo-viewer.is-info-snapping .mobile-photo-info {
+    will-change: transform;
+    transition: transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.mobile-photo-track {
+    display: flex;
+    height: 100%;
+    width: 100%;
+    will-change: transform;
+    transition: none;
+}
+
+.mobile-photo-slide {
+    position: relative;
+    flex: 0 0 100%;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+.mobile-photo-zoom {
+    position: absolute;
+    inset: 0;
+    transform-origin: center center;
+    transition: transform 180ms ease;
+}
+
+.mobile-photo-img {
+    position: absolute;
+    inset: 0;
+    height: 100%;
+    width: 100%;
+    object-fit: contain;
+    transform-origin: center center;
+    user-select: none;
+    -webkit-user-drag: none;
+    pointer-events: none;
+}
+
+.mobile-photo-img.is-thumb {
+    z-index: 0;
+}
+
+.mobile-photo-img.is-full {
+    z-index: 1;
+    opacity: 0;
+    transition: opacity 160ms ease;
+}
+
+.mobile-photo-img.is-full.is-ready {
+    opacity: 1;
+}
+
+.mobile-photo-stage.is-sliding .mobile-photo-img.is-full {
+    transition: none;
+}
+
+.mobile-photo-stage.is-pinching .mobile-photo-zoom,
+.mobile-photo-stage.is-sliding .mobile-photo-zoom,
+.mobile-photo-stage:not(.is-zoomed):not(.is-pinching) .mobile-photo-zoom {
+    transition: none;
+}
+
+.mobile-photo-stage.is-sliding .mobile-photo-nav {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.mobile-photo-stage.is-zoomed .mobile-photo-nav {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.mobile-photo-nav {
+    position: absolute;
+    top: 50%;
+    display: flex;
+    height: 2.75rem;
+    width: 2.75rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.4);
+    color: white;
+    transform: translateY(-50%);
+    transition: opacity 180ms ease;
+}
+
+.mobile-photo-nav:disabled {
+    opacity: 0.2;
+}
+
+.mobile-photo-nav.is-prev {
+    left: 0.6rem;
+}
+
+.mobile-photo-nav.is-next {
+    right: 0.6rem;
+}
+
+.mobile-photo-nav.is-hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.mobile-photo-peek {
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.75rem;
+    min-width: 4.5rem;
+    padding: 0.1rem 1.25rem calc(0.4rem + var(--safe-bottom, 0px));
+    color: rgb(255 255 255 / 0.78);
+    transform: translateX(-50%);
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.mobile-photo-peek.is-hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50%) translate3d(0, 12px, 0);
+}
+
+.mobile-photo-info {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 7;
+    display: flex;
+    height: calc(var(--info-ratio) * 100%);
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+    padding-bottom: var(--safe-bottom, 0px);
+    background: #111318;
+    pointer-events: none;
+    transform: translate3d(0, calc((1 - var(--info-open)) * 100%), 0);
+    transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.mobile-photo-info.is-open {
+    pointer-events: auto;
+}
+
+.mobile-photo-info-handle {
+    display: flex;
+    width: 100%;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.25rem;
+    color: rgb(255 255 255 / 0.55);
+    touch-action: none;
+}
+
+.mobile-photo-info-scroll {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.9rem 1.1rem 0.4rem;
+}
+
+.mobile-photo-kicker {
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.5;
+}
+
+html[data-shell="mobile"] .color-label-edit {
+    gap: 0.85rem;
+}
+
+html[data-shell="mobile"] .color-label-edit>button {
+    height: 2.75rem;
+    width: 2.75rem;
+}
+
+html[data-shell="mobile"] .tag-chips.is-editing {
+    gap: 0.55rem;
+}
+
+html[data-shell="mobile"] .tag-chips.is-editing .tag-chip {
+    min-height: 2.75rem;
+    gap: 0.35rem;
+    padding: 0.4rem 0.85rem 0.4rem 0.95rem;
+    font-size: 0.9375rem;
+}
+
+html[data-shell="mobile"] .tag-chips.is-editing .tag-chip-remove:not(.is-off) {
+    width: 1.75rem;
+    height: 1.75rem;
+    margin-right: -0.35rem;
+    flex-shrink: 0;
+    border-radius: 999px;
+    opacity: 0.75;
+}
+
+html[data-shell="mobile"] .tag-chips.is-editing .tag-chip-remove svg,
+html[data-shell="mobile"] .tag-chips.is-editing .tag-chip.is-add svg {
+    width: 1.05rem;
+    height: 1.05rem;
+}
+
+html[data-shell="mobile"] .tag-chips.is-editing .tag-chip-field {
+    width: 9rem;
+}
+
+.tag-chips {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+html:not([data-shell="mobile"]) .filter-tags-list {
+    max-height: 14rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 0.15rem;
+}
+
+.tag-chip {
+    display: inline-flex;
+    max-width: 100%;
+    align-items: center;
+    gap: 0.2rem;
+    border: 0;
+    border-radius: 999px;
+    padding: 0.22rem 0.65rem;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
+    background: rgb(0 0 0 / 0.07);
+    box-shadow: inset 0 0 0 1px transparent;
+    transition:
+        background-color 200ms cubic-bezier(0.22, 1, 0.36, 1),
+        box-shadow 200ms cubic-bezier(0.22, 1, 0.36, 1),
+        color 200ms ease,
+        opacity 200ms ease,
+        transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tag-chip-move {
+    transition:
+        background-color 200ms cubic-bezier(0.22, 1, 0.36, 1),
+        box-shadow 200ms cubic-bezier(0.22, 1, 0.36, 1),
+        color 200ms ease,
+        opacity 200ms ease,
+        transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tag-chip-enter-active,
+.tag-chip-leave-active {
+    transition: opacity 180ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tag-chip-enter-from,
+.tag-chip-leave-to {
+    opacity: 0;
+    transform: scale(0.92);
+}
+
+.tag-chip-leave-active {
+    position: absolute;
+}
+
+.tag-chip-plus,
+.tag-chip-remove {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    transition:
+        width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+        margin 180ms cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 160ms ease;
+}
+
+.tag-chip-plus {
+    width: 0.7rem;
+}
+
+.tag-chip-plus.is-off,
+.tag-chip-remove.is-off {
+    width: 0;
+    margin: 0;
+    opacity: 0;
+}
+
+.tag-chip.is-dark {
+    background: rgb(255 255 255 / 0.1);
+}
+
+.tag-chip.is-suggest {
+    font-weight: 500;
+    opacity: 0.72;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.14);
+}
+
+.tag-chip.is-suggest.is-dark {
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.18);
+}
+
+.tag-chip.is-add,
+.tag-chip.is-input {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.16);
+}
+
+.tag-chip.is-add.is-dark,
+.tag-chip.is-input.is-dark {
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.2);
+}
+
+.tag-chip.is-filter {
+    background: rgb(224 242 254);
+    color: rgb(3 105 161);
+}
+
+.tag-chip.is-filter.is-dark {
+    background: rgb(12 74 110 / 0.6);
+    color: rgb(224 242 254);
+}
+
+.tag-chip.is-filter.is-suggest {
+    font-weight: 550;
+    opacity: 0.85;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px rgb(14 165 233 / 0.45);
+}
+
+.tag-chip.is-filter.is-suggest.is-dark {
+    box-shadow: inset 0 0 0 1px rgb(125 211 252 / 0.35);
+}
+
+.tag-chip.is-filter.is-add,
+.tag-chip.is-filter.is-input {
+    background: transparent;
+    color: inherit;
+    box-shadow: inset 0 0 0 1px rgb(14 165 233 / 0.45);
+}
+
+.tag-chip.is-filter.is-add.is-dark,
+.tag-chip.is-filter.is-input.is-dark {
+    box-shadow: inset 0 0 0 1px rgb(125 211 252 / 0.35);
+}
+
+.tag-chip.is-on {
+    opacity: 1;
+}
+
+.tag-chip-remove {
+    width: 0.85rem;
+    margin-right: -0.15rem;
+    margin-left: 0.05rem;
+    opacity: 0.55;
+}
+
+html:not([data-shell="mobile"]) button.tag-chip {
+    cursor: pointer;
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-on:hover {
+    background: rgb(0 0 0 / 0.13);
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-on.is-dark:hover {
+    background: rgb(255 255 255 / 0.18);
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-on:hover .tag-chip-remove:not(.is-off) {
+    opacity: 1;
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-suggest:hover,
+html:not([data-shell="mobile"]) .tag-chip.is-add:hover {
+    opacity: 1;
+    background: rgb(0 0 0 / 0.06);
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.28);
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-suggest.is-dark:hover,
+html:not([data-shell="mobile"]) .tag-chip.is-add.is-dark:hover {
+    background: rgb(255 255 255 / 0.08);
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.34);
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-filter.is-on:hover {
+    background: rgb(186 230 253);
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-filter.is-on.is-dark:hover {
+    background: rgb(12 74 110 / 0.88);
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-filter.is-suggest:hover,
+html:not([data-shell="mobile"]) .tag-chip.is-filter.is-add:hover {
+    opacity: 1;
+    color: rgb(3 105 161);
+    background: rgb(224 242 254 / 0.8);
+    box-shadow: inset 0 0 0 1px rgb(14 165 233 / 0.72);
+}
+
+html:not([data-shell="mobile"]) .tag-chip.is-filter.is-suggest.is-dark:hover,
+html:not([data-shell="mobile"]) .tag-chip.is-filter.is-add.is-dark:hover {
+    color: rgb(224 242 254);
+    background: rgb(12 74 110 / 0.5);
+    box-shadow: inset 0 0 0 1px rgb(125 211 252 / 0.6);
+}
+
+.tag-chip-field {
+    width: 7.5rem;
+    min-width: 4rem;
+    background: transparent;
+    border: 0;
+    outline: none;
+    font: inherit;
+}
+
+.tag-chip-empty {
+    font-size: 12px;
+    opacity: 0.5;
+}
+
+.mobile-photo-footer {
+    display: flex;
+    gap: 0.6rem;
+    padding: 0.65rem 1.1rem 0.85rem;
+}
+
+.mobile-photo-btn {
+    display: inline-flex;
+    min-height: 2.75rem;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    border-radius: 0.95rem;
+    font-size: 0.9rem;
+    font-weight: 650;
+    background: rgb(255 255 255 / 0.08);
+}
+
+.mobile-photo-btn.is-primary {
+    background: var(--accent, #d97706);
+    color: #1c1917;
 }

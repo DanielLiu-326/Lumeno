@@ -23,18 +23,18 @@ function setMode(mode) {
   <div class="min-w-0 max-w-full overflow-hidden">
     <!-- Mode toggle: picker / timeline -->
     <div
-      class="mb-1.5 flex rounded-md border text-[10px]"
+      class="mb-1.5 flex rounded-md border text-[11px]"
       :class="isDark ? 'border-stone-700' : 'border-stone-300'"
     >
       <button
-        class="flex-1 px-1.5 py-0.5 font-medium transition-colors"
+        class="flex-1 px-1.5 py-1 font-medium transition-colors"
         :class="modelValue.mode === 'picker'
           ? (isDark ? 'bg-stone-700 text-stone-100' : 'bg-stone-200 text-stone-800')
           : (isDark ? 'text-stone-500 hover:text-stone-300' : 'text-stone-400 hover:text-stone-600')"
         @click="setMode('picker')"
       >{{ t("albums.datePicker") }}</button>
       <button
-        class="flex-1 px-1.5 py-0.5 font-medium transition-colors"
+        class="flex-1 px-1.5 py-1 font-medium transition-colors"
         :class="modelValue.mode === 'timeline'
           ? (isDark ? 'bg-stone-700 text-stone-100' : 'bg-stone-200 text-stone-800')
           : (isDark ? 'text-stone-500 hover:text-stone-300' : 'text-stone-400 hover:text-stone-600')"
@@ -47,15 +47,15 @@ function setMode(mode) {
       <input
         :value="modelValue.from"
         type="date"
-        class="mb-1 box-border min-w-0 max-w-full w-full rounded-lg border px-2 py-1.5 text-xs"
-        :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'"
+        class="mb-1 box-border min-w-0 max-w-full w-full rounded-lg border px-2 py-1.5 text-xs app-control"
+        :class="isDark ? 'text-stone-100' : 'text-stone-900'"
         @change="set({ from: $event.target.value })"
       />
       <input
         :value="modelValue.to"
         type="date"
-        class="box-border min-w-0 max-w-full w-full rounded-lg border px-2 py-1.5 text-xs"
-        :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'"
+        class="box-border min-w-0 max-w-full w-full rounded-lg border px-2 py-1.5 text-xs app-control"
+        :class="isDark ? 'text-stone-100' : 'text-stone-900'"
         @change="set({ to: $event.target.value })"
       />
     </template>
@@ -73,7 +73,7 @@ function setMode(mode) {
       </div>
       <p
         v-if="modelValue.from || modelValue.to"
-        class="mt-1 text-[10px] leading-tight"
+        class="mt-1 text-[11px] leading-tight"
         :class="isDark ? 'text-stone-400' : 'text-stone-500'"
       >
         {{ modelValue.from || "…" }} → {{ modelValue.to || "…" }}

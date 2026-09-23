@@ -3,13 +3,11 @@ use std::path::Path;
 use async_trait::async_trait;
 use image::DynamicImage;
 
-use super::cpu::{select_backend_for_format, CpuImageDecoder};
-use super::darktable::{find_xmp_sidecar, DarktableImageDecoder};
-use super::formats::{format_from_hint_or_path, require_format, ImageFormat, ImageFormatSet};
+use super::cpu::{CpuImageDecoder, select_backend_for_format};
+use super::darktable::{DarktableImageDecoder, find_xmp_sidecar};
+use super::formats::{ImageFormat, ImageFormatSet, format_from_hint_or_path, require_format};
 use super::gpu::GpuImageDecoder;
-use super::{
-    DecodeError, DecodeOptions, DecoderBackendKind, DecoderCreateOptions, ImageDecoder,
-};
+use super::{DecodeError, DecodeOptions, DecoderBackendKind, DecoderCreateOptions, ImageDecoder};
 
 /// Per-request backend selection for [`DecoderCreateOptions::auto`].
 #[derive(Debug, Clone)]
@@ -28,7 +26,10 @@ impl AutoImageDecoder {
         Self::SUPPORTED.contains(format)
     }
 
-    fn decoder_for_format(&self, format: ImageFormat) -> Result<Box<dyn ImageDecoder>, DecodeError> {
+    fn decoder_for_format(
+        &self,
+        format: ImageFormat,
+    ) -> Result<Box<dyn ImageDecoder>, DecodeError> {
         let backend = select_backend_for_format(&self.options, format)?;
         create_concrete_decoder(backend, &self.options)
     }
@@ -90,7 +91,11 @@ impl ImageDecoder for AutoImageDecoder {
         Self::SUPPORTED
     }
 
-    fn decode_bytes(&self, bytes: &[u8], options: DecodeOptions) -> Result<DynamicImage, DecodeError> {
+    fn decode_bytes(
+        &self,
+        bytes: &[u8],
+        options: DecodeOptions,
+    ) -> Result<DynamicImage, DecodeError> {
         let format = require_format(options.format)?;
         let options = DecodeOptions {
             format: Some(format),

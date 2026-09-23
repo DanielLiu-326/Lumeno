@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::backend::album::decoder::{DecodeOptions, ImageDecoder, decode_bytes_with_path};
 
@@ -251,56 +251,121 @@ fn decode_job_with_decoder(
     })
 }
 
-/// Run read → decode → batch infer → per-item save.
-///
-/// On cancel: stop reading new jobs, drain already-decoded/inferred work through save,
-/// then return `Err("pipeline cancelled")`.
-///
-/// `save` receives the decoded image when decode succeeded (even if infer failed), so
-/// domain pipelines can write side artifacts (e.g. face crops) without re-decoding.
-pub async fn run_image_pipeline<M, Out, Infer, InferFut, Save, SaveFut>(
-    jobs: Vec<ImageJob<M>>,
+/// Executes the shared read → decode → infer → save image topology.
+pub struct ImagePipeline {
     config: PipelineConfig,
     decoder: Arc<dyn ImageDecoder>,
     cancel: Option<Arc<AtomicBool>>,
     progress: Option<PipelineProgressTx>,
-    infer: Infer,
-    save: Save,
-) -> Result<(), String>
-where
-    M: Send + 'static,
-    Out: Send + 'static,
-    Infer: Fn(Vec<DynamicImage>) -> InferFut + Send + Sync + 'static,
-    InferFut: Future<Output = Result<(Vec<DynamicImage>, Vec<Result<Out, AiItemError>>), String>>
-        + Send
-        + 'static,
-    Save: Fn(M, Result<Out, AiItemError>, Option<DynamicImage>) -> SaveFut + Send + Sync + 'static,
-    SaveFut: Future<Output = ()> + Send + 'static,
-{
-    let total = jobs.len();
-    if total == 0 {
-        return Ok(());
+}
+
+impl ImagePipeline {
+    pub fn new(
+        config: PipelineConfig,
+        decoder: Arc<dyn ImageDecoder>,
+        cancel: Option<Arc<AtomicBool>>,
+        progress: Option<PipelineProgressTx>,
+    ) -> Self {
+        Self {
+            config,
+            decoder,
+            cancel,
+            progress,
+        }
     }
 
-    let diag = PipelineDiag::new(&config);
-    let decode_parallelism = config.decode_parallelism.max(1).min(total);
-    let gpu_batch_size = config.gpu_batch_size.max(1);
-    let decode_cap = config.decode_queue_capacity();
-    let infer_cap = config.infer_queue_capacity();
-    let save_cap = config.save_queue_capacity();
-    let decode_apply_exif = config.decode_apply_exif;
+    /// Run read → decode → batch infer → per-item save.
+    ///
+    /// On cancel: stop reading new jobs, drain already-decoded/inferred work through save,
+    /// then return `Err("pipeline cancelled")`.
+    ///
+    /// `save` receives the decoded image when decode succeeded (even if infer failed), so
+    /// domain pipelines can write side artifacts (e.g. face crops) without re-decoding.
+    pub async fn run<M, Out, Infer, InferFut, Save, SaveFut>(
+        self,
+        jobs: Vec<ImageJob<M>>,
+        infer: Infer,
+        save: Save,
+    ) -> Result<(), String>
+    where
+        M: Send + 'static,
+        Out: Send + 'static,
+        Infer: Fn(Vec<DynamicImage>) -> InferFut + Send + Sync + 'static,
+        InferFut: Future<Output = Result<(Vec<DynamicImage>, Vec<Result<Out, AiItemError>>), String>>
+            + Send
+            + 'static,
+        Save: Fn(M, Result<Out, AiItemError>, Option<DynamicImage>) -> SaveFut
+            + Send
+            + Sync
+            + 'static,
+        SaveFut: Future<Output = ()> + Send + 'static,
+    {
+        let total = jobs.len();
+        if total == 0 {
+            return Ok(());
+        }
 
-    let (decode_tx, mut decode_rx) = mpsc::channel::<ReadJob<M>>(decode_cap);
-    let (infer_tx, mut infer_rx) = mpsc::channel::<InferJob<M>>(infer_cap);
-    let (save_tx, mut save_rx) = mpsc::channel::<SaveJob<M, Out>>(save_cap);
+        let diag = PipelineDiag::new(&self.config);
+        let cancel = self
+            .cancel
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let decode_parallelism = self.config.decode_parallelism.max(1).min(total);
 
-    let cancel = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let (decode_tx, decode_rx) =
+            mpsc::channel::<ReadJob<M>>(self.config.decode_queue_capacity());
+        let (infer_tx, infer_rx) = mpsc::channel::<InferJob<M>>(self.config.infer_queue_capacity());
+        let (save_tx, save_rx) =
+            mpsc::channel::<SaveJob<M, Out>>(self.config.save_queue_capacity());
 
-    let diag_read = Arc::clone(&diag);
-    let reader_cancel = Arc::clone(&cancel);
-    let reader = tokio::spawn(async move {
+        // The channel wiring makes the execution topology explicit:
+        // read → decode → infer → save.
+        let reader = spawn_reader(jobs, decode_tx, Arc::clone(&cancel), Arc::clone(&diag));
+        let decode_workers = spawn_decode_workers(
+            decode_rx,
+            infer_tx.clone(),
+            self.decoder,
+            decode_parallelism,
+            self.config.decode_apply_exif,
+            Arc::clone(&diag),
+        );
+        let infer_worker = spawn_infer_worker(
+            infer_rx,
+            save_tx.clone(),
+            self.config.gpu_batch_size.max(1),
+            self.progress,
+            Arc::new(infer),
+            Arc::clone(&diag),
+        );
+        let save_worker = spawn_save_worker(save_rx, Arc::new(save), Arc::clone(&diag));
+
+        let _ = reader.await;
+        let _ = decode_workers.await;
+        drop(infer_tx);
+        let _ = infer_worker.await;
+        drop(save_tx);
+        let _ = save_worker.await;
+
+        eprintln!("{}", diag.summary_line());
+
+        if cancel.load(Ordering::Relaxed) {
+            return Err("pipeline cancelled".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn spawn_reader<M>(
+    jobs: Vec<ImageJob<M>>,
+    decode_tx: mpsc::Sender<ReadJob<M>>,
+    cancel: Arc<AtomicBool>,
+    diag: Arc<PipelineDiag>,
+) -> JoinHandle<()>
+where
+    M: Send + 'static,
+{
+    tokio::spawn(async move {
         for job in jobs {
-            if reader_cancel.load(Ordering::Relaxed) {
+            if cancel.load(Ordering::Relaxed) {
                 break;
             }
             let started = Instant::now();
@@ -310,7 +375,7 @@ where
                     code: "read_failed".to_string(),
                     message: error.to_string(),
                 });
-            PipelineDiag::record_stage(&diag_read.read, started.elapsed());
+            PipelineDiag::record_stage(&diag.read, started.elapsed());
             if send_diagnosed(
                 &decode_tx,
                 ReadJob {
@@ -319,8 +384,8 @@ where
                     meta: job.meta,
                     bytes,
                 },
-                &diag_read,
-                &diag_read.read_to_decode,
+                &diag,
+                &diag.read_to_decode,
             )
             .await
             .is_err()
@@ -328,11 +393,21 @@ where
                 break;
             }
         }
-    });
+    })
+}
 
-    let infer_tx_decode = infer_tx.clone();
-    let diag_decode = Arc::clone(&diag);
-    let decode_workers = tokio::spawn(async move {
+fn spawn_decode_workers<M>(
+    mut decode_rx: mpsc::Receiver<ReadJob<M>>,
+    infer_tx: mpsc::Sender<InferJob<M>>,
+    decoder: Arc<dyn ImageDecoder>,
+    decode_parallelism: usize,
+    decode_apply_exif: bool,
+    diag: Arc<PipelineDiag>,
+) -> JoinHandle<()>
+where
+    M: Send + 'static,
+{
+    tokio::spawn(async move {
         let mut join_set = JoinSet::new();
         while let Some(job) = decode_rx.recv().await {
             while join_set.len() >= decode_parallelism {
@@ -340,9 +415,9 @@ where
                     break;
                 }
             }
-            let infer_tx = infer_tx_decode.clone();
+            let infer_tx = infer_tx.clone();
             let decoder = Arc::clone(&decoder);
-            let diag = Arc::clone(&diag_decode);
+            let diag = Arc::clone(&diag);
             join_set.spawn(async move {
                 let decode_options = if decode_apply_exif {
                     DecodeOptions::new()
@@ -382,15 +457,26 @@ where
             });
         }
         while join_set.join_next().await.is_some() {}
-        drop(infer_tx_decode);
-    });
+    })
+}
 
-    let infer = Arc::new(infer);
-    let save = Arc::new(save);
-    let diag_infer = Arc::clone(&diag);
-    let save_tx_infer = save_tx.clone();
-    let progress_infer = progress;
-    let infer_worker = tokio::spawn(async move {
+fn spawn_infer_worker<M, Out, Infer, InferFut>(
+    mut infer_rx: mpsc::Receiver<InferJob<M>>,
+    save_tx: mpsc::Sender<SaveJob<M, Out>>,
+    gpu_batch_size: usize,
+    progress: Option<PipelineProgressTx>,
+    infer: Arc<Infer>,
+    diag: Arc<PipelineDiag>,
+) -> JoinHandle<()>
+where
+    M: Send + 'static,
+    Out: Send + 'static,
+    Infer: Fn(Vec<DynamicImage>) -> InferFut + Send + Sync + 'static,
+    InferFut: Future<Output = Result<(Vec<DynamicImage>, Vec<Result<Out, AiItemError>>), String>>
+        + Send
+        + 'static,
+{
+    tokio::spawn(async move {
         loop {
             let first = match infer_rx.recv().await {
                 Some(job) => job,
@@ -405,7 +491,6 @@ where
                 }
             }
 
-            // Split decode failures from images that need inference.
             let mut ready_images = Vec::new();
             let mut ready_meta = Vec::new();
             let mut passthrough = Vec::new();
@@ -429,7 +514,7 @@ where
             if !ready_images.is_empty() {
                 let started = Instant::now();
                 let batch_result = infer(ready_images).await;
-                PipelineDiag::record_stage(&diag_infer.infer, started.elapsed());
+                PipelineDiag::record_stage(&diag.infer, started.elapsed());
                 match batch_result {
                     Ok((images, results)) if results.len() == ready_meta.len() => {
                         for (((index, path, meta), result), image) in
@@ -450,7 +535,6 @@ where
                             results.len(),
                             ready_meta.len()
                         );
-                        // Prefer pairing leftover images with meta when lengths diverge.
                         let mut images = images.into_iter();
                         for (index, path, meta) in ready_meta {
                             inferred.push(SaveJob {
@@ -483,10 +567,10 @@ where
             }
 
             for job in passthrough.into_iter().chain(inferred) {
-                if let Some(tx) = progress_infer.as_ref() {
+                if let Some(tx) = progress.as_ref() {
                     let _ = tx.send((job.index, job.path.clone())).await;
                 }
-                if send_diagnosed(&save_tx_infer, job, &diag_infer, &diag_infer.infer_to_save)
+                if send_diagnosed(&save_tx, job, &diag, &diag.infer_to_save)
                     .await
                     .is_err()
                 {
@@ -494,30 +578,54 @@ where
                 }
             }
         }
-    });
+    })
+}
 
-    let diag_save = Arc::clone(&diag);
-    let save_worker = tokio::spawn(async move {
+fn spawn_save_worker<M, Out, Save, SaveFut>(
+    mut save_rx: mpsc::Receiver<SaveJob<M, Out>>,
+    save: Arc<Save>,
+    diag: Arc<PipelineDiag>,
+) -> JoinHandle<()>
+where
+    M: Send + 'static,
+    Out: Send + 'static,
+    Save: Fn(M, Result<Out, AiItemError>, Option<DynamicImage>) -> SaveFut + Send + Sync + 'static,
+    SaveFut: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
         while let Some(job) = save_rx.recv().await {
             let started = Instant::now();
             save(job.meta, job.result, job.image).await;
-            PipelineDiag::record_stage(&diag_save.save, started.elapsed());
+            PipelineDiag::record_stage(&diag.save, started.elapsed());
         }
-    });
+    })
+}
 
-    let _ = reader.await;
-    let _ = decode_workers.await;
-    drop(infer_tx);
-    let _ = infer_worker.await;
-    drop(save_tx);
-    let _ = save_worker.await;
-
-    eprintln!("{}", diag.summary_line());
-
-    if cancel.load(Ordering::Relaxed) {
-        return Err("pipeline cancelled".to_string());
-    }
-    Ok(())
+/// Run read → decode → batch infer → per-item save.
+///
+/// This compatibility entry point delegates to [`ImagePipeline`].
+pub async fn run_image_pipeline<M, Out, Infer, InferFut, Save, SaveFut>(
+    jobs: Vec<ImageJob<M>>,
+    config: PipelineConfig,
+    decoder: Arc<dyn ImageDecoder>,
+    cancel: Option<Arc<AtomicBool>>,
+    progress: Option<PipelineProgressTx>,
+    infer: Infer,
+    save: Save,
+) -> Result<(), String>
+where
+    M: Send + 'static,
+    Out: Send + 'static,
+    Infer: Fn(Vec<DynamicImage>) -> InferFut + Send + Sync + 'static,
+    InferFut: Future<Output = Result<(Vec<DynamicImage>, Vec<Result<Out, AiItemError>>), String>>
+        + Send
+        + 'static,
+    Save: Fn(M, Result<Out, AiItemError>, Option<DynamicImage>) -> SaveFut + Send + Sync + 'static,
+    SaveFut: Future<Output = ()> + Send + 'static,
+{
+    ImagePipeline::new(config, decoder, cancel, progress)
+        .run(jobs, infer, save)
+        .await
 }
 
 #[cfg(test)]

@@ -1,12 +1,11 @@
 #![feature(normalize_lexically)]
-#![feature(trait_alias)]
-#![feature(generic_atomic)]
 #![recursion_limit = "256"]
 
 use axum::extract::{DefaultBodyLimit, Path};
 use axum::middleware;
 use axum::routing::{patch, post};
 use axum::{Extension, Router, routing::get};
+use rand::Rng;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,11 +24,9 @@ use backend::album::{
     api_albums_collections, api_albums_copy_photo, api_albums_create, api_albums_date_histogram,
     api_albums_delete, api_albums_delete_photos, api_albums_export, api_albums_import,
     api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_photos_query,
-    api_albums_rebuild_index,
-    api_albums_share, api_albums_unshare, api_albums_update, api_albums_upload, api_daily_picks,
-    api_darktable_preview, api_dashboard, api_face_thumbnail, api_has_xmp, api_on_this_day,
-    api_thumbnail,
-    spawn_thumbnail_prewarmer,
+    api_albums_rebuild_index, api_albums_share, api_albums_unshare, api_albums_update,
+    api_albums_upload, api_daily_picks, api_darktable_preview, api_dashboard, api_has_xmp,
+    api_on_this_day, api_thumbnail, spawn_thumbnail_prewarmer,
 };
 use backend::auth::{
     Role, SessionManager, UserManager, api_login, api_logout, api_register, api_whoami,
@@ -45,7 +42,8 @@ use backend::settings::{
     SettingsManager, api_admin_reset_password, api_admin_users_delete, api_admin_users_get,
     api_admin_users_update, api_avatar_get, api_avatar_upload, api_password_update,
     api_preferences_get, api_preferences_update, api_settings_get, api_settings_update,
-    api_thumbnail_scan_now, api_webdav_handler, api_webdav_shares_get, api_webdav_shares_update,
+    api_thumbnail_scan_now, api_wallpaper_get, api_wallpaper_upload, api_webdav_handler,
+    api_webdav_shares_get, api_webdav_shares_update,
 };
 use backend::tasks::{
     TaskManager, api_cancel_task, api_clear_finished_tasks, api_get_task_list, api_get_task_status,
@@ -83,6 +81,7 @@ async fn main() {
     let thumbnail_limiter = ConcurrencyLimiter::for_thumbnails(&settings_manager).await;
     let darktable_limiter = ConcurrencyLimiter::for_darktable(&settings_manager).await;
     let ai_limiter = ConcurrencyLimiter::for_ai(&settings_manager).await;
+    backend::common::ensure_data_cache_layout(&data_path);
     let ai_service = backend::ai::AiService::new(&settings_manager, &data_path).await;
     let app_state = Arc::new(AppState {
         started_at: std::time::Instant::now(),
@@ -104,24 +103,25 @@ async fn main() {
     });
 
     // Bootstrap an admin user on first run.
-    // Credentials are read from env vars; fall back to safe defaults that
-    // should be changed immediately in production.
+    // Username defaults to admin. Password comes from BOOTSTRAP_ADMIN_PASSWORD,
+    // or a one-time random value printed to stderr if that env is unset.
     if user_manager.is_empty().await {
         let admin_user =
             std::env::var("BOOTSTRAP_ADMIN_USER").unwrap_or_else(|_| "admin".to_string());
-        let admin_pass =
-            std::env::var("BOOTSTRAP_ADMIN_PASSWORD").unwrap_or_else(|_| "changeme".to_string());
+        let (admin_pass, generated) = match std::env::var("BOOTSTRAP_ADMIN_PASSWORD") {
+            Ok(password) if !password.is_empty() => (password, false),
+            _ => (generate_bootstrap_password(), true),
+        };
         let passphrase = app_state.prehash_passphrase(&admin_pass);
         app_state
             .user_manager
             .new_user(&admin_user, &passphrase, Role::Admin, "en", "en")
             .await
             .unwrap();
-        eprintln!(
-            "Bootstrap: created admin user '{}' \
-             (set BOOTSTRAP_ADMIN_USER / BOOTSTRAP_ADMIN_PASSWORD to customise)",
-            admin_user
-        );
+        eprintln!("Bootstrap: created admin user '{admin_user}'");
+        if generated {
+            eprintln!("Bootstrap: generated password (shown once): {admin_pass}");
+        }
     } else {
         eprintln!("Loaded users from users.json");
     }
@@ -155,7 +155,6 @@ async fn main() {
         .route("/api/list_files/{*path}", get(api_get_file_list))
         .route("/api/list_files/", get(api_get_file_list))
         .route("/api/thumbnail/{*path}", get(api_thumbnail))
-        .route("/api/face-thumbnail/{*path}", get(api_face_thumbnail))
         .route("/api/albums", get(api_albums_list).post(api_albums_create))
         .route("/api/albums/update", post(api_albums_update))
         .route("/api/albums/delete", post(api_albums_delete))
@@ -212,10 +211,7 @@ async fn main() {
             "/api/ai/albums/{album}/faces/{person_id}",
             patch(api_album_faces_patch).delete(api_album_faces_delete),
         )
-        .route(
-            "/api/ai/albums/{album}/face-crop",
-            get(api_album_face_crop),
-        )
+        .route("/api/ai/albums/{album}/face-crop", get(api_album_face_crop))
         .route(
             "/api/settings",
             get(api_settings_get).post(api_settings_update),
@@ -231,6 +227,11 @@ async fn main() {
             post(api_avatar_upload).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route("/api/avatar/{filename}", get(api_avatar_get))
+        .route(
+            "/api/account/wallpaper",
+            post(api_wallpaper_upload).layer(DefaultBodyLimit::max(15 * 1024 * 1024)),
+        )
+        .route("/api/wallpaper/{filename}", get(api_wallpaper_get))
         .route("/api/admin/users", get(api_admin_users_get))
         .route("/api/admin/users/update", post(api_admin_users_update))
         .route("/api/admin/users/delete", post(api_admin_users_delete))
@@ -282,4 +283,15 @@ async fn main() {
     )
     .await
     .unwrap();
+}
+
+fn generate_bootstrap_password() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let mut rng = rand::rng();
+    (0..20)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
 }

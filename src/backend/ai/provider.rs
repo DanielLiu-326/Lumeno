@@ -295,24 +295,17 @@ impl AiInferenceProvider for LocalBurnProvider {
             LocalInferenceMode::Real(runtime) => {
                 let runtime = Arc::clone(runtime);
                 let images = images.to_vec();
-                tokio::task::spawn_blocking(move || match runtime.embed_images(&images) {
-                    Ok(vectors) if vectors.len() == images.len() => {
-                        Ok(vectors.into_iter().map(Ok).collect())
-                    }
-                    Ok(vectors) => Err(format!(
-                        "image embedding count mismatch: got {} expected {}",
-                        vectors.len(),
-                        images.len()
-                    )),
-                    Err(message) => Ok(images
-                        .iter()
-                        .map(|_| {
-                            Err(AiItemError {
+                tokio::task::spawn_blocking(move || {
+                    Ok(runtime
+                        .embed_images(&images)
+                        .into_iter()
+                        .map(|result| {
+                            result.map_err(|message| AiItemError {
                                 code: "provider_rejected".to_string(),
-                                message: message.clone(),
+                                message,
                             })
                         })
-                        .collect()),
+                        .collect())
                 })
                 .await
                 .map_err(|error| format!("embed_images join failed: {error}"))?
@@ -618,13 +611,31 @@ impl AiInferenceProvider for RemoteInferenceProvider {
             return Err("remote url missing".to_string());
         };
         let mut form = reqwest::multipart::Form::new();
+        let mut batch_indices = Vec::new();
+        let mut results = vec![
+            Err(AiItemError {
+                code: "encode_failed".to_string(),
+                message: "image not submitted".to_string(),
+            });
+            images.len()
+        ];
         for (index, image) in images.iter().enumerate() {
-            let bytes = encode_image_png(image).map_err(|error| error.to_string())?;
+            let bytes = match encode_image_png(image) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    results[index] = Err(error);
+                    continue;
+                }
+            };
             let part = reqwest::multipart::Part::bytes(bytes)
                 .file_name(format!("image-{index}.png"))
                 .mime_str("image/png")
                 .map_err(|error| format!("multipart part failed: {error}"))?;
             form = form.part(format!("images[{index}]"), part);
+            batch_indices.push(index);
+        }
+        if batch_indices.is_empty() {
+            return Ok(results);
         }
         let mut request = self
             .client
@@ -638,33 +649,44 @@ impl AiInferenceProvider for RemoteInferenceProvider {
             .await
             .map_err(|error| format!("image embedding request failed: {error}"))?;
         if !response.status().is_success() {
-            return Err(format!("image embedding status {}", response.status()));
+            let message = format!("image embedding status {}", response.status());
+            for index in batch_indices {
+                results[index] = Err(AiItemError {
+                    code: "provider_rejected".to_string(),
+                    message: message.clone(),
+                });
+            }
+            return Ok(results);
         }
         let body: RemoteEmbeddingResponse = response
             .json()
             .await
             .map_err(|error| format!("image embedding decode failed: {error}"))?;
-        if body.embeddings.len() != images.len() {
-            return Err(format!(
+        if body.embeddings.len() != batch_indices.len() {
+            let message = format!(
                 "image embedding count mismatch: got {} expected {}",
                 body.embeddings.len(),
-                images.len()
-            ));
+                batch_indices.len()
+            );
+            for index in batch_indices {
+                results[index] = Err(AiItemError {
+                    code: "invalid_output".to_string(),
+                    message: message.clone(),
+                });
+            }
+            return Ok(results);
         }
-        Ok(body
-            .embeddings
-            .into_iter()
-            .map(|vector| {
-                if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
-                    Err(AiItemError {
-                        code: "invalid_output".to_string(),
-                        message: "remote embedding invalid".to_string(),
-                    })
-                } else {
-                    Ok(vector)
-                }
-            })
-            .collect())
+        for (index, vector) in batch_indices.into_iter().zip(body.embeddings) {
+            results[index] = if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
+                Err(AiItemError {
+                    code: "invalid_output".to_string(),
+                    message: "remote embedding invalid".to_string(),
+                })
+            } else {
+                Ok(vector)
+            };
+        }
+        Ok(results)
     }
 
     async fn embed_texts(
@@ -723,13 +745,31 @@ impl AiInferenceProvider for RemoteInferenceProvider {
             return Err("remote url missing".to_string());
         };
         let mut form = reqwest::multipart::Form::new();
+        let mut batch_indices = Vec::new();
+        let mut results = vec![
+            Err(AiItemError {
+                code: "encode_failed".to_string(),
+                message: "image not submitted".to_string(),
+            });
+            images.len()
+        ];
         for (index, image) in images.iter().enumerate() {
-            let bytes = encode_image_png(image).map_err(|error| error.to_string())?;
+            let bytes = match encode_image_png(image) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    results[index] = Err(error);
+                    continue;
+                }
+            };
             let part = reqwest::multipart::Part::bytes(bytes)
                 .file_name(format!("image-{index}.png"))
                 .mime_str("image/png")
                 .map_err(|error| format!("multipart part failed: {error}"))?;
             form = form.part(format!("images[{index}]"), part);
+            batch_indices.push(index);
+        }
+        if batch_indices.is_empty() {
+            return Ok(results);
         }
         let mut request = self
             .client
@@ -743,35 +783,46 @@ impl AiInferenceProvider for RemoteInferenceProvider {
             .await
             .map_err(|error| format!("face analyze request failed: {error}"))?;
         if !response.status().is_success() {
-            return Err(format!("face analyze status {}", response.status()));
+            let message = format!("face analyze status {}", response.status());
+            for index in batch_indices {
+                results[index] = Err(AiItemError {
+                    code: "provider_rejected".to_string(),
+                    message: message.clone(),
+                });
+            }
+            return Ok(results);
         }
         let body: RemoteFaceResponse = response
             .json()
             .await
             .map_err(|error| format!("face analyze decode failed: {error}"))?;
-        if body.faces.len() != images.len() {
-            return Err(format!(
+        if body.faces.len() != batch_indices.len() {
+            let message = format!(
                 "face analyze count mismatch: got {} expected {}",
                 body.faces.len(),
-                images.len()
-            ));
+                batch_indices.len()
+            );
+            for index in batch_indices {
+                results[index] = Err(AiItemError {
+                    code: "invalid_output".to_string(),
+                    message: message.clone(),
+                });
+            }
+            return Ok(results);
         }
-        Ok(body
-            .faces
-            .into_iter()
-            .map(|faces| {
-                Ok(faces
-                    .into_iter()
-                    .map(|face| DetectedFace {
-                        box_xywh: face.box_xywh,
-                        landmarks: face.landmarks.unwrap_or([[0.0; 2]; 5]),
-                        detection_score: face.detection_score.unwrap_or(0.0),
-                        quality_score: face.quality_score.unwrap_or(0.0),
-                        embedding: face.embedding,
-                    })
-                    .collect())
-            })
-            .collect())
+        for (index, faces) in batch_indices.into_iter().zip(body.faces) {
+            results[index] = Ok(faces
+                .into_iter()
+                .map(|face| DetectedFace {
+                    box_xywh: face.box_xywh,
+                    landmarks: face.landmarks.unwrap_or([[0.0; 2]; 5]),
+                    detection_score: face.detection_score.unwrap_or(0.0),
+                    quality_score: face.quality_score.unwrap_or(0.0),
+                    embedding: face.embedding,
+                })
+                .collect());
+        }
+        Ok(results)
     }
 }
 

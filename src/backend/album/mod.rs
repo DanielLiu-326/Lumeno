@@ -7,20 +7,14 @@ pub mod helpers;
 pub mod media;
 pub mod types;
 
-pub use decoder::{
-    create_decoder, find_xmp_sidecar, DecodeError, DecodeOptions, DecoderCreateOptions,
-    ImageDecoder, ImageFormat, ImageFormatSet, is_raw_path,
-};
-
 pub use api::*;
+pub(crate) use api::{AiAlbumScanTarget, collect_accessible_ai_scan_targets};
+pub(crate) use helpers::{migrate_json_sidecar, scan_json_sidecars};
 pub use media::{
-    api_albums_export, api_darktable_preview, api_face_thumbnail, api_has_xmp, api_thumbnail,
-    is_image_path, queue_background_thumbnail_tasks, spawn_thumbnail_prewarmer, thumbnail_cache_key,
-    ThumbnailGenerator,
+    api_albums_export, api_darktable_preview, api_has_xmp, api_thumbnail,
+    queue_background_thumbnail_tasks, spawn_thumbnail_prewarmer,
 };
-pub(crate) use media::{ensure_cached_face_crop, write_cached_face_crop_from_image};
-pub use types::*;
-
-pub(crate) use api::{collect_accessible_ai_scan_targets, AiAlbumScanTarget};
-pub(crate) use helpers::{merge_xmp_meta, migrate_json_sidecar, scan_json_sidecars};
-pub(crate) use media::collect_album_image_paths;
+pub(crate) use media::{
+    collect_album_image_paths, ensure_cached_face_crop, purge_owner_thumbnail_cache,
+    write_cached_face_crop_from_image,
+};

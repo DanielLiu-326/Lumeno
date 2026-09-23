@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { prettyPath } from "../utils/path";
 import { isImageEntry, thumbnailUrl } from "../utils/fileBrowser";
 import { t } from "../i18n/index.js";
+import AppDialog from "./AppDialog.vue";
 import {
   IconArrowLeft,
   IconChevronRight,
@@ -15,6 +16,7 @@ import {
 } from "../utils/icons";
 
 const props = defineProps({
+  show: { type: Boolean, default: true },
   isDark: { type: Boolean, default: false },
   fetchList: { type: Function, required: true },
 });
@@ -73,8 +75,12 @@ async function loadPath(path) {
 }
 
 watch(currentPath, (path) => {
-  loadPath(path);
+  if (props.show) loadPath(path);
 }, { immediate: true });
+
+watch(() => props.show, (open) => {
+  if (open) loadPath(currentPath.value);
+});
 
 function isSelected(path) {
   return selected.value.has(path);
@@ -130,14 +136,10 @@ function confirm() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      class="fixed inset-0 z-[130] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
-      @click.self="emit('close')"
-    >
+  <AppDialog :show="show" :z-index="130" @close="emit('close')">
       <div
-        class="flex h-[min(86vh,860px)] w-full max-w-5xl flex-col overflow-hidden rounded-[2rem] border shadow-2xl"
-        :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-white/70 bg-white text-stone-900'"
+        class="app-dialog-panel app-dialog-panel-soft flex h-[min(86vh,860px)] w-full max-w-5xl flex-col overflow-hidden rounded-[2rem] border"
+        :class="isDark ? 'text-stone-100' : 'text-stone-900'"
       >
         <div class="flex shrink-0 items-center justify-between border-b px-5 py-4 md:px-6"
           :class="isDark ? 'border-stone-700' : 'border-stone-200'">
@@ -402,6 +404,5 @@ function confirm() {
           </div>
         </div>
       </div>
-    </div>
-  </Teleport>
+  </AppDialog>
 </template>

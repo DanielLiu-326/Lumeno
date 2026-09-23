@@ -19,13 +19,14 @@ function toggle(star) {
 </script>
 
 <template>
-  <div class="flex items-center gap-0.5">
+  <div class="flex items-center justify-between">
     <button
       v-for="star in [0, 1, 2, 3, 4, 5]"
       :key="star"
+      type="button"
       class="p-0.5 transition-colors"
       :class="(modelValue.ratings || []).includes(star)
-        ? 'text-amber-400'
+        ? 'text-yellow-400'
         : (isDark ? 'text-stone-600 hover:text-stone-400' : 'text-stone-300 hover:text-stone-500')"
       @click="toggle(star)"
     >

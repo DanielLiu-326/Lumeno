@@ -2,10 +2,12 @@ use crate::if_or;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query};
+use axum::extract::{Multipart, Path, Query};
 use axum::http::HeaderMap;
+use axum::http::HeaderValue;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::http::header;
+use axum::response::Response;
 use axum::{Extension, Json};
 use function_name::named;
 use futures::FutureExt;
@@ -33,7 +35,7 @@ use super::common::{
     AppError, AppState, Token, create_response, into_host_path_safely, move_file_or_dir,
 };
 use super::i18n::{RequestLocale, tr, trf};
-use super::tasks::{Task, TaskBase, TaskManager, TaskStatus, format_subtask, task_file_name};
+use super::tasks::{Task, TaskBase, TaskStatus, format_subtask, task_file_name};
 
 const UPLOAD_FEED_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -178,12 +180,8 @@ impl Task for CopyFiles {
             if src.is_file() {
                 let done = base.processed_count.load(Ordering::Relaxed);
                 let total = base.total_count.load(Ordering::Relaxed).max(1);
-                *base.current_task.lock().await = format_subtask(
-                    "copying",
-                    &task_file_name(src.as_path()),
-                    done + 1,
-                    total,
-                );
+                *base.current_task.lock().await =
+                    format_subtask("copying", &task_file_name(src.as_path()), done + 1, total);
 
                 let effective_dst = if dst.exists() {
                     match self.conflict {
@@ -382,7 +380,8 @@ pub(crate) struct UploadFiles {
     ch_receiver: Mutex<tokio::sync::mpsc::Receiver<UploadChunk>>,
     ch_sender: Mutex<Option<tokio::sync::mpsc::Sender<UploadChunk>>>,
     cancel: AtomicBool,
-    on_single_finished: Option<Arc<dyn Fn(PathBuf) -> BoxFuture<'static, ()> + Send + Sync>>,
+    on_finished: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+    dedup_key: Option<String>,
 }
 
 impl UploadFiles {
@@ -402,17 +401,24 @@ impl UploadFiles {
             ch_receiver: Mutex::new(receiver),
             ch_sender: Mutex::new(Some(sender)),
             cancel: Default::default(),
-            on_single_finished: None,
+            on_finished: None,
+            dedup_key: None,
         }
     }
 
-    pub(crate) fn with_on_single_finished(
+    pub(crate) fn with_on_finished(
         mut self,
-        cb: impl Fn(PathBuf) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+        cb: impl Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static,
     ) -> Self {
-        self.on_single_finished = Some(Arc::new(cb));
+        self.on_finished = Some(Arc::new(cb));
         self
     }
+
+    pub(crate) fn with_dedup_key(mut self, key: String) -> Self {
+        self.dedup_key = Some(key);
+        self
+    }
+
     async fn feed_bytes(&self, file: PathBuf, bytes: Bytes) -> Result<(), AppError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(AppError::BadRequest(tr("en", "error.task_cancelled")));
@@ -435,6 +441,10 @@ impl Task for UploadFiles {
     }
     fn cancellable(&self) -> bool {
         true
+    }
+
+    fn deduplication_key(&self) -> Option<String> {
+        self.dedup_key.clone()
     }
 
     async fn execute(&self) {
@@ -581,15 +591,15 @@ impl Task for UploadFiles {
                 break;
             }
             self.base.add_processed_count(1);
-            if !skip_write {
-                if let Some(ref cb) = self.on_single_finished {
-                    cb(write_path.clone()).await;
-                }
-            }
         }
         if self.cancel.load(Ordering::Relaxed) {
             self.base.set_status(TaskStatus::Cancelled).await;
         } else {
+            // Queue the follow-up (album import) while this task is still
+            // Running so the import dedup key never has a gap.
+            if let Some(ref cb) = self.on_finished {
+                cb().await;
+            }
             self.base.set_status(TaskStatus::Finished).await;
         }
     }
@@ -799,7 +809,10 @@ pub async fn api_get_file_list(
     directories.append(&mut files);
 
     let offset = query.offset.unwrap_or(0) as usize;
-    let requested_limit = query.limit.unwrap_or(100);
+    let requested_limit = match query.limit {
+        Some(n) => n,
+        None => cfg.settings_manager.photos_per_page().await,
+    };
     let limit = if requested_limit == 0 {
         usize::MAX
     } else {
@@ -860,7 +873,7 @@ pub async fn send_file(full_path: PathBuf, disposition: bool) -> Result<Response
 
     let file_name = full_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-    let mime_type = mime_guess::from_path(&full_path).first_or_octet_stream();
+    let mime_type = mime_for_path(&full_path);
     let mut headers = HeaderMap::new();
     headers.typed_insert(ContentType::from(mime_type));
 
@@ -884,15 +897,74 @@ pub async fn send_file(full_path: PathBuf, disposition: bool) -> Result<Response
     Ok(ret)
 }
 
+fn mime_for_path(path: &FsPath) -> mime_guess::mime::Mime {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if ext.eq_ignore_ascii_case("webmanifest") {
+        return "application/manifest+json"
+            .parse()
+            .expect("valid mime type");
+    }
+    mime_guess::from_path(path).first_or_octet_stream()
+}
+
 pub async fn web_file(
     path: Option<Path<String>>,
     Extension(cfg): Extension<Arc<AppState>>,
 ) -> Result<Response<Body>, AppError> {
-    let full_path = into_host_path_safely(
-        cfg.resources_path.as_path(),
-        &path.unwrap_or(Path(String::new())),
-    )?;
-    send_file(full_path, false).await
+    let requested = path.map(|p| p.0).unwrap_or_default();
+    let full_path = into_host_path_safely(cfg.resources_path.as_path(), &requested)?;
+    match send_file(full_path.clone(), false).await {
+        Ok(mut response) => {
+            if full_path.file_name().and_then(|name| name.to_str()) == Some("sw.js") {
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            }
+            Ok(response)
+        }
+        Err(err) => {
+            if looks_like_static_asset(&requested) {
+                return Err(err);
+            }
+            send_file(cfg.resources_path.join("index.html"), false).await
+        }
+    }
+}
+
+fn looks_like_static_asset(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some(dot) = name.rfind('.') else {
+        return false;
+    };
+    matches!(
+        name[dot + 1..].to_ascii_lowercase().as_str(),
+        "js" | "mjs"
+            | "cjs"
+            | "css"
+            | "map"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "svg"
+            | "ico"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "json"
+            | "webmanifest"
+            | "txt"
+            | "wasm"
+            | "mp4"
+            | "webm"
+            | "html"
+            | "xml"
+    )
 }
 
 pub async fn web_egui_file(
@@ -1262,10 +1334,8 @@ fn normalize_upload_list(
 ) -> Vec<UploadFileMeta> {
     let mut ret = metas.to_vec();
     let mut path_set = metas.iter().map(|m| m.path.clone()).collect::<HashSet<_>>();
-    let mut to_insert = Vec::new();
-    let mut inserted = true;
-    while inserted {
-        inserted = false;
+    loop {
+        let mut to_insert = Vec::new();
         for meta in metas {
             let path = PathBuf::from(&meta.path);
             if let Some(parent) = path.parent()
@@ -1273,16 +1343,18 @@ fn normalize_upload_list(
             {
                 let path_str: String = parent.to_string_lossy().into();
                 if !path_set.contains(&path_str) {
-                    path_set.insert(path_str);
+                    path_set.insert(path_str.clone());
                     to_insert.push(UploadFileMeta {
                         bytes: 0,
                         is_dir: true,
-                        path: parent.to_string_lossy().into(),
+                        path: path_str,
                     });
                 }
             }
         }
-        inserted = !to_insert.is_empty();
+        if to_insert.is_empty() {
+            break;
+        }
         ret.append(&mut to_insert);
     }
 
@@ -1415,4 +1487,3 @@ pub async fn api_upload_feed(
 }
 
 // Re-export DefaultBodyLimit for main.rs route configuration
-pub use axum::extract::DefaultBodyLimit as UploadBodyLimit;

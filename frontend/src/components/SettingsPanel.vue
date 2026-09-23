@@ -1,6 +1,19 @@
 <script setup>
 import { ref, watch, computed } from "vue";
 import { availableLocales, t } from "../i18n/index.js";
+import WallpaperSourceEditor from "./WallpaperSourceEditor.vue";
+import { normalizeWallpaper } from "../utils/wallpaper.js";
+import { ACCENT_PRESETS, accentSwatch, defaultAccent, isPresetAccent, normalizeAccent, snapAccent } from "../utils/accent.js";
+import AppSlider from "./AppSlider.vue";
+import { IconRefresh } from "../utils/icons";
+import {
+  UI_SCALE_DEFAULT,
+  UI_SCALE_MAX,
+  UI_SCALE_MIN,
+  UI_SCALE_STEP,
+  applyUiScale,
+  loadUiScale,
+} from "../utils/uiScale.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -12,30 +25,48 @@ const props = defineProps({
   userRole: { type: String, default: "" },
   currentLocale: { type: String, default: "en" },
   userAvatar: { type: String, default: null },
+  wallpaper: { type: Object, default: null },
+  accent: { type: String, default: "amber" },
   onUpdatePassword: { type: Function, default: null },
   onUploadAvatar: { type: Function, default: null },
+  onUploadWallpaper: { type: Function, default: null },
   onAiIndex: { type: Function, default: null },
   webdavShares: { type: Array, default: () => [] },
   onWebdavUpdate: { type: Function, default: null },
+  initialSection: { type: String, default: "preferences" },
+  sectionFocus: { type: Number, default: 0 },
+  hideFrame: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["update-settings", "scan-thumbnails", "update-preferences", "update-member", "update-password", "delete-member", "reset-member-password"]);
+const emit = defineEmits(["update-settings", "scan-thumbnails", "update-preferences", "update-member", "update-password", "delete-member", "reset-member-password", "preview-wallpaper", "preview-accent"]);
 
 const defaultAiCpuThreads = Math.max(1, (typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4) - 1);
 
 const localSettings = ref({});
-const localPreferences = ref({ locale: "en" });
+const localPreferences = ref({ locale: "en", wallpaper: normalizeWallpaper(null), accent: defaultAccent() });
 const localMembers = ref([]);
 const passwordForm = ref({ current_password: "", new_password: "", confirm_password: "" });
 const avatarInput = ref(null);
 const avatarUploading = ref(false);
+const avatarFailed = ref(false);
+watch(() => props.userAvatar, () => { avatarFailed.value = false; });
+const wallpaperUploading = ref({ source: false, dark_source: false });
 const aiIndexStarting = ref(false);
+const uiScale = ref(loadUiScale());
 
 const webdavNewPath = ref("");
 const webdavAdding = ref(false);
 
-const activeSection = ref("preferences");
-const mobileShowContent = ref(false);
+const activeSection = ref(props.initialSection || "preferences");
+const mobileShowContent = ref(props.hideFrame || props.initialSection === "account");
+
+watch(
+  () => [props.initialSection, props.sectionFocus],
+  ([section]) => {
+    if (!section) return;
+    selectSection(section);
+  },
+);
 
 const menuItems = computed(() => {
   const items = [
@@ -124,16 +155,49 @@ watch(
       ai_concurrency: 1,
       ai_batch_size: 64,
       ai_cpu_threads: defaultAiCpuThreads,
+      photos_per_page: 100,
+      allow_registration: false,
       ...val,
     };
   },
   { immediate: true, deep: true }
 );
 
+function wallpaperKey(value) {
+  return JSON.stringify(normalizeWallpaper(value));
+}
+
+function setLocalWallpaper(next, { preview = true } = {}) {
+  const normalized = normalizeWallpaper(next);
+  if (wallpaperKey(localPreferences.value.wallpaper) === wallpaperKey(normalized)) return;
+  localPreferences.value.wallpaper = normalized;
+  if (preview) emit("preview-wallpaper", normalized);
+}
+
 watch(
   () => props.currentLocale,
   (val) => {
-    localPreferences.value = { locale: val || "en" };
+    localPreferences.value.locale = val || "en";
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.wallpaper,
+  (val) => {
+    const normalized = normalizeWallpaper(val);
+    if (wallpaperKey(localPreferences.value.wallpaper) === wallpaperKey(normalized)) return;
+    localPreferences.value.wallpaper = normalized;
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.accent,
+  (val) => {
+    const normalized = normalizeAccent(val);
+    if (localPreferences.value.accent === normalized) return;
+    localPreferences.value.accent = normalized;
   },
   { immediate: true }
 );
@@ -155,7 +219,71 @@ function scanThumbnailsNow() {
 }
 
 function savePreferences() {
-  emit("update-preferences", { ...localPreferences.value });
+  emit("update-preferences", {
+    locale: localPreferences.value.locale,
+    wallpaper: normalizeWallpaper(localPreferences.value.wallpaper),
+    accent: normalizeAccent(localPreferences.value.accent),
+  });
+}
+
+function onUiScale(value) {
+  uiScale.value = applyUiScale(value);
+}
+
+function resetUiScale() {
+  uiScale.value = applyUiScale(UI_SCALE_DEFAULT);
+}
+
+function setLocalAccent(next) {
+  const normalized = snapAccent(next);
+  if (localPreferences.value.accent === normalized) return;
+  localPreferences.value.accent = normalized;
+  emit("preview-accent", normalized);
+}
+
+function setWallpaperDarkMode(mode) {
+  setLocalWallpaper({
+    ...localPreferences.value.wallpaper,
+    darkMode: mode,
+  });
+}
+
+function setWallpaperSource(source) {
+  setLocalWallpaper({
+    ...localPreferences.value.wallpaper,
+    source,
+  });
+}
+
+function setWallpaperDarkSource(source) {
+  setLocalWallpaper({
+    ...localPreferences.value.wallpaper,
+    darkSource: source,
+  });
+}
+
+async function handleWallpaperUpload(slot, file) {
+  if (!file || !props.onUploadWallpaper) return;
+  wallpaperUploading.value[slot] = true;
+  try {
+    const filename = await props.onUploadWallpaper(file, slot);
+    if (!filename) return;
+    const next = { type: "image", file: filename };
+    if (slot === "dark_source") {
+      setLocalWallpaper({
+        ...localPreferences.value.wallpaper,
+        darkMode: "separate",
+        darkSource: next,
+      });
+    } else {
+      setLocalWallpaper({
+        ...localPreferences.value.wallpaper,
+        source: next,
+      });
+    }
+  } finally {
+    wallpaperUploading.value[slot] = false;
+  }
 }
 
 async function savePassword() {
@@ -231,27 +359,28 @@ function promptResetPassword(member) {
 </script>
 
 <template>
-  <section class="flex h-full flex-col overflow-hidden rounded-2xl border shadow-sm"
-    :class="isDark ? 'border-stone-800 bg-stone-900/90 text-stone-100' : 'border-stone-200 bg-white/90 text-stone-900'">
+  <section class="flex h-full flex-col overflow-hidden"
+    :class="[
+      isDark ? 'text-stone-100' : 'text-stone-900',
+      hideFrame ? '' : 'app-frost app-card rounded-2xl',
+    ]">
 
     <!-- Header with back button on mobile when viewing content -->
-    <div class="flex items-center gap-2 border-b px-4 py-3 md:px-5 md:py-4"
-      :class="isDark ? 'border-stone-700/60' : 'border-stone-200/60'">
+    <div v-if="!hideFrame" class="flex items-center gap-2 app-split-b px-4 py-3 md:px-5 md:py-4">
       <button v-if="mobileShowContent" class="md:hidden mr-1 rounded-lg p-1 transition"
         :class="isDark ? 'hover:bg-stone-700' : 'hover:bg-stone-200'"
         @click="goBackToMenu">
         <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
       </button>
-      <h2 class="text-sm font-bold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">
+      <h2 class="font-display text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">
         {{ mobileShowContent ? menuLabel(activeSection) : t('settings.title') }}
       </h2>
     </div>
 
     <div class="flex flex-1 overflow-hidden">
       <!-- Sidebar menu — always visible on md+, toggleable on mobile -->
-      <nav class="flex-shrink-0 overflow-y-auto border-r md:w-48"
+      <nav v-if="!hideFrame" class="flex-shrink-0 overflow-y-auto app-split-r md:w-48"
         :class="[
-          isDark ? 'border-stone-700/60' : 'border-stone-200/60',
           mobileShowContent ? 'hidden md:block' : 'w-full md:w-48'
         ]">
         <ul class="flex flex-col py-2">
@@ -279,37 +408,179 @@ function promptResetPassword(member) {
 
       <!-- Content area — always visible on md+, toggleable on mobile -->
       <div class="flex-1 overflow-y-auto app-scrollbar"
-        :class="mobileShowContent ? '' : 'hidden md:block'">
+        :class="hideFrame || mobileShowContent ? '' : 'hidden md:block'">
         <div class="p-4 md:p-5">
-          <Transition name="settings-section" mode="out-in">
+          <Transition :name="hideFrame ? '' : 'settings-section'" :mode="hideFrame ? undefined : 'out-in'" :css="!hideFrame">
           <div :key="activeSection">
 
           <!-- Preferences -->
           <div v-if="activeSection === 'preferences'">
-            <div class="flex flex-col gap-4 rounded-xl border p-4"
-              :class="isDark ? 'border-stone-700 bg-stone-800/60' : 'border-stone-200 bg-stone-50'">
+            <div class="flex flex-col gap-5 rounded-xl app-surface app-card p-4">
               <div>
                 <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.language') }}</label>
                 <select v-model="localPreferences.locale"
-                  class="w-full rounded-lg border px-3 py-2 text-sm"
-                  :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'">
+                  class="w-full rounded-lg border px-3 py-2 text-sm app-control"
+                  :class="isDark ? 'text-stone-100' : 'text-stone-900'">
                   <option v-for="lang in availableLocales" :key="lang" :value="lang">
                     {{ lang === 'zh' ? t('settings.langChinese') : t('settings.langEnglish') }}
                   </option>
                 </select>
               </div>
+
+              <div class="flex flex-col gap-2 app-split-t pt-5">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <p class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.uiScale') }}</p>
+                    <p class="mt-0.5 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.uiScaleHint') }}</p>
+                  </div>
+                  <span class="shrink-0 text-xs tabular-nums" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ uiScale }}%</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="w-8 shrink-0 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ UI_SCALE_MIN }}%</span>
+                  <AppSlider
+                    :model-value="uiScale"
+                    :min="UI_SCALE_MIN"
+                    :max="UI_SCALE_MAX"
+                    :step="UI_SCALE_STEP"
+                    :tick="UI_SCALE_DEFAULT"
+                    :tick-title="t('settings.uiScaleDefault')"
+                    :is-dark="isDark"
+                    :aria-label="t('settings.uiScale')"
+                    @update:model-value="onUiScale"
+                  />
+                  <span class="w-10 shrink-0 text-right text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ UI_SCALE_MAX }}%</span>
+                  <button
+                    type="button"
+                    class="shrink-0 rounded p-0.5 transition"
+                    :class="isDark ? 'text-stone-400 hover:bg-stone-700 hover:text-stone-200' : 'text-stone-400 hover:bg-stone-200 hover:text-stone-600'"
+                    :title="t('settings.uiScaleDefault')"
+                    @click="resetUiScale"
+                  >
+                    <IconRefresh class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              <div class="flex flex-col gap-3 app-split-t pt-5">
+                <div>
+                  <p class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.accent') }}</p>
+                  <p class="mt-0.5 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.accentHint') }}</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button
+                    v-for="preset in ACCENT_PRESETS"
+                    :key="preset.id"
+                    type="button"
+                    class="h-8 w-8 rounded-full border-2 transition"
+                    :class="localPreferences.accent === preset.id
+                      ? (isDark ? 'border-white ring-2 ring-white/30' : 'border-stone-900 ring-2 ring-stone-900/15')
+                      : (isDark ? 'border-white/15 hover:border-white/40' : 'border-black/10 hover:border-black/25')"
+                    :style="{ background: preset.scale[500] }"
+                    :title="t(`settings.accentPreset_${preset.id}`)"
+                    @click="setLocalAccent(preset.id)"
+                  ></button>
+                  <label
+                    class="relative flex h-8 w-8 cursor-pointer items-center justify-center overflow-hidden rounded-full border-2"
+                    :class="!isPresetAccent(localPreferences.accent)
+                      ? (isDark ? 'border-white ring-2 ring-white/30' : 'border-stone-900 ring-2 ring-stone-900/15')
+                      : (isDark ? 'border-white/15 hover:border-white/40' : 'border-black/10 hover:border-black/25')"
+                    :title="t('settings.accentCustom')"
+                  >
+                    <span
+                      class="absolute inset-0"
+                      :style="isPresetAccent(localPreferences.accent)
+                        ? { background: 'conic-gradient(#f59e0b, #f43f5e, #8b5cf6, #0ea5e9, #10b981, #f59e0b)' }
+                        : { background: accentSwatch(localPreferences.accent) }"
+                    ></span>
+                    <input
+                      type="color"
+                      class="absolute inset-0 cursor-pointer opacity-0"
+                      :value="accentSwatch(localPreferences.accent)"
+                      @input="setLocalAccent($event.target.value)"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div class="flex flex-col gap-3 app-split-t pt-5">
+                <div>
+                  <p class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.wallpaper') }}</p>
+                  <p class="mt-0.5 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.wallpaperHint') }}</p>
+                </div>
+
+                <div>
+                  <p class="mb-2 text-[11px] font-medium uppercase tracking-wide" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.wallpaperDarkMode') }}</p>
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      class="rounded-xl border px-3 py-2.5 text-left transition"
+                      :class="localPreferences.wallpaper.darkMode !== 'separate'
+                        ? (isDark ? 'border-amber-400/70 bg-stone-800/70' : 'border-amber-500/70 bg-white/70')
+                        : (isDark ? 'border-stone-700 hover:border-stone-500' : 'border-stone-200 hover:border-stone-300')"
+                      @click="setWallpaperDarkMode('auto')"
+                    >
+                      <span class="block text-sm font-medium">{{ t('settings.wallpaperDarkAuto') }}</span>
+                      <span class="mt-1 block text-[11px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.wallpaperDarkAutoHint') }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded-xl border px-3 py-2.5 text-left transition"
+                      :class="localPreferences.wallpaper.darkMode === 'separate'
+                        ? (isDark ? 'border-amber-400/70 bg-stone-800/70' : 'border-amber-500/70 bg-white/70')
+                        : (isDark ? 'border-stone-700 hover:border-stone-500' : 'border-stone-200 hover:border-stone-300')"
+                      @click="setWallpaperDarkMode('separate')"
+                    >
+                      <span class="block text-sm font-medium">{{ t('settings.wallpaperDarkSeparate') }}</span>
+                      <span class="mt-1 block text-[11px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.wallpaperDarkSeparateHint') }}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="localPreferences.wallpaper.darkMode === 'separate'" class="grid gap-4 lg:grid-cols-2">
+                  <div class="flex flex-col gap-2">
+                    <p class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.wallpaperLight') }}</p>
+                    <WallpaperSourceEditor
+                      :model-value="localPreferences.wallpaper.source"
+                      :is-dark="false"
+                      :uploading="wallpaperUploading.source"
+                      @update:model-value="setWallpaperSource"
+                      @upload="(file) => handleWallpaperUpload('source', file)"
+                    />
+                  </div>
+                  <div class="flex flex-col gap-2">
+                    <p class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.wallpaperDark') }}</p>
+                    <WallpaperSourceEditor
+                      :model-value="localPreferences.wallpaper.darkSource"
+                      :is-dark="true"
+                      :uploading="wallpaperUploading.dark_source"
+                      @update:model-value="setWallpaperDarkSource"
+                      @upload="(file) => handleWallpaperUpload('dark_source', file)"
+                    />
+                  </div>
+                </div>
+                <WallpaperSourceEditor
+                  v-else
+                  :model-value="localPreferences.wallpaper.source"
+                  :is-dark="isDark"
+                  :uploading="wallpaperUploading.source"
+                  @update:model-value="setWallpaperSource"
+                  @upload="(file) => handleWallpaperUpload('source', file)"
+                />
+              </div>
+
+              <div class="app-split-t pt-5">
               <button class="self-start rounded-xl px-5 py-2 text-sm font-medium transition"
                 :class="isDark ? 'bg-stone-100 text-stone-900 hover:bg-white' : 'bg-stone-900 text-white hover:bg-stone-800'"
                 @click="savePreferences">
                 {{ t('settings.savePreferences') }}
               </button>
+              </div>
             </div>
           </div>
 
           <!-- Account -->
           <div v-else-if="activeSection === 'account'">
-            <div class="rounded-xl border p-4"
-              :class="isDark ? 'border-stone-700 bg-stone-800/60' : 'border-stone-200 bg-stone-50'">
+            <div class="rounded-xl app-surface app-card p-4">
               <div class="flex items-start gap-4">
                 <div class="flex flex-col items-center gap-2">
                   <button
@@ -318,8 +589,8 @@ function promptResetPassword(member) {
                     :title="t('settings.changeAvatar')"
                     :disabled="avatarUploading"
                     @click="triggerAvatarUpload">
-                    <img v-if="userAvatar" :src="`/api/avatar/${userAvatar}`" alt="avatar"
-                      class="h-full w-full object-cover" />
+                    <img v-if="userAvatar && !avatarFailed" :src="`/api/avatar/${userAvatar}`" alt="avatar"
+                      class="h-full w-full object-cover" @error="avatarFailed = true" />
                     <span v-else
                       class="flex h-full w-full items-center justify-center text-xl font-bold uppercase"
                       :class="isDark ? 'bg-stone-700 text-stone-300' : 'bg-stone-200 text-stone-600'">
@@ -356,8 +627,7 @@ function promptResetPassword(member) {
 
           <!-- Password -->
           <div v-else-if="activeSection === 'password'">
-            <div class="flex flex-col gap-4 rounded-xl border p-4"
-              :class="isDark ? 'border-stone-700 bg-stone-800/60' : 'border-stone-200 bg-stone-50'">
+            <div class="flex flex-col gap-4 rounded-xl app-surface app-card p-4">
               <div>
                 <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.currentPassword') }}</label>
                 <input v-model="passwordForm.current_password" type="password"
@@ -391,15 +661,14 @@ function promptResetPassword(member) {
 
           <!-- Members (admin) -->
           <div v-else-if="activeSection === 'members' && isAdmin">
-            <div class="flex flex-col gap-3 rounded-xl border p-4"
-              :class="isDark ? 'border-stone-700 bg-stone-800/60' : 'border-stone-200 bg-stone-50'">
+            <div class="flex flex-col gap-3 rounded-xl app-surface app-card p-4">
               <div v-if="localMembers.length === 0" class="text-sm"
                 :class="isDark ? 'text-stone-400' : 'text-stone-500'">
                 {{ t('settings.noMembers') }}
               </div>
               <div v-for="member in localMembers" :key="member.username"
-                class="rounded-xl border p-4"
-                :class="isDark ? 'border-stone-700/80 bg-stone-900/50' : 'border-stone-200 bg-white/80'">
+                class="rounded-xl app-card p-4"
+                :class="isDark ? 'bg-stone-900/50' : 'bg-white/80'">
                 <div class="mb-3 flex items-center justify-between gap-3">
                   <div>
                     <p class="text-sm font-semibold">{{ member.username }}</p>
@@ -468,10 +737,9 @@ function promptResetPassword(member) {
 
           <!-- App Settings (admin) -->
           <div v-else-if="activeSection === 'appSettings' && isAdmin">
-            <div class="flex flex-col gap-4 rounded-xl border p-4"
-              :class="isDark ? 'border-stone-700 bg-stone-800/60' : 'border-stone-200 bg-stone-50'">
-              <div class="rounded-xl border p-4"
-                :class="isDark ? 'border-stone-700/80 bg-stone-900/50' : 'border-stone-200 bg-white/80'">
+            <div class="flex flex-col gap-4 rounded-xl app-surface app-card p-4">
+              <div class="rounded-xl app-card p-4"
+                :class="isDark ? 'bg-stone-900/50' : 'bg-white/80'">
                 <div class="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p class="text-sm font-semibold">{{ t('settings.aiTitle') }}</p>
@@ -547,8 +815,8 @@ function promptResetPassword(member) {
                   </p>
                 </div>
               </div>
-              <div class="rounded-xl border p-4"
-                :class="isDark ? 'border-stone-700/80 bg-stone-900/50' : 'border-stone-200 bg-white/80'">
+              <div class="rounded-xl app-card p-4"
+                :class="isDark ? 'bg-stone-900/50' : 'bg-white/80'">
                 <p class="text-sm font-semibold">{{ t('settings.aiControlsTitle') }}</p>
                 <p class="mt-1 mb-4 text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.aiControlsHint') }}</p>
                 <div class="grid gap-4 md:grid-cols-2">
@@ -687,8 +955,7 @@ function promptResetPassword(member) {
 
           <!-- WebDAV Shares -->
           <div v-else-if="activeSection === 'webdav'">
-            <div class="flex flex-col gap-2 rounded-xl border p-4"
-              :class="isDark ? 'border-stone-700 bg-stone-800/60' : 'border-stone-200 bg-stone-50'">
+            <div class="flex flex-col gap-2 rounded-xl app-surface app-card p-4">
               <p class="text-xs" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('settings.webdavHint') }}</p>
               <p class="text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.webdavCredentialHint') }}</p>
 

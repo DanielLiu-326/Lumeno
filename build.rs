@@ -185,9 +185,6 @@ fn refresh_manifest(out_dir: &Path) {
     let path = out_dir.join("manifest.json");
     match std::fs::write(&path, manifest) {
         Ok(()) => println!("cargo:warning=refreshed {}", path.display()),
-        Err(error) => println!(
-            "cargo:warning=failed to write {}: {error}",
-            path.display()
-        ),
+        Err(error) => println!("cargo:warning=failed to write {}: {error}", path.display()),
     }
 }

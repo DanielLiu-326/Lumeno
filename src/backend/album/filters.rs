@@ -1,13 +1,15 @@
 //! Album photo filters: typed kinds registered in a central registry, evaluated
-//! with AND / OR / AND-NOT semantics across filter types.
+//! left-to-right as a boolean chain.
 //!
 //! Wire format (JSON clause):
 //! ```json
 //! { "type": "rating", "logic": "and", "value": { "ratings": [4, 5] }, "enabled": true }
 //! ```
 //!
-//! Evaluation of enabled clauses:
-//!   `(∀ AND) ∧ (OR为空 ∨ ∃ OR) ∧ (∀ AND_NOT 不成立)`
+//! Each enabled predicate is combined with the result so far:
+//!   first clause is the seed (`and_not` negates it; `and` / `or` are the predicate);
+//!   later clauses apply `acc ∧ P`, `acc ∨ P`, or `acc ∧ ¬P`.
+//! AI text clauses are skipped here and handled by the caller.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -198,50 +200,38 @@ pub fn extract_ai_text_effects(compiled: &[CompiledClause]) -> Vec<AiTextEffect>
         .collect()
 }
 
-/// Evaluate sync predicates with AND / OR / AND-NOT semantics.
+/// Left-to-right chain over compiled photo predicates (AI text skipped).
 pub fn matches_compiled(
     photo: &dyn FilterablePhoto,
     compiled: &[CompiledClause],
     ctx: &FilterEvalCtx,
 ) -> bool {
-    let mut and_ok = true;
-    let mut saw_and = false;
-    let mut or_ok = false;
-    let mut saw_or = false;
-    let mut not_ok = true;
+    let mut acc: Option<bool> = None;
 
     for clause in compiled {
         let CompiledClause::Pred { logic, pred } = clause else {
             continue;
         };
         let matched = pred.matches(photo, ctx);
-        match logic {
-            FilterLogic::And => {
-                saw_and = true;
-                if !matched {
-                    and_ok = false;
-                }
-            }
-            FilterLogic::Or => {
-                saw_or = true;
-                if matched {
-                    or_ok = true;
-                }
-            }
-            FilterLogic::AndNot => {
-                if matched {
-                    not_ok = false;
-                }
-            }
-        }
+        acc = Some(match acc {
+            None => match logic {
+                FilterLogic::AndNot => !matched,
+                FilterLogic::And | FilterLogic::Or => matched,
+            },
+            Some(prev) => match logic {
+                FilterLogic::And => prev && matched,
+                FilterLogic::Or => prev || matched,
+                FilterLogic::AndNot => prev && !matched,
+            },
+        });
     }
 
-    let and_part = !saw_and || and_ok;
-    let or_part = !saw_or || or_ok;
-    and_part && or_part && not_ok
+    acc.unwrap_or(true)
 }
 
-/// Convert legacy flat query fields into AND clauses (backward compatible GET).
+/// Convert legacy flat query fields into a chain that matches the old bucket
+/// semantics: `(all AND fields) ∧ (any OR camera/lens/format)`. OR clauses are
+/// emitted first so later ANDs apply to the whole disjunction.
 pub fn clauses_from_legacy_flat(
     from: Option<&str>,
     to: Option<&str>,
@@ -257,12 +247,13 @@ pub fn clauses_from_legacy_flat(
     q: Option<&str>,
     person_ids: Option<&str>,
 ) -> Vec<FilterClause> {
-    let mut clauses = Vec::new();
+    let mut ands = Vec::new();
+    let mut ors = Vec::new();
 
     let from = from.unwrap_or("").trim();
     let to = to.unwrap_or("").trim();
     if !from.is_empty() || !to.is_empty() {
-        clauses.push(FilterClause {
+        ands.push(FilterClause {
             filter_type: "date_range".into(),
             logic: FilterLogic::And,
             value: serde_json::json!({ "from": from, "to": to }),
@@ -276,7 +267,7 @@ pub fn clauses_from_legacy_flat(
         .filter_map(|s| s.trim().parse().ok())
         .collect();
     if !ratings.is_empty() {
-        clauses.push(FilterClause {
+        ands.push(FilterClause {
             filter_type: "rating".into(),
             logic: FilterLogic::And,
             value: serde_json::json!({ "ratings": ratings }),
@@ -291,7 +282,7 @@ pub fn clauses_from_legacy_flat(
         .filter(|s| !s.is_empty())
         .collect();
     if !colors.is_empty() {
-        clauses.push(FilterClause {
+        ands.push(FilterClause {
             filter_type: "color_label".into(),
             logic: FilterLogic::And,
             value: serde_json::json!({ "colorLabels": colors }),
@@ -312,7 +303,7 @@ pub fn clauses_from_legacy_flat(
         }
     }
     for cam in cams {
-        clauses.push(FilterClause {
+        ors.push(FilterClause {
             filter_type: "camera".into(),
             logic: FilterLogic::Or,
             value: serde_json::json!({ "camera": cam }),
@@ -333,7 +324,7 @@ pub fn clauses_from_legacy_flat(
         }
     }
     for item in lens_list {
-        clauses.push(FilterClause {
+        ors.push(FilterClause {
             filter_type: "lens".into(),
             logic: FilterLogic::Or,
             value: serde_json::json!({ "lens": item }),
@@ -354,7 +345,7 @@ pub fn clauses_from_legacy_flat(
         }
     }
     for item in fmt_list {
-        clauses.push(FilterClause {
+        ors.push(FilterClause {
             filter_type: "format".into(),
             logic: FilterLogic::Or,
             value: serde_json::json!({ "format": item }),
@@ -364,7 +355,7 @@ pub fn clauses_from_legacy_flat(
 
     let tags = tags.unwrap_or("").trim();
     if !tags.is_empty() {
-        clauses.push(FilterClause {
+        ands.push(FilterClause {
             filter_type: "tags".into(),
             logic: FilterLogic::And,
             value: serde_json::json!({ "tags": tags }),
@@ -375,7 +366,7 @@ pub fn clauses_from_legacy_flat(
     let q = q.unwrap_or("").trim();
     if !q.is_empty() {
         // Legacy `q` was filename/path/tags substring — map to metadata_text kind.
-        clauses.push(FilterClause {
+        ands.push(FilterClause {
             filter_type: "metadata_text".into(),
             logic: FilterLogic::And,
             value: serde_json::json!({ "q": q }),
@@ -390,7 +381,7 @@ pub fn clauses_from_legacy_flat(
         .filter(|s| !s.is_empty())
         .collect();
     if !persons.is_empty() {
-        clauses.push(FilterClause {
+        ands.push(FilterClause {
             filter_type: "person".into(),
             logic: FilterLogic::And,
             value: serde_json::json!({ "personIds": persons }),
@@ -398,10 +389,11 @@ pub fn clauses_from_legacy_flat(
         });
     }
 
-    clauses
+    ors.extend(ands);
+    ors
 }
 
-// ── Filter kindsuse std::sync::Arc;
+// ── Filter kinds ─────────────────────────────────────────────────────────────
 
 fn empty_ok() -> Result<Option<Arc<dyn PhotoPredicate>>, AppError> {
     Ok(None)
@@ -591,11 +583,7 @@ impl FilterKind for TagsKind {
 
 impl PhotoPredicate for TagsPred {
     fn matches(&self, photo: &dyn FilterablePhoto, _ctx: &FilterEvalCtx) -> bool {
-        let photo_tags: Vec<String> = photo
-            .tag_list()
-            .iter()
-            .map(|t| t.to_lowercase())
-            .collect();
+        let photo_tags: Vec<String> = photo.tag_list().iter().map(|t| t.to_lowercase()).collect();
         self.tags.iter().all(|t| photo_tags.iter().any(|p| p == t))
     }
 }
@@ -782,4 +770,171 @@ pub static FILTER_REGISTRY: &[fn() -> Arc<dyn FilterKind>] = &[
 // Re-export as constructed arcs for FilterRegistry::new
 pub fn all_kinds() -> Vec<Arc<dyn FilterKind>> {
     FILTER_REGISTRY.iter().map(|f| f()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyPhoto;
+
+    impl FilterablePhoto for DummyPhoto {
+        fn path(&self) -> &str {
+            ""
+        }
+        fn name(&self) -> &str {
+            ""
+        }
+        fn date(&self) -> &str {
+            ""
+        }
+        fn rating(&self) -> u8 {
+            0
+        }
+        fn color_label_keys(&self) -> Vec<String> {
+            vec![]
+        }
+        fn camera_label(&self) -> String {
+            String::new()
+        }
+        fn lens(&self) -> &str {
+            ""
+        }
+        fn tag_list(&self) -> &[String] {
+            static EMPTY: &[String] = &[];
+            EMPTY
+        }
+        fn file_ext_lower(&self) -> String {
+            String::new()
+        }
+    }
+
+    struct FlagPred(bool);
+
+    impl PhotoPredicate for FlagPred {
+        fn matches(&self, _: &dyn FilterablePhoto, _: &FilterEvalCtx) -> bool {
+            self.0
+        }
+    }
+
+    fn pred(logic: FilterLogic, flag: bool) -> CompiledClause {
+        CompiledClause::Pred {
+            logic,
+            pred: Arc::new(FlagPred(flag)),
+        }
+    }
+
+    fn eval(clauses: &[CompiledClause]) -> bool {
+        matches_compiled(&DummyPhoto, clauses, &FilterEvalCtx::default())
+    }
+
+    #[test]
+    fn empty_chain_matches() {
+        assert!(eval(&[]));
+    }
+
+    #[test]
+    fn first_and_or_are_the_predicate() {
+        assert!(eval(&[pred(FilterLogic::And, true)]));
+        assert!(!eval(&[pred(FilterLogic::And, false)]));
+        assert!(eval(&[pred(FilterLogic::Or, true)]));
+        assert!(!eval(&[pred(FilterLogic::Or, false)]));
+    }
+
+    #[test]
+    fn first_and_not_negates() {
+        assert!(!eval(&[pred(FilterLogic::AndNot, true)]));
+        assert!(eval(&[pred(FilterLogic::AndNot, false)]));
+    }
+
+    #[test]
+    fn and_then_or_is_left_associative() {
+        // (T ∧ F) ∨ T = T  (old buckets: T ∧ F ∧ T = F)
+        assert!(eval(&[
+            pred(FilterLogic::And, true),
+            pred(FilterLogic::And, false),
+            pred(FilterLogic::Or, true),
+        ]));
+        // (T ∧ F) ∨ F = F
+        assert!(!eval(&[
+            pred(FilterLogic::And, true),
+            pred(FilterLogic::And, false),
+            pred(FilterLogic::Or, false),
+        ]));
+    }
+
+    #[test]
+    fn or_then_and_distributes() {
+        // (T ∨ F) ∧ F = F
+        assert!(!eval(&[
+            pred(FilterLogic::And, true),
+            pred(FilterLogic::Or, false),
+            pred(FilterLogic::And, false),
+        ]));
+        // (F ∨ T) ∧ T = T
+        assert!(eval(&[
+            pred(FilterLogic::And, false),
+            pred(FilterLogic::Or, true),
+            pred(FilterLogic::And, true),
+        ]));
+    }
+
+    #[test]
+    fn and_not_in_chain() {
+        assert!(eval(&[
+            pred(FilterLogic::And, true),
+            pred(FilterLogic::AndNot, false),
+        ]));
+        assert!(!eval(&[
+            pred(FilterLogic::And, true),
+            pred(FilterLogic::AndNot, true),
+        ]));
+    }
+
+    #[test]
+    fn skips_ai_text_in_the_chain() {
+        let clauses = vec![
+            pred(FilterLogic::And, true),
+            CompiledClause::AiText(AiTextEffect {
+                query: "x".into(),
+                min_score: 0.0,
+                logic: FilterLogic::And,
+            }),
+            pred(FilterLogic::Or, false),
+        ];
+        // T ∨ F (AI skipped)
+        assert!(eval(&clauses));
+    }
+
+    #[test]
+    fn legacy_flat_ors_then_ands() {
+        let clauses = clauses_from_legacy_flat(
+            Some("2020-01-01"),
+            None,
+            Some("beach"),
+            None,
+            None,
+            Some("CamA,CamB"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let kinds: Vec<_> = clauses
+            .iter()
+            .map(|c| (c.filter_type.as_str(), c.logic))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("camera", FilterLogic::Or),
+                ("camera", FilterLogic::Or),
+                ("date_range", FilterLogic::And),
+                ("tags", FilterLogic::And),
+            ]
+        );
+    }
 }

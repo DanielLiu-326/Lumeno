@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use super::album_cache::{AlbumAiCache, EmbeddingCacheFile};
+use super::album_cache::AlbumAiCache;
 
 pub const EMBEDDING_SNAPSHOT_VERSION: u32 = 1;
 
@@ -118,7 +118,11 @@ impl AlbumAiCache {
         snapshot_write_tmp(&index_tmp, &index_bytes).await?;
         snapshot_write_tmp(&vectors_tmp, &vector_bytes).await?;
         snapshot_commit_tmp(&index_tmp, self.embedding_snapshot_index_path().as_path()).await?;
-        snapshot_commit_tmp(&vectors_tmp, self.embedding_snapshot_vectors_path().as_path()).await?;
+        snapshot_commit_tmp(
+            &vectors_tmp,
+            self.embedding_snapshot_vectors_path().as_path(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -156,9 +160,7 @@ impl AlbumAiCache {
 
         let mut items = Vec::with_capacity(index.entries.len());
         for (entry_index, entry) in index.entries.into_iter().enumerate() {
-            let start = entry_index
-                .checked_mul(index.dimension)?
-                .checked_mul(4)?;
+            let start = entry_index.checked_mul(index.dimension)?.checked_mul(4)?;
             let end = start.checked_add(index.dimension.checked_mul(4)?)?;
             let chunk = bytes.get(start..end)?;
             let vector = decode_f32_le(chunk, index.dimension).ok()?;

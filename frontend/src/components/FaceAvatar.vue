@@ -36,6 +36,17 @@ const cropSubject = computed(() => {
   return null;
 });
 
+const cropIdentity = computed(() => {
+  const url = personFaceCropUrl(cropSubject.value, props.album);
+  if (url) return url;
+  return [
+    props.album,
+    props.faceId,
+    props.source,
+    Array.isArray(props.faceBox) ? props.faceBox.join(",") : "",
+  ].join("\0");
+});
+
 const baseSrc = computed(() => {
   if (!visible.value || !cropSubject.value) return "";
   return personFaceCropUrl(cropSubject.value, props.album);
@@ -82,14 +93,12 @@ function resetLoadState() {
 }
 
 onMounted(observe);
-watch(
-  () => [props.album, props.faceId, props.source, props.faceBox?.join(","), props.cover],
-  () => {
-    visible.value = !props.lazy;
-    resetLoadState();
-    observe();
-  },
-);
+watch(cropIdentity, (next, prev) => {
+  if (next === prev) return;
+  visible.value = !props.lazy;
+  resetLoadState();
+  observe();
+});
 onBeforeUnmount(() => {
   observer?.disconnect();
   observer = null;

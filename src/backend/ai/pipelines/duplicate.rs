@@ -11,7 +11,7 @@ use super::super::album_cache::DEFAULT_NEAR_DUPLICATE_DISTANCE;
 use super::super::duplicate::publish_duplicates_index_async;
 use super::super::models::{AiIndexedAlbumSummary, AiIndexedPhotoRecord};
 
-pub(crate) async fn run_duplicate_pipeline(
+pub(crate) async fn run(
     ai_root: &Path,
     owner: &str,
     indexed_albums: &[AiIndexedAlbumSummary],
@@ -67,7 +67,7 @@ pub(crate) async fn run_duplicate_pipeline(
         .await
         {
             eprintln!("duplicates index publish failed for {cache_id}: {error}");
-            return Err(());
+            continue;
         }
     }
     Ok(())

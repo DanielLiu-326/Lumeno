@@ -1,8 +1,13 @@
 <script setup>
 import { IconClose } from "../utils/icons";
 import { t } from "../i18n/index.js";
+import AppDialog from "./AppDialog.vue";
 
 defineProps({
+  show: {
+    type: Boolean,
+    default: true,
+  },
   isDark: {
     type: Boolean,
     default: false,
@@ -13,14 +18,10 @@ const emit = defineEmits(["choose", "cancel"]);
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      class="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 backdrop-blur-sm"
-      @click.self="emit('cancel')"
-    >
+  <AppDialog :show="show" :z-index="120" @close="emit('cancel')">
       <div
-        class="w-full max-w-sm rounded-[2rem] border p-6 shadow-2xl"
-        :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-white/70 bg-white text-stone-900'"
+        class="app-dialog-panel app-dialog-panel-dense w-full max-w-sm rounded-[2rem] border p-6"
+        :class="isDark ? 'text-stone-100' : 'text-stone-900'"
       >
         <!-- Header -->
         <div class="mb-4 flex items-center justify-between">
@@ -79,6 +80,5 @@ const emit = defineEmits(["choose", "cancel"]);
           </button>
         </div>
       </div>
-    </div>
-  </Teleport>
+  </AppDialog>
 </template>

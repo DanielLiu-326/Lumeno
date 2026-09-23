@@ -69,6 +69,26 @@ fn parse_content_signature(signature: &str) -> (u64, Option<u64>) {
     (size, modified)
 }
 
+fn io_error_with_path(context: &str, path: &Path, error: std::io::Error) -> String {
+    let hint = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            " — {} is not writable (fix: chown/chmod the data cache tree, e.g. chown -R \"$(whoami)\" …/dist/data/cache)",
+            path.display()
+        )
+    } else {
+        String::new()
+    };
+    format!("{context} {}: {error}{hint}", path.display())
+}
+
+fn ensure_dir_writable(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|error| io_error_with_path("create dir", path, error))?;
+    let probe = path.join(".write_probe");
+    std::fs::write(&probe, b"").map_err(|error| io_error_with_path("write probe", path, error))?;
+    let _ = std::fs::remove_file(probe);
+    Ok(())
+}
+
 pub struct FileAiIndexStore {
     /// `dist/data/cache/ai/` — album embeddings under `{root}/{owner}/albums/{cache_id}/`.
     root: PathBuf,
@@ -76,8 +96,23 @@ pub struct FileAiIndexStore {
 
 impl FileAiIndexStore {
     pub fn new(root: PathBuf) -> Self {
-        let _ = std::fs::create_dir_all(&root);
+        if let Err(error) = ensure_dir_writable(&root) {
+            eprintln!(
+                "warning: AI index cache not writable at {}: {error}",
+                root.display()
+            );
+        }
         Self { root }
+    }
+
+    pub fn check_writable(&self) -> Result<(), String> {
+        ensure_dir_writable(&self.root)
+    }
+
+    fn ensure_album_layout(&self, owner: &str, cache_id: &str) -> Result<PathBuf, String> {
+        let album_root = self.album_dir(owner, cache_id);
+        ensure_dir_writable(&album_root)?;
+        Ok(album_root)
     }
 
     pub fn root(&self) -> &Path {
@@ -228,8 +263,7 @@ impl FileAiIndexStore {
             .await
         {
             Some(Self::build_embedding_maps_from_snapshot(
-                cache_id,
-                &snapshot,
+                cache_id, &snapshot,
             ))
         } else {
             let emb_files = cache.list_embeddings_async().await.ok()?;
@@ -245,11 +279,7 @@ impl FileAiIndexStore {
             return None;
         }
         Some(Self::assemble_loaded_index(
-            cache_id,
-            generation,
-            photos,
-            embeddings,
-            face_files,
+            cache_id, generation, photos, embeddings, face_files,
         ))
         .filter(|loaded| !loaded.photos.is_empty())
     }
@@ -315,7 +345,10 @@ impl FileAiIndexStore {
     fn build_embedding_maps_from_json(
         cache_id: &str,
         emb_files: Vec<(String, super::album_cache::EmbeddingCacheFile)>,
-    ) -> (HashMap<String, AiIndexedPhotoRecord>, HashMap<String, Vec<f32>>) {
+    ) -> (
+        HashMap<String, AiIndexedPhotoRecord>,
+        HashMap<String, Vec<f32>>,
+    ) {
         let mut photos = HashMap::new();
         let mut embeddings = HashMap::new();
         for (_key, file) in emb_files {
@@ -343,7 +376,10 @@ impl FileAiIndexStore {
     fn build_embedding_maps_from_snapshot(
         cache_id: &str,
         snapshot: &super::embedding_snapshot::EmbeddingSnapshotLoaded,
-    ) -> (HashMap<String, AiIndexedPhotoRecord>, HashMap<String, Vec<f32>>) {
+    ) -> (
+        HashMap<String, AiIndexedPhotoRecord>,
+        HashMap<String, Vec<f32>>,
+    ) {
         let mut photos = HashMap::new();
         let mut embeddings = HashMap::new();
         for (entry, vector) in &snapshot.items {
@@ -540,10 +576,11 @@ impl FileAiIndexStore {
         if cache_id.is_empty() {
             return Err("album cache_id is required for ai generation".to_string());
         }
-        let album_root = self.album_dir(owner, cache_id);
+        let album_root = self.ensure_album_layout(owner, cache_id)?;
         let generations_root = album_root.join("generations");
-        std::fs::create_dir_all(&generations_root)
-            .map_err(|error| format!("create ai generations root: {error}"))?;
+        std::fs::create_dir_all(&generations_root).map_err(|error| {
+            io_error_with_path("create ai generations root", &generations_root, error)
+        })?;
 
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -551,8 +588,9 @@ impl FileAiIndexStore {
             .as_millis();
         let generation_id = format!("gen-{timestamp_ms}-{}", Uuid::new_v4().simple());
         let generation_dir = generations_root.join(&generation_id);
-        std::fs::create_dir_all(&generation_dir)
-            .map_err(|error| format!("create ai generation dir: {error}"))?;
+        std::fs::create_dir_all(&generation_dir).map_err(|error| {
+            io_error_with_path("create ai generation dir", &generation_dir, error)
+        })?;
 
         let photos_reused = indexed_photos
             .iter()

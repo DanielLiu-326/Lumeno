@@ -1,11 +1,19 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { formatSize, formatTime, progressPercent, statusLabel, statusTone } from "../utils/format";
 import { locale, setLocale, t } from "../i18n/index.js";
-import { compareRelativePaths, encodePath, joinPath, prettyPath } from "../utils/path";
-import { partitionFilterClauses } from "../utils/filterDefs.js";
+import { compareRelativePaths, encodePath, joinPath, prettyPath, normalizeBrowsePath } from "../utils/path";
+import { compileAlbumFilterClauses, loadFilterItemsFromStorage, partitionFilterClauses } from "../utils/filterDefs.js";
+import { defaultWallpaper, normalizeWallpaper } from "../utils/wallpaper.js";
+import { defaultAccent, loadCachedAccent, normalizeAccent } from "../utils/accent.js";
 
 const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 100;
+
+function clampPageSize(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return DEFAULT_PAGE_SIZE;
+    return Math.min(500, Math.max(10, Math.round(n)));
+}
 
 export function useAlbumApp() {
     const loginForm = reactive({
@@ -34,6 +42,8 @@ export function useAlbumApp() {
     });
 
     const currentPath = ref("");
+    const pathHistory = ref([""]);
+    const pathHistoryIndex = ref(0);
     const entries = ref([]);
     const entryOffset = ref(0);
     const entryTotal = ref(0);
@@ -50,11 +60,16 @@ export function useAlbumApp() {
     const albumPhotos = ref([]);
     const albumPhotoOffset = ref(0);
     const albumPhotoTotal = ref(0);
+    let albumPhotosFillQueued = false;
     const albumDuplicateGroups = ref([]);
     const albumDuplicateTotal = ref(0);
     const aiSimilarResults = ref([]);
     const aiSimilarQuery = ref(null);
     const aiSimilarLoading = ref(false);
+    const mobileSearchPhotos = ref([]);
+    const mobileSearchLoading = ref(false);
+    const mobileSearchText = ref("");
+    let mobileSearchFetchId = 0;
     const albumAvailableTags = ref([]);
     const albumAvailableCameras = ref([]);
     const albumAvailableLenses = ref([]);
@@ -63,6 +78,7 @@ export function useAlbumApp() {
         /** Logical filter clauses sent to POST /api/albums/photos */
         clauses: [],
     });
+    let albumPhotosFetchId = 0;
     const albumSort = ref([]);
     const dateHistogram = ref([]);
     const lastSelectedIndex = ref(null);
@@ -75,6 +91,8 @@ export function useAlbumApp() {
     const userRole = ref("");
     const userLocale = ref(locale.value);
     const userAvatar = ref(null);
+    const userWallpaper = ref(defaultWallpaper());
+    const userAccent = ref(loadCachedAccent());
     const members = ref([]);
     const settings = ref({});
     const aiStatus = ref(null);
@@ -83,6 +101,7 @@ export function useAlbumApp() {
     const dashboardLoading = ref(false);
     const dashboardError = ref("");
     const isAdmin = computed(() => userRole.value === "admin");
+    const photosPerPage = computed(() => clampPageSize(settings.value.photos_per_page));
 
     // ── Conflict modal ─────────────────────────────────────────────────────
     const conflictModalVisible = ref(false);
@@ -135,6 +154,8 @@ export function useAlbumApp() {
     );
 
     const canGoUp = computed(() => Boolean(currentPath.value));
+    const canGoBack = computed(() => pathHistoryIndex.value > 0);
+    const canGoForward = computed(() => pathHistoryIndex.value < pathHistory.value.length - 1);
     const allSelected = computed(
         () => entries.value.length > 0 && entries.value.every((entry) => isSelected(entry.fullPath))
     );
@@ -183,17 +204,22 @@ export function useAlbumApp() {
         return response;
     }
 
+    let dashboardSeq = 0;
+
     async function refreshDashboard() {
-        if (!loggedIn.value || dashboardLoading.value) return;
+        if (!loggedIn.value) return;
+        const seq = ++dashboardSeq;
         dashboardLoading.value = true;
         dashboardError.value = "";
         try {
-            const payload = await apiFetch("/api/dashboard");
+            const payload = await apiFetch("/api/dashboard", { cache: "no-store" });
+            if (seq !== dashboardSeq) return;
             dashboard.value = payload.data || null;
         } catch (error) {
+            if (seq !== dashboardSeq) return;
             dashboardError.value = error.message || t("dashboard.loadError");
         } finally {
-            dashboardLoading.value = false;
+            if (seq === dashboardSeq) dashboardLoading.value = false;
         }
     }
 
@@ -224,6 +250,8 @@ export function useAlbumApp() {
                 userRole.value = whoami.data?.role || "user";
                 userLocale.value = whoami.data?.locale || locale.value;
                 userAvatar.value = whoami.data?.avatar || null;
+                userWallpaper.value = normalizeWallpaper(whoami.data?.wallpaper);
+                userAccent.value = normalizeAccent(whoami.data?.accent);
                 setLocale(userLocale.value);
             } catch { userRole.value = "user"; }
             await refreshList();
@@ -297,7 +325,7 @@ export function useAlbumApp() {
             const url = path ? `/api/list_files/${path}` : "/api/list_files/";
             const params = new URLSearchParams();
             params.set("offset", entryOffset.value.toString());
-            params.set("limit", DEFAULT_PAGE_SIZE.toString());
+            params.set("limit", photosPerPage.value.toString());
             const fullUrl = `${url}?${params.toString()}`;
             const payload = await apiFetch(fullUrl);
             const data = payload.data || { dirs: [], files: [], items: [], total_count: 0 };
@@ -335,8 +363,36 @@ export function useAlbumApp() {
         }
     }
 
-    function navigateTo(path) {
-        currentPath.value = path;
+    function resetPathHistory(path = "") {
+        pathHistory.value = [path];
+        pathHistoryIndex.value = 0;
+    }
+
+    function navigateTo(path, options = {}) {
+        const next = normalizeBrowsePath(path);
+        const record = options.record !== false;
+        if (next === currentPath.value) return;
+        if (record) {
+            const kept = pathHistory.value.slice(0, pathHistoryIndex.value + 1);
+            if (kept[kept.length - 1] !== next) kept.push(next);
+            pathHistory.value = kept;
+            pathHistoryIndex.value = kept.length - 1;
+        }
+        currentPath.value = next;
+        refreshList();
+    }
+
+    function goBack() {
+        if (!canGoBack.value) return;
+        pathHistoryIndex.value -= 1;
+        currentPath.value = pathHistory.value[pathHistoryIndex.value] || "";
+        refreshList();
+    }
+
+    function goForward() {
+        if (!canGoForward.value) return;
+        pathHistoryIndex.value += 1;
+        currentPath.value = pathHistory.value[pathHistoryIndex.value] || "";
         refreshList();
     }
 
@@ -912,12 +968,12 @@ export function useAlbumApp() {
         return false;
     }
 
-    async function fetchAlbumPhotosPage({ offset = 0, limit = DEFAULT_PAGE_SIZE, filters = null, paths = null } = {}) {
+    async function fetchAlbumPhotosPage({ offset = 0, limit, filters = null, paths = null } = {}) {
         const body = {
             album: currentAlbum.value,
             filters: filters ?? albumFilters.clauses ?? [],
             offset,
-            limit,
+            limit: limit == null ? photosPerPage.value : limit,
         };
         if (Array.isArray(paths) && paths.length > 0) {
             body.paths = paths;
@@ -957,32 +1013,44 @@ export function useAlbumApp() {
         return (results || []).map((item) => ({
             ...item,
             name: item.name || String(item.path || "").split("/").pop() || item.path,
-            datetime: item.date || "",
+            datetime: item.datetime || item.date || "",
             tags: item.tags || [],
             rating: item.rating || 0,
             color_label: item.color_label || [],
         }));
     }
 
+    function restoreAlbumFilters(album) {
+        if (!album) {
+            albumFilters.clauses = [];
+            return;
+        }
+        const savedFilterItems = loadFilterItemsFromStorage(currentUser.value, album);
+        albumFilters.clauses = compileAlbumFilterClauses(savedFilterItems);
+    }
+
     async function refreshAlbumPhotos() {
+        const fetchId = ++albumPhotosFetchId;
         albumPhotoOffset.value = 0;
         albumPhotos.value = [];
         albumPhotoTotal.value = 0;
 
-        const { aiText, metadata } = partitionFilterClauses(albumFilters.clauses);
+        const clauses = [...(albumFilters.clauses || [])];
+        const { aiText, metadata } = partitionFilterClauses(clauses);
         if (aiText.length > 0) {
             const primary = aiText[0];
             await applyAiTextFilterToPhotos(
                 String(primary.value?.q || "").trim(),
                 Number(primary.value?.minScore) || 0,
                 metadata,
+                fetchId,
             );
             return;
         }
-        await loadMoreAlbumPhotos();
+        await loadMoreAlbumPhotos({ fetchId, filters: clauses });
     }
 
-    async function applyAiTextFilterToPhotos(text, minScore = 0, metadataFilters = null) {
+    async function applyAiTextFilterToPhotos(text, minScore = 0, metadataFilters = null, fetchId = albumPhotosFetchId) {
         if (!loggedIn.value || !currentAlbum.value || !text) return;
         busy.albums = true;
         aiSimilarLoading.value = true;
@@ -997,9 +1065,11 @@ export function useAlbumApp() {
             } catch {
                 paths = null;
             }
+            if (fetchId !== albumPhotosFetchId) return;
             if (Array.isArray(paths) && paths.length === 0) {
                 albumPhotos.value = [];
                 albumPhotoTotal.value = 0;
+                albumPhotoOffset.value = 0;
                 return;
             }
             const body = {
@@ -1015,6 +1085,7 @@ export function useAlbumApp() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
             });
+            if (fetchId !== albumPhotosFetchId) return;
             const results = mapAiSearchResults(payload.data?.results || []);
             albumPhotos.value = results;
             albumPhotoTotal.value = results.length;
@@ -1025,8 +1096,10 @@ export function useAlbumApp() {
             albumPhotoTotal.value = 0;
             setMessage(error.message, "error");
         } finally {
-            busy.albums = false;
-            aiSimilarLoading.value = false;
+            if (fetchId === albumPhotosFetchId) {
+                busy.albums = false;
+                aiSimilarLoading.value = false;
+            }
         }
     }
 
@@ -1131,12 +1204,68 @@ export function useAlbumApp() {
         const text = String(options.text || "").trim();
         // Album AI tools always search within the current album only.
         const searchScope = "current_album";
-        const limit = Math.max(1, Math.min(200, Number(options.limit) || 60));
+        const rawLimit = Number(options.limit);
+        const asPage = Boolean(options.page);
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : (asPage ? 10000 : 60);
         const minScore = options.minScore ?? options.min_score;
         const inModal = Boolean(options.inModal);
 
         if (!loggedIn.value || !currentAlbum.value || !text) {
+            if (asPage) mobileSearchPhotos.value = [];
             return inModal ? { results: [], query: { text } } : undefined;
+        }
+
+        if (asPage) {
+            const fetchId = ++mobileSearchFetchId;
+            mobileSearchText.value = text;
+            mobileSearchPhotos.value = [];
+            mobileSearchLoading.value = true;
+            try {
+                let paths = null;
+                if (Array.isArray(options.filters)) {
+                    if (options.filters.length > 0) {
+                        const data = await fetchAlbumPhotosPage({ offset: 0, limit: 0, filters: options.filters });
+                        paths = (data.photos || []).map((photo) => photo.path).filter(Boolean);
+                        if (paths.length === 0) {
+                            if (fetchId === mobileSearchFetchId) mobileSearchPhotos.value = [];
+                            return;
+                        }
+                    }
+                } else {
+                    try {
+                        paths = await fetchFilteredPhotoPaths();
+                    } catch {
+                        paths = null;
+                    }
+                }
+                if (fetchId !== mobileSearchFetchId) return;
+                const body = {
+                    text,
+                    album: currentAlbum.value,
+                    scope: searchScope,
+                    limit,
+                };
+                if (minScore !== undefined && minScore !== null && minScore !== "") {
+                    body.min_score = Number(minScore);
+                }
+                if (Array.isArray(paths)) body.paths = paths;
+                const payload = await apiFetch("/api/ai/search/text", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                if (fetchId !== mobileSearchFetchId) return;
+                if (fetchId !== mobileSearchFetchId) return;
+                mobileSearchPhotos.value = mapAiSearchResults(payload.data?.results || []);
+            } catch (error) {
+                if (fetchId === mobileSearchFetchId) {
+                    mobileSearchPhotos.value = [];
+                    setMessage(error.message, "error");
+                }
+            } finally {
+                if (fetchId === mobileSearchFetchId) mobileSearchLoading.value = false;
+            }
+            return;
         }
 
         if (!inModal) {
@@ -1204,6 +1333,13 @@ export function useAlbumApp() {
         }
     }
 
+    function clearMobileSearch() {
+        mobileSearchFetchId += 1;
+        mobileSearchText.value = "";
+        mobileSearchPhotos.value = [];
+        mobileSearchLoading.value = false;
+    }
+
     /** Load duplicates for the AI tools modal without leaving the photos view. */
     async function loadAlbumDuplicatesForModal() {
         if (!loggedIn.value || !currentAlbum.value) {
@@ -1223,8 +1359,9 @@ export function useAlbumApp() {
         };
     }
 
-    async function loadMoreAlbumPhotos() {
-        const { aiText } = partitionFilterClauses(albumFilters.clauses);
+    async function loadMoreAlbumPhotos({ fetchId = albumPhotosFetchId, filters = null } = {}) {
+        const clauses = filters ?? albumFilters.clauses;
+        const { aiText } = partitionFilterClauses(clauses);
         if (aiText.length > 0) {
             return;
         }
@@ -1235,16 +1372,22 @@ export function useAlbumApp() {
             }
             return;
         }
-        if (loadingMore.photos) return;
+        if (loadingMore.photos) {
+            albumPhotosFillQueued = true;
+            return;
+        }
         if (albumPhotoOffset.value > 0 && albumPhotoOffset.value >= albumPhotoTotal.value) return;
         const isInitial = albumPhotoOffset.value === 0;
         if (isInitial) busy.albums = true;
         loadingMore.photos = true;
+        albumPhotosFillQueued = false;
         try {
             const data = await fetchAlbumPhotosPage({
                 offset: albumPhotoOffset.value,
-                limit: DEFAULT_PAGE_SIZE,
+                limit: photosPerPage.value,
+                filters: clauses,
             });
+            if (fetchId !== albumPhotosFetchId) return;
             const newPhotos = data.photos || [];
             if (albumPhotoOffset.value === 0) {
                 albumPhotos.value = newPhotos;
@@ -1259,8 +1402,15 @@ export function useAlbumApp() {
             albumPhotoOffset.value += newPhotos.length;
         } catch { /* ignore transient fetch errors for photo loading */ }
         finally {
-            if (isInitial) busy.albums = false;
             loadingMore.photos = false;
+            const current = fetchId === albumPhotosFetchId;
+            if (isInitial && current) busy.albums = false;
+            if (!albumPhotosFillQueued) return;
+            albumPhotosFillQueued = false;
+            loadMoreAlbumPhotos({
+                fetchId: albumPhotosFetchId,
+                filters: current ? clauses : null,
+            });
         }
     }
 
@@ -1291,12 +1441,15 @@ export function useAlbumApp() {
             dateHistogram.value = [];
             return;
         }
+        const albumName = currentAlbum.value;
         try {
             const params = new URLSearchParams();
-            params.set("album", currentAlbum.value);
+            params.set("album", albumName);
             const payload = await apiFetch(`/api/albums/date_histogram?${params.toString()}`);
+            if (currentAlbum.value !== albumName) return;
             dateHistogram.value = payload.data?.buckets || [];
         } catch {
+            if (currentAlbum.value !== albumName) return;
             dateHistogram.value = [];
         }
     }
@@ -1306,12 +1459,15 @@ export function useAlbumApp() {
             collections.value = [];
             return;
         }
+        const albumName = currentAlbum.value;
         try {
             const params = new URLSearchParams();
-            params.set("album", currentAlbum.value);
+            params.set("album", albumName);
             const payload = await apiFetch(`/api/albums/collections?${params.toString()}`);
+            if (currentAlbum.value !== albumName) return;
             collections.value = payload.data?.collections || [];
         } catch {
+            if (currentAlbum.value !== albumName) return;
             collections.value = [];
         }
     }
@@ -1321,25 +1477,60 @@ export function useAlbumApp() {
         // Filter compilation and refresh are handled by FilterSidebar
     }
 
-    async function selectAlbum(dirName) {
+    function albumDirName(input) {
+        if (input == null || input === "") return "";
+        if (typeof input === "string") return input;
+        return String(input.dirName || input.dir_name || input.album || "");
+    }
+
+    async function selectAlbum(input) {
+        const dirName = albumDirName(input);
+        const deferMs = typeof input === "object" && input && Number.isFinite(Number(input.deferMs))
+            ? Math.max(0, Number(input.deferMs))
+            : 0;
+
         currentAlbum.value = dirName;
         albumViewMode.value = "photos";
         albumDuplicateGroups.value = [];
         albumDuplicateTotal.value = 0;
         aiSimilarResults.value = [];
         aiSimilarQuery.value = null;
+        aiSimilarLoading.value = false;
         selectedCollectionId.value = "all";
-        // Reset filters when switching albums
-        albumFilters.clauses = [];
-        // Wait for FilterSidebar's watcher to compile saved filters into albumFilters
-        // before triggering the photo refresh.
-        await nextTick();
-        await Promise.all([
-            refreshAlbumPhotos(),
-            fetchDateHistogram(),
-            fetchCollections(),
-            refreshPeopleForAlbum(dirName),
-        ]);
+        restoreAlbumFilters(dirName);
+        albumPhotos.value = [];
+        albumPhotoTotal.value = 0;
+        albumPhotoOffset.value = 0;
+
+        if (!dirName) {
+            albumPhotosFetchId += 1;
+            albumPhotosFillQueued = false;
+            busy.albums = false;
+            dateHistogram.value = [];
+            collections.value = [];
+            return;
+        }
+
+        const openId = ++albumPhotosFetchId;
+        albumPhotosFillQueued = false;
+        busy.albums = true;
+        try {
+            // Let FilterSidebar hydrate against this album (no photo request yet).
+            await nextTick();
+            if (deferMs > 0) {
+                await new Promise((resolve) => setTimeout(resolve, deferMs));
+            }
+            if (openId !== albumPhotosFetchId || currentAlbum.value !== dirName) return;
+
+            void fetchDateHistogram();
+            void fetchCollections();
+            void refreshPeopleForAlbum(dirName);
+            await refreshAlbumPhotos();
+        } finally {
+            if (currentAlbum.value === dirName && !loadingMore.photos) {
+                busy.albums = false;
+            }
+        }
     }
 
     async function importLocalToAlbum(files) {
@@ -1483,12 +1674,15 @@ export function useAlbumApp() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
             });
-            // Update the photo in-place without full reload
-            const photo = albumPhotos.value.find((p) => p.path === path);
-            if (photo && payload.data) {
-                if (payload.data.tags !== undefined) photo.tags = payload.data.tags;
-                if (payload.data.rating !== undefined) photo.rating = payload.data.rating;
-                if (payload.data.color_label !== undefined) photo.color_label = payload.data.color_label;
+            const data = payload.data;
+            if (data) {
+                for (const list of [albumPhotos.value, aiSimilarResults.value, mobileSearchPhotos.value]) {
+                    const photo = list.find((item) => item.path === path);
+                    if (!photo) continue;
+                    if (data.tags !== undefined) photo.tags = data.tags;
+                    if (data.rating !== undefined) photo.rating = data.rating;
+                    if (data.color_label !== undefined) photo.color_label = data.color_label;
+                }
             }
             setMessage(t("msg.metadataUpdated"));
         } catch (error) {
@@ -1499,12 +1693,13 @@ export function useAlbumApp() {
     async function rebuildAlbumIndex() {
         if (!currentAlbum.value) return;
         try {
-            await apiFetch("/api/albums/rebuild_index", {
+            const payload = await apiFetch("/api/albums/rebuild_index", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ album: currentAlbum.value }),
             });
-            setMessage(t("msg.rebuildIndexTaskCreated"));
+            const created = payload.data?.created !== false;
+            setMessage(created ? t("msg.rebuildIndexTaskCreated") : t("msg.rebuildIndexTaskAlreadyRunning"));
             await refreshTasks();
             ensureTaskPolling();
         } catch (error) {
@@ -1597,6 +1792,8 @@ export function useAlbumApp() {
         try {
             const payload = await apiFetch("/api/preferences");
             userLocale.value = payload.data?.locale || locale.value;
+            userWallpaper.value = normalizeWallpaper(payload.data?.wallpaper);
+            userAccent.value = normalizeAccent(payload.data?.accent);
             setLocale(userLocale.value);
         } catch {
             userLocale.value = locale.value;
@@ -1711,19 +1908,21 @@ export function useAlbumApp() {
         if (!silent) albumPeopleLoading.value = true;
         try {
             const payload = await apiFetch(`/api/ai/albums/${encodeURIComponent(albumName)}/faces`);
+            if (currentAlbum.value !== albumName) return;
             const data = payload.data || {};
             albumPeople.value = data.people || [];
             albumFaceSuggestions.value = data.suggestions || { clusters: [], noise_face_ids: [] };
             albumFacesEditable.value = data.editable !== false;
             albumFacesOwner.value = data.owner || currentUser.value || "";
         } catch (error) {
+            if (currentAlbum.value !== albumName) return;
             albumPeople.value = [];
             albumFaceSuggestions.value = { clusters: [], noise_face_ids: [] };
             albumFaceHints.value = {};
             albumFacesOwner.value = "";
             setMessage(error.message, "error");
         } finally {
-            if (!silent) albumPeopleLoading.value = false;
+            if (!silent && currentAlbum.value === albumName) albumPeopleLoading.value = false;
         }
         if (opts.awaitHints) {
             await refreshFaceHintsForAlbum(albumName);
@@ -1867,6 +2066,8 @@ export function useAlbumApp() {
                 body: JSON.stringify(updates),
             });
             userLocale.value = payload.data?.locale || locale.value;
+            userWallpaper.value = normalizeWallpaper(payload.data?.wallpaper);
+            userAccent.value = normalizeAccent(payload.data?.accent);
             setLocale(userLocale.value);
             setMessage(payload.message || t("msg.settingsSaved"));
         } catch (error) {
@@ -1903,6 +2104,38 @@ export function useAlbumApp() {
         } catch (error) {
             setMessage(error.message, "error");
             return false;
+        }
+    }
+
+    function previewWallpaper(next) {
+        const normalized = normalizeWallpaper(next);
+        if (JSON.stringify(userWallpaper.value) === JSON.stringify(normalized)) return;
+        userWallpaper.value = normalized;
+    }
+
+    function previewAccent(next) {
+        const normalized = normalizeAccent(next);
+        if (userAccent.value === normalized) return;
+        userAccent.value = normalized;
+    }
+
+    async function uploadWallpaper(file, slot = "source") {
+        try {
+            const formData = new FormData();
+            formData.append("wallpaper", file);
+            formData.append("slot", slot === "dark_source" ? "dark_source" : "source");
+            const payload = await apiFetch("/api/account/wallpaper", {
+                method: "POST",
+                body: formData,
+            });
+            if (payload.data?.wallpaper) {
+                userWallpaper.value = normalizeWallpaper(payload.data.wallpaper);
+            }
+            setMessage(payload.message || t("msg.settingsSaved"));
+            return payload.data?.file || null;
+        } catch (error) {
+            setMessage(error.message, "error");
+            return null;
         }
     }
 
@@ -1962,6 +2195,9 @@ export function useAlbumApp() {
         loggedIn.value = false;
         currentUser.value = "";
         userRole.value = "";
+        userAvatar.value = null;
+        userWallpaper.value = defaultWallpaper();
+        userAccent.value = defaultAccent();
         userLocale.value = navigator.language.startsWith("zh") ? "zh" : "en";
         setLocale(userLocale.value);
         members.value = [];
@@ -1986,6 +2222,7 @@ export function useAlbumApp() {
         selectedPaths.value = [];
         clipboard.value = [];
         currentPath.value = "";
+        resetPathHistory("");
         loginForm.passphrase = "";
         setMessage(t("msg.loggedOut"), "info");
     }
@@ -2021,6 +2258,8 @@ export function useAlbumApp() {
             userRole.value = payload.data?.role || "user";
             userLocale.value = payload.data?.locale || locale.value;
             userAvatar.value = payload.data?.avatar || null;
+            userWallpaper.value = normalizeWallpaper(payload.data?.wallpaper);
+            userAccent.value = normalizeAccent(payload.data?.accent);
             setLocale(userLocale.value);
             loggedIn.value = true;
         } catch {
@@ -2040,7 +2279,6 @@ export function useAlbumApp() {
         await refreshWebdavShares();
         await refreshDashboard();
         ensureTaskPolling();
-        setMessage(t("msg.sessionRestored"), "info");
     }
 
     function ensureTaskPolling() {
@@ -2075,7 +2313,6 @@ export function useAlbumApp() {
     }
 
     onMounted(() => {
-        setMessage(t("msg.pleaseLogin"), "info");
         resumeSession();
     });
 
@@ -2095,6 +2332,10 @@ export function useAlbumApp() {
         aiSimilarLoading,
         albumFilters,
         albumPhotos,
+        mobileSearchPhotos,
+        mobileSearchLoading,
+        mobileSearchText,
+        clearMobileSearch,
         albumPhotoOffset,
         albumPhotoTotal,
         albumSort,
@@ -2110,6 +2351,11 @@ export function useAlbumApp() {
         pauseTask,
         resumeTask,
         canGoUp,
+        canGoBack,
+        canGoForward,
+        goBack,
+        goForward,
+        goUp,
         clearFinishedTasks,
         clearSelection,
         clipboard,
@@ -2135,7 +2381,6 @@ export function useAlbumApp() {
         entryTotal,
         formatSize,
         formatTime,
-        goUp,
         importLocalToAlbum,
         importCloudToAlbum,
         importSelectedToAlbum,
@@ -2218,8 +2463,13 @@ export function useAlbumApp() {
         queueAiIndex,
         updateWebdavShare,
         uploadAvatar,
+        uploadWallpaper,
+        previewWallpaper,
+        previewAccent,
         uploadFiles,
         userAvatar,
+        userWallpaper,
+        userAccent,
         userRole,
         isAdmin,
         webdavShares,

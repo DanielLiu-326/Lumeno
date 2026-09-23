@@ -1,3 +1,4 @@
+pub mod accent;
 pub mod ai;
 pub mod album;
 pub mod auth;
@@ -7,3 +8,4 @@ pub mod files;
 pub mod i18n;
 pub mod settings;
 pub mod tasks;
+pub mod wallpaper;

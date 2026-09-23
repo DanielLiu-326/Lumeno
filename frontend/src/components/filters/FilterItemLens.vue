@@ -17,8 +17,8 @@ function set(lens) {
 <template>
   <select
     :value="modelValue.lens"
-    class="w-full rounded-lg border px-2 py-1.5 text-xs"
-    :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-300 bg-white text-stone-900'"
+    class="w-full rounded-lg border px-2 py-1.5 text-xs app-control"
+    :class="isDark ? 'text-stone-100' : 'text-stone-900'"
     @change="set($event.target.value)"
   >
     <option value="">{{ t("albums.all") }}</option>

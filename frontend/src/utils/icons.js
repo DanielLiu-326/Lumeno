@@ -50,8 +50,49 @@ export const IconChevronRight = icon([
   { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" },
 ]);
 
+export const IconChevronUp = icon([
+  { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z" },
+]);
+
+function iconStrokes(ds, viewBox = "0 0 24 24") {
+  return defineComponent({
+    inheritAttrs: false,
+    render() {
+      return h(
+        "svg",
+        {
+          xmlns: "http://www.w3.org/2000/svg",
+          viewBox,
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": "1.5",
+          ...this.$attrs,
+        },
+        ds.map((d) =>
+          h("path", { "stroke-linecap": "round", "stroke-linejoin": "round", d }),
+        ),
+      );
+    },
+  });
+}
+
 export const IconExpand = icon([
   { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M3 4a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 01-1.414 1.414L5 6.414V8a1 1 0 01-2 0V4zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0V6.414l-2.293 2.293a1 1 0 11-1.414-1.414L13.586 5H12zm-8 7a1 1 0 012 0v1.586l2.293-2.293a1 1 0 111.414 1.414L6.414 15H8a1 1 0 010 2H4a1 1 0 01-1-1v-4zm13 0a1 1 0 10-2 0v1.586l-2.293-2.293a1 1 0 00-1.414 1.414L13.586 15H12a1 1 0 100 2h4a1 1 0 001-1v-4z" },
+]);
+
+export const IconCollapse = iconStrokes([
+  "M9 4.5v4.5H4.5",
+  "M15 4.5v4.5h4.5",
+  "M9 19.5v-4.5H4.5",
+  "M15 19.5v-4.5h4.5",
+]);
+
+export const IconViewOriginal = iconStrokes([
+  "M8 8h8v8H8z",
+  "M4 8.5V4h4.5",
+  "M15.5 4H20v4.5",
+  "M4 15.5V20h4.5",
+  "M15.5 20H20v-4.5",
 ]);
 
 export const IconHome = icon([
@@ -116,6 +157,10 @@ export const IconList = icon([
   "M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 100 2h12a1 1 0 100-2H4z",
 ]);
 
+export const IconAlertCircle = icon([
+  { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M10 18a8 8 0 100-16 8 8 0 000 16zm-.75-4.25a.75.75 0 011.5 0v.01a.75.75 0 01-1.5 0v-.01zM10 6a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 6z" },
+]);
+
 export const IconGrid = icon([
   "M3 3h6v6H3V3zm8 0h6v6h-6V3zM3 11h6v6H3v-6zm8 0h6v6h-6v-6z",
 ]);
@@ -145,6 +190,14 @@ export const IconMenu = icon([
   "M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm1 4a1 1 0 100 2h12a1 1 0 100-2H4z",
 ]);
 
+export const IconDots = icon([
+  "M6 10a2 2 0 11-4 0 2 2 0 014 0zm6 0a2 2 0 11-4 0 2 2 0 014 0zm4 2a2 2 0 100-4 2 2 0 000 4z",
+]);
+
+export const IconUser = icon([
+  "M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z",
+]);
+
 export const IconUpload = icon([
   { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" },
 ]);
@@ -155,6 +208,11 @@ export const IconDownload = icon([
 
 export const IconTrash = icon([
   { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" },
+]);
+
+/** Eraser — clear finished tasks etc. */
+export const IconClear = icon([
+  "M15.293 2.293a1 1 0 011.414 0l1 1a1 1 0 010 1.414l-1.086 1.086-2.414-2.414 1.086-1.086zM13.793 4.793l2.414 2.414-8.5 8.5H5.293v-2.414l8.5-8.5zM4 17a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1z",
 ]);
 
 export const IconPencil = icon([
@@ -189,6 +247,54 @@ export const IconImage = icon([
 export const IconPlus = icon([
   { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" },
 ]);
+
+export const IconPlusHeavy = defineComponent({
+  inheritAttrs: false,
+  render() {
+    return h(
+      "svg",
+      {
+        xmlns: "http://www.w3.org/2000/svg",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "2.25",
+        "stroke-linecap": "round",
+        ...this.$attrs,
+      },
+      [h("path", { d: "M12 5v14M5 12h14" })],
+    );
+  },
+});
+
+export const IconBroom = defineComponent({
+  inheritAttrs: false,
+  render() {
+    return h(
+      "svg",
+      {
+        xmlns: "http://www.w3.org/2000/svg",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": "1.75",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        ...this.$attrs,
+      },
+      [
+        h("g", { transform: "rotate(-18 12 13)" }, [
+          h("path", { d: "M12 3.1v9.1" }),
+          h("path", { d: "M8.6 12.2h6.8" }),
+          h("path", { d: "M7.6 14.1h8.8l1.9 6.5H5.7z" }),
+          h("path", { d: "M9.6 14.1v6.5" }),
+          h("path", { d: "M12 14.1v6.5" }),
+          h("path", { d: "M14.4 14.1v6.5" }),
+        ]),
+      ],
+    );
+  },
+});
 
 // ── Clipboard ───────────────────────────────────────────
 export const IconClipboardCopy = icon([
@@ -241,6 +347,10 @@ export const IconCamera = iconStroke(
 
 export const IconSort = icon([
   "M3 3a1 1 0 000 2h11a1 1 0 100-2H3zm0 4a1 1 0 000 2h7a1 1 0 100-2H3zm0 4a1 1 0 100 2h4a1 1 0 100-2H3zm12-3a1 1 0 10-2 0v5.586l-1.293-1.293a1 1 0 00-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L15 13.586V8z",
+]);
+
+export const IconGripVertical = icon([
+  "M9 5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm0 7a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm0 7a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm9-14a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm0 7a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm0 7a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z",
 ]);
 
 // Import: arrow pointing right into a photo album frame

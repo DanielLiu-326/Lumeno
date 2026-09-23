@@ -9,9 +9,10 @@
 //   toWire(v)      — optional normalizer for the JSON value sent to the backend
 //
 // Logic (and / or / and_not) lives on each filter *item* and is sent to the
-// backend as-is. The server evaluates:
-//   (∀ AND) ∧ (OR为空 ∨ ∃ OR) ∧ (∀ AND_NOT 不成立)
-// across all filter types — no frontend flattening.
+// backend as-is. The server evaluates left-to-right:
+//   first clause is the seed (and_not negates it; and/or are the predicate);
+//   later clauses apply acc ∧ P, acc ∨ P, or acc ∧ ¬P.
+// Row order matters. AI text is still applied by the client as an intersection.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DATE_RANGE = {
@@ -114,8 +115,86 @@ PERSON.defaultEnabled = false;
 /** Ordered list of all filter definitions (drives the "Add filter" menu). */
 export const FILTER_REGISTRY = [DATE_RANGE, RATING, COLOR_LABEL, FORMAT, TAGS, TEXT, PERSON, CAMERA, LENS];
 
+/** Multi-level album sort fields (labelKey is resolved at render time). */
+export const SORT_FIELDS = [
+  { key: "date", labelKey: "albums.sortDate" },
+  { key: "name", labelKey: "albums.sortName" },
+  { key: "size", labelKey: "albums.sortSize" },
+  { key: "rating", labelKey: "albums.sortRating" },
+  { key: "camera", labelKey: "albums.sortCamera" },
+  { key: "lens", labelKey: "albums.sortLens" },
+];
+
+export function nextSortLevel(sort) {
+  const used = (sort || []).map((s) => s.field);
+  return SORT_FIELDS.find((f) => !used.includes(f.key)) || null;
+}
+
+export function withAddedSortLevel(sort) {
+  const next = nextSortLevel(sort);
+  if (!next) return sort || [];
+  return [...(sort || []), { field: next.key, dir: "desc" }];
+}
+
+export function withAddedSortField(sort, field, dir = "desc") {
+  if (!field || (sort || []).some((s) => s.field === field)) return sort || [];
+  return [...(sort || []), { field, dir }];
+}
+
+export function withRemovedSortLevel(sort, index) {
+  const next = [...(sort || [])];
+  next.splice(index, 1);
+  return next;
+}
+
+export function withSortField(sort, index, field) {
+  return (sort || []).map((level, i) => (i === index ? { ...level, field } : level));
+}
+
+export function withToggledSortDir(sort, index) {
+  return (sort || []).map((level, i) =>
+    i === index ? { ...level, dir: level.dir === "asc" ? "desc" : "asc" } : level,
+  );
+}
+
 /** Map from key → definition for O(1) lookup. */
 export const FILTER_DEF_MAP = Object.fromEntries(FILTER_REGISTRY.map((d) => [d.key, d]));
+
+/** Default filter rows shown when no saved state exists for an album. */
+export function defaultFilterItems() {
+  return FILTER_REGISTRY.filter((def) => def.defaultEnabled).map((def) => ({
+    type: def.key,
+    logic: "and",
+    enabled: true,
+    value: def.defaultValue(),
+  }));
+}
+
+export function filterStorageKey(user, album) {
+  return `album_filters_v1_${user}_${album}`;
+}
+
+/** Load saved filter rows for an album (or defaults). */
+export function loadFilterItemsFromStorage(user, album) {
+  if (!album) return defaultFilterItems();
+  try {
+    const saved = localStorage.getItem(filterStorageKey(user, album));
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {
+    /* ignore corrupt storage */
+  }
+  return defaultFilterItems();
+}
+
+/** Compile UI filter rows (+ optional collection constraints) into API clauses. */
+export function compileAlbumFilterClauses(filterItems, collectionFilter = {}) {
+  return buildFilterClauses(filterItems, collectionFilter);
+}
 
 /**
  * Build wire clauses for POST /api/albums/photos.
@@ -126,6 +205,20 @@ export function buildFilterClauses(filterItems, collectionFilter = {}) {
   const clauses = [];
   const cf = collectionFilter || {};
 
+  for (const item of filterItems || []) {
+    if (!item?.enabled) continue;
+    const def = FILTER_DEF_MAP[item.type];
+    if (!def || def.isEmpty(item.value)) continue;
+    const value = def.toWire ? def.toWire(item.value) : { ...item.value };
+    clauses.push({
+      type: item.type,
+      logic: item.logic || "and",
+      enabled: true,
+      value,
+    });
+  }
+
+  // Collection scope is AND'd onto the whole user chain (must come last).
   if (cf.from || cf.to) {
     clauses.push({
       type: "date_range",
@@ -188,19 +281,6 @@ export function buildFilterClauses(filterItems, collectionFilter = {}) {
       logic: "and",
       enabled: true,
       value: { tags: cf.tags },
-    });
-  }
-
-  for (const item of filterItems || []) {
-    if (!item?.enabled) continue;
-    const def = FILTER_DEF_MAP[item.type];
-    if (!def || def.isEmpty(item.value)) continue;
-    const value = def.toWire ? def.toWire(item.value) : { ...item.value };
-    clauses.push({
-      type: item.type,
-      logic: item.logic || "and",
-      enabled: true,
-      value,
     });
   }
 

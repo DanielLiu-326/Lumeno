@@ -32,16 +32,20 @@ pub use store::FileAiIndexStore;
 pub use tasks::queue_owner_ai_index;
 
 use embedding::{
-    calibrate_siglip_text_image_score, cosine_similarity, normalize_search_text,
-    tokenize_search_text,
+    calibrate_siglip_text_image_score, cosine_similarity, embedding_debug_fingerprint,
+    embedding_debug_query_preview, normalize_search_text, tokenize_search_text,
 };
-pub(crate) use models::{AiFaceRecord, AiIndexedPhotoRecord, LoadedOwnerIndex};
+pub(crate) use models::{AiFaceRecord, AiIndexedPhotoRecord};
 use models::{AiIndexedAlbumSummary, AiSimilarSearchResult, NormalizedAiIndexRequest};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use super::album::helpers::load_existing_album_index;
+use super::album::types::ColorLabel;
+use super::common::AppState;
 use super::settings::{SettingsChange, SettingsManager};
 
 pub struct AiService {
@@ -210,6 +214,7 @@ impl AiService {
                     height: record.height.unwrap_or(0),
                     score,
                     reason: "visual_similarity".to_string(),
+                    ..AiSimilarSearchResult::empty_meta()
                 }
             })
             .collect()
@@ -247,6 +252,11 @@ impl AiService {
         limit: usize,
     ) -> Vec<AiSimilarSearchResult> {
         let tokens = tokenize_search_text(query_text);
+        let mut with_embed = 0usize;
+        let mut dim_mismatch = 0usize;
+        let mut min_raw = f32::INFINITY;
+        let mut max_raw = f32::NEG_INFINITY;
+        let mut sum_raw = 0_f32;
         let mut scored = records
             .iter()
             .map(|(record, embedding)| {
@@ -255,6 +265,15 @@ impl AiService {
                     .as_ref()
                     .map(|vector| cosine_similarity(query_vector, vector))
                     .unwrap_or(0.0);
+                if let Some(vector) = embedding {
+                    with_embed += 1;
+                    if vector.len() != query_vector.len() {
+                        dim_mismatch += 1;
+                    }
+                    min_raw = min_raw.min(raw_embed);
+                    max_raw = max_raw.max(raw_embed);
+                    sum_raw += raw_embed;
+                }
                 // SigLIP absolute cosines are low; calibrate before blending/thresholding.
                 let embed_score = calibrate_siglip_text_image_score(raw_embed);
                 let score = if embedding.is_some() {
@@ -273,6 +292,21 @@ impl AiService {
             })
             .filter(|(score, _, _)| *score >= min_score)
             .collect::<Vec<_>>();
+        let mean_raw = if with_embed == 0 {
+            0.0
+        } else {
+            sum_raw / with_embed as f32
+        };
+        eprintln!(
+            "[ai] text search q={:?} candidates={} with_embed={with_embed} dim_mismatch={dim_mismatch} query={} raw_cos min={:.4} max={:.4} mean={:.4} passed={} limit={limit} min_score={min_score:.2}",
+            embedding_debug_query_preview(query_text),
+            records.len(),
+            embedding_debug_fingerprint(query_vector),
+            if with_embed == 0 { 0.0 } else { min_raw },
+            if with_embed == 0 { 0.0 } else { max_raw },
+            mean_raw,
+            scored.len(),
+        );
         scored.sort_by(|left, right| {
             right
                 .0
@@ -308,8 +342,84 @@ impl AiService {
                     height: record.height.unwrap_or(0),
                     score,
                     reason,
+                    ..AiSimilarSearchResult::empty_meta()
                 }
             })
             .collect()
+    }
+}
+
+/// Copy EXIF, rating, tags, and color labels from the album index onto search
+/// hits. One index read per owner/album, same fields as `POST /api/albums/photos`.
+pub(crate) async fn attach_album_index_metadata(
+    cfg: &AppState,
+    results: &mut [AiSimilarSearchResult],
+) {
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (slot, result) in results.iter().enumerate() {
+        if result.owner.is_empty() || result.album.is_empty() || result.path.is_empty() {
+            continue;
+        }
+        groups
+            .entry((result.owner.clone(), result.album.clone()))
+            .or_default()
+            .push(slot);
+    }
+
+    for ((owner, album), slots) in groups {
+        let root = cfg.user_root_path(&owner);
+        let Ok(Some(index)) = load_existing_album_index(
+            cfg.data_path.as_path(),
+            root.as_path(),
+            &owner,
+            &album,
+        )
+        .await
+        else {
+            continue;
+        };
+        let by_path = index
+            .entries
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+        for slot in slots {
+            let Some(result) = results.get_mut(slot) else {
+                continue;
+            };
+            let Some(photo) = by_path.get(result.path.as_str()) else {
+                continue;
+            };
+            if !photo.datetime.is_empty() {
+                result.datetime = photo.datetime.clone();
+            }
+            if !photo.date.is_empty() {
+                result.date = photo.date.clone();
+            }
+            result.camera_make = photo.camera_make.clone();
+            result.camera_model = photo.camera_model.clone();
+            result.lens = photo.lens.clone();
+            result.focal_length = photo.focal_length.clone();
+            result.aperture = photo.aperture.clone();
+            result.shutter_speed = photo.shutter_speed.clone();
+            result.iso = photo.iso;
+            if photo.width > 0 {
+                result.width = photo.width;
+            }
+            if photo.height > 0 {
+                result.height = photo.height;
+            }
+            if photo.size > 0 {
+                result.size = photo.size;
+            }
+            result.rating = photo.rating;
+            result.color_label = photo
+                .color_label
+                .iter()
+                .filter(|label| **label != ColorLabel::None)
+                .map(|label| label.as_str().to_string())
+                .collect();
+            result.tags = photo.tags.clone();
+        }
     }
 }

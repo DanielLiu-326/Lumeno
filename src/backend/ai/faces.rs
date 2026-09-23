@@ -13,6 +13,23 @@ pub use crate::backend::constants::MAX_FACES_PER_PHOTO;
 
 pub const FACE_DETECTOR_REVISION: &str = "face-heuristic-v1";
 
+/// Intersection-over-union for normalized `[x, y, w, h]` boxes.
+pub fn iou_box_xywh(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let ax2 = a[0] + a[2];
+    let ay2 = a[1] + a[3];
+    let bx2 = b[0] + b[2];
+    let by2 = b[1] + b[3];
+    let ix1 = a[0].max(b[0]);
+    let iy1 = a[1].max(b[1]);
+    let ix2 = ax2.min(bx2);
+    let iy2 = ay2.min(by2);
+    let iw = (ix2 - ix1).max(0.0);
+    let ih = (iy2 - iy1).max(0.0);
+    let inter = iw * ih;
+    let union = a[2] * a[3] + b[2] * b[3] - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
 #[derive(Debug, Clone)]
 pub struct DetectedFace {
     /// Normalized `[x, y, w, h]` in `[0, 1]` relative to the source image.

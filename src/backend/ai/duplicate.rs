@@ -366,7 +366,10 @@ pub(crate) async fn publish_duplicates_index_async(
         .collect();
     for photo in &mut album_photos {
         if photo.duplicate_phash_valid && photo.duplicate_phash_u64.is_some() {
-            write_photo_phash_cache_async(ai_root, owner, cache_id, photo).await?;
+            if let Err(error) = write_photo_phash_cache_async(ai_root, owner, cache_id, photo).await
+            {
+                eprintln!("phash cache write failed for {}: {error}", photo.stable_key);
+            }
             continue;
         }
         if let Some(phash) = lookup_photo_phash_async(

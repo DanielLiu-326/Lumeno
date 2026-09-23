@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { t } from "../../i18n/index.js";
 import FaceAvatar from "../FaceAvatar.vue";
-import { personDisplayCover } from "../../utils/faceCrop.js";
+import { personDisplayCover, personPhotoCount } from "../../utils/faceCrop.js";
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -54,8 +54,8 @@ function togglePerson(person) {
 </script>
 
 <template>
-  <div class="flex max-h-48 flex-col gap-1 overflow-y-auto">
-    <label class="mb-1 inline-flex items-center gap-2 text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
+  <div class="flex max-h-52 flex-col gap-1 overflow-y-auto">
+    <label class="mb-1 inline-flex items-center gap-2 text-[11px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
       <input v-model="showUnnamed" type="checkbox" class="rounded accent-amber-500" />
       {{ t("albums.aiShowUnnamedFaces") }}
     </label>
@@ -82,8 +82,8 @@ function togglePerson(person) {
       </div>
       <div class="min-w-0 flex-1">
         <p class="truncate text-xs font-medium">{{ personLabel(person) }}</p>
-        <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
-          {{ t("people.photoCount", { count: person.visible_photo_count ?? 0 }) }}
+        <p class="truncate text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+          {{ t("people.photoCount", { count: personPhotoCount(person) }) }}
         </p>
       </div>
     </button>

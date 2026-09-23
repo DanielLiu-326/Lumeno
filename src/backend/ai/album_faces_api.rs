@@ -18,16 +18,16 @@ use uuid::Uuid;
 
 use super::super::album::api::{ResolvedAlbum, resolve_album_access};
 use super::super::album::ensure_cached_face_crop;
-use super::super::album::media::is_readable_face_crop;
 use super::super::album::helpers::{albums_root, ensure_album_cache_id};
+use super::super::album::media::is_readable_face_crop;
 use super::super::common::{AppError, AppState, Token, create_response};
 use super::super::constants::FACE_CROP_SIZE;
 use super::super::i18n::{RequestLocale, tr};
 use super::album_cache::{
-    AlbumAiCache, ClustersCacheFile, FaceHintsFile, FaceIndexEntry,
-    appearance_identity_key, decode_f32_vector_b64, encode_f32_vector_b64, face_id,
-    apply_person_match_suggestions, hints_from_clusters, sort_suggestion_groups,
-    DEFAULT_PERSON_MATCH_MIN_SCORE, MAX_PERSON_MATCH_SUGGESTIONS,
+    AlbumAiCache, ClustersCacheFile, DEFAULT_PERSON_MATCH_MIN_SCORE, FaceHintsFile, FaceIndexEntry,
+    MAX_PERSON_MATCH_SUGGESTIONS, appearance_identity_key, apply_person_match_suggestions,
+    decode_f32_vector_b64, encode_f32_vector_b64, face_id, hints_from_clusters,
+    sort_suggestion_groups,
 };
 use super::faces_config::{
     FacesConfig, PersonAppearance, PersonCenter, collect_named_person_centers,
@@ -257,6 +257,7 @@ fn people_payload(config: &FacesConfig, album_name: &str, owner: &str) -> Vec<Va
                 "hidden": person.hidden,
                 "center_count": person.centers.len(),
                 "appearance_count": person.appearance_count(),
+                "visible_photo_count": person.visible_photo_count(),
                 "centers": centers,
                 "appearances": appearances,
                 "editable": true,
@@ -269,7 +270,11 @@ fn people_payload(config: &FacesConfig, album_name: &str, owner: &str) -> Vec<Va
         .collect()
 }
 
-fn person_cover_json(person: &super::faces_config::AlbumPerson, album_name: &str, owner: &str) -> Option<Value> {
+fn person_cover_json(
+    person: &super::faces_config::AlbumPerson,
+    album_name: &str,
+    owner: &str,
+) -> Option<Value> {
     let cover = person.cover.as_ref()?;
     let rel = cover
         .source
@@ -306,8 +311,7 @@ async fn recompute_match_suggestions(
     }
 
     let needed_ids = face_ids_for_match_queries(clusters);
-    let embedding_cache =
-        load_match_embeddings_by_photo(cache, clusters, &needed_ids).await;
+    let embedding_cache = load_match_embeddings_by_photo(cache, clusters, &needed_ids).await;
 
     apply_person_match_suggestions(
         clusters,
@@ -370,9 +374,7 @@ async fn build_face_hints_payload(album_dir: &Path, cache: &AlbumAiCache) -> Val
     let groups: HashMap<String, _> = hints
         .group_hints
         .into_iter()
-        .filter(|(group_id, suggestions)| {
-            visible.contains(group_id) && !suggestions.is_empty()
-        })
+        .filter(|(group_id, suggestions)| visible.contains(group_id) && !suggestions.is_empty())
         .collect();
     json!({ "groups": groups })
 }
@@ -681,10 +683,7 @@ pub async fn api_album_faces_patch(
                             .and_then(|person| {
                                 person.appearances_iter().find(|a| {
                                     a.source.replace('\\', "/").trim_start_matches('/')
-                                        == input
-                                            .source
-                                            .replace('\\', "/")
-                                            .trim_start_matches('/')
+                                        == input.source.replace('\\', "/").trim_start_matches('/')
                                         && (0..4).all(|i| {
                                             (a.box_xywh[i] - input.box_xywh[i]).abs() < 1e-3
                                         })
@@ -695,10 +694,7 @@ pub async fn api_album_faces_patch(
                 )
                 .map_err(|error| {
                     if error.contains("not found on person") {
-                        AppError::BadRequest(tr(
-                            locale.as_str(),
-                            "error.ai_person_cover_not_found",
-                        ))
+                        AppError::BadRequest(tr(locale.as_str(), "error.ai_person_cover_not_found"))
                     } else {
                         AppError::BadRequest(error)
                     }
@@ -980,10 +976,7 @@ pub async fn api_album_faces_remove_center(
         .remove_center(person_id, center_id)
         .map_err(|error| {
             if error.contains("not found") {
-                AppError::BadRequest(tr(
-                    locale.as_str(),
-                    "error.ai_person_center_not_found",
-                ))
+                AppError::BadRequest(tr(locale.as_str(), "error.ai_person_center_not_found"))
             } else {
                 AppError::BadRequest(error)
             }

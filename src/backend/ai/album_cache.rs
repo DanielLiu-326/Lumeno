@@ -312,7 +312,10 @@ pub fn hints_from_clusters(clusters: &ClustersCacheFile) -> FaceHintsFile {
     let mut group_hints = HashMap::new();
     for cluster in &clusters.clusters {
         if !cluster.match_suggestions.is_empty() {
-            group_hints.insert(cluster.cluster_id.clone(), cluster.match_suggestions.clone());
+            group_hints.insert(
+                cluster.cluster_id.clone(),
+                cluster.match_suggestions.clone(),
+            );
         }
     }
     for (face_id, suggestions) in &clusters.noise_match_suggestions {
@@ -1039,7 +1042,12 @@ fn cluster_query_embedding(
         .representative_face_id
         .as_deref()
         .and_then(resolve_embedding)
-        .or_else(|| cluster.face_ids.first().and_then(|id| resolve_embedding(id.as_str())))
+        .or_else(|| {
+            cluster
+                .face_ids
+                .first()
+                .and_then(|id| resolve_embedding(id.as_str()))
+        })
 }
 
 pub fn apply_person_match_suggestions(
@@ -1100,7 +1108,12 @@ pub fn sort_suggestion_groups(groups: &mut [Value]) {
                 left.get("cluster_id")
                     .and_then(|value| value.as_str())
                     .unwrap_or_default()
-                    .cmp(right.get("cluster_id").and_then(|value| value.as_str()).unwrap_or_default())
+                    .cmp(
+                        right
+                            .get("cluster_id")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default(),
+                    )
             })
     });
 }

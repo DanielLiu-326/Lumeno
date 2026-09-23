@@ -4,9 +4,9 @@ import { prettyPath } from "../utils/path";
 import { isImageEntry, thumbnailUrl } from "../utils/fileBrowser";
 import { t } from "../i18n/index.js";
 import {
-  IconArrowLeft, IconClipboardCopy, IconClipboardPaste,
-  IconClose, IconDownload, IconFile, IconFolder, IconFolderAdd,
-  IconHome, IconPencil, IconRefresh, IconTrash, IconUpload, IconList, IconGrid, IconScissors,
+  IconArrowLeft, IconChevronLeft, IconChevronRight, IconClipboardCopy, IconClipboardPaste,
+  IconClose, IconDownload, IconFile, IconFolder, IconFolderAdd, IconHome,
+  IconPencil, IconRefresh, IconTrash, IconUpload, IconList, IconGrid, IconScissors,
 } from "../utils/icons";
 import UploadModal from "./UploadModal.vue";
 import VirtualGrid from "./VirtualGrid.vue";
@@ -19,6 +19,8 @@ const props = defineProps({
   busyList: { type: Boolean, required: true },
   busyUpload: { type: Boolean, required: true },
   canGoUp: { type: Boolean, required: true },
+  canGoBack: { type: Boolean, default: false },
+  canGoForward: { type: Boolean, default: false },
   clipboardCount: { type: Number, default: 0 },
   clipboardMode: { type: String, default: "copy" },
   currentPath: { type: String, required: true },
@@ -30,13 +32,15 @@ const props = defineProps({
   formatSize: { type: Function, required: true },
   formatTime: { type: Function, required: true },
   viewMode: { type: String, required: true },
+  embedded: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
   "cancel-clipboard", "clear-selection", "copy-selected", "cut-selected", "delete-entry",
-  "delete-selected", "download-entry", "go-up", "navigate", "new-folder",
+  "delete-selected", "download-entry", "go-up", "go-back", "go-forward", "navigate", "new-folder",
   "open-entry", "paste-here", "refresh", "rename-entry", "set-view-mode",
   "set-selection", "toggle-select-all", "toggle-selection", "upload-directory", "upload-files", "load-more",
+  "entry-menu",
 ]);
 
 const selectAllCheckbox = ref(null);
@@ -46,7 +50,6 @@ const entryRefs = new Map();
 const isMobile = ref(false);
 const longPressTimer = ref(null);
 const actionMenuEntry = ref(null);
-const longPressPoint = reactive({ x: 0, y: 0 });
 const dragSelect = reactive({
   active: false,
   moved: false,
@@ -60,16 +63,27 @@ const dragSelect = reactive({
 const suppressOpen = ref(false);
 const scrollLoadTimer = ref(null);
 const listVirtualRef = ref(null);
+let entryPress = null;
+let suppressTimer = 0;
 
-const currentPathLabel = computed(() => prettyPath(props.currentPath));
 const showMobileCheckboxes = computed(() => isMobile.value && props.selectedEntriesCount > 0);
 const clipboardActionLabel = computed(() => (props.clipboardMode === "cut" ? t("files.clipboardCut") : t("files.clipboardCopy")));
+const fileGridClass = computed(() => (
+  props.embedded
+    ? "grid grid-cols-3 gap-1.5 px-3 py-3"
+    : "grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7"
+));
 
 function onListVirtualScroll(offset) {
   if (scrollLoadTimer.value) return;
   const vl = listVirtualRef.value;
   if (!vl || props.busyList) return;
-  const distToBottom = vl.scrollSize - offset - vl.viewportSize;
+  let distToBottom = 0;
+  try {
+    distToBottom = (vl.scrollSize ?? 0) - offset - (vl.viewportSize ?? 0);
+  } catch {
+    return;
+  }
   if (distToBottom < 500) {
     scrollLoadTimer.value = true;
     setTimeout(() => { scrollLoadTimer.value = null; }, 300);
@@ -82,7 +96,7 @@ function onGridScrollNearBottom() {
 }
 
 function updateViewportMode() {
-  isMobile.value = window.innerWidth < 768;
+  isMobile.value = props.embedded || window.innerWidth < 768;
 }
 
 function entryTooltip(entry) {
@@ -101,15 +115,50 @@ function setEntryRef(path, el) {
   }
 }
 
-function startLongPress(entry) {
+function armSuppressOpen() {
+  suppressOpen.value = true;
+  window.clearTimeout(suppressTimer);
+  suppressTimer = window.setTimeout(() => {
+    suppressOpen.value = false;
+  }, 600);
+}
+
+let swallowClickTimer = 0;
+function swallowNextClick() {
+  const stop = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cleanup();
+  };
+  const cleanup = () => {
+    window.removeEventListener("click", stop, true);
+    window.clearTimeout(swallowClickTimer);
+  };
+  window.addEventListener("click", stop, true);
+  swallowClickTimer = window.setTimeout(cleanup, 700);
+}
+
+function clearEntryPress() {
+  window.removeEventListener("pointermove", onEntryPressMove);
+  window.removeEventListener("pointerup", onEntryPressEnd);
+  window.removeEventListener("pointercancel", onEntryPressCancel);
+  entryPress = null;
+}
+
+function startLongPress() {
   if (!isMobile.value) {
     return;
   }
   cancelLongPress();
   longPressTimer.value = window.setTimeout(() => {
     longPressTimer.value = null;
-    actionMenuEntry.value = entry;
-    suppressOpen.value = true;
+    const press = entryPress;
+    if (!press || press.moved) return;
+    press.menu = true;
+    armSuppressOpen();
+    swallowNextClick();
+    if (props.embedded) emit("entry-menu", press.entry);
+    else actionMenuEntry.value = press.entry;
   }, 450);
 }
 
@@ -123,26 +172,52 @@ function cancelLongPress() {
 function closeActionMenu() {
   actionMenuEntry.value = null;
   cancelLongPress();
-  window.setTimeout(() => {
-    suppressOpen.value = false;
-  }, 0);
+  window.clearTimeout(suppressTimer);
+  suppressOpen.value = false;
 }
 
-function onEntryPointerDown(entry, event) {
-  longPressPoint.x = event.clientX;
-  longPressPoint.y = event.clientY;
-  startLongPress(entry);
+function onEntryPointerDown(entry, index, event) {
+  if (event.button != null && event.button !== 0) return;
+  const target = event.target;
+  if (target instanceof Element && target.closest("button, input, label, a")) return;
+  clearEntryPress();
+  entryPress = {
+    entry,
+    index,
+    x: event.clientX,
+    y: event.clientY,
+    moved: false,
+    menu: false,
+  };
+  startLongPress();
+  if (!isMobile.value) return;
+  window.addEventListener("pointermove", onEntryPressMove);
+  window.addEventListener("pointerup", onEntryPressEnd);
+  window.addEventListener("pointercancel", onEntryPressCancel);
 }
 
-function onEntryPointerMove(event) {
-  if (!longPressTimer.value) {
-    return;
-  }
-  const deltaX = Math.abs(event.clientX - longPressPoint.x);
-  const deltaY = Math.abs(event.clientY - longPressPoint.y);
-  if (deltaX > 8 || deltaY > 8) {
+function onEntryPressMove(event) {
+  if (!entryPress || entryPress.moved) return;
+  const deltaX = Math.abs(event.clientX - entryPress.x);
+  const deltaY = Math.abs(event.clientY - entryPress.y);
+  if (deltaX > 12 || deltaY > 12) {
+    entryPress.moved = true;
     cancelLongPress();
   }
+}
+
+function onEntryPressCancel() {
+  clearEntryPress();
+  cancelLongPress();
+}
+
+function onEntryPressEnd() {
+  const press = entryPress;
+  clearEntryPress();
+  cancelLongPress();
+  if (!press || press.moved || press.menu || !isMobile.value) return;
+  armSuppressOpen();
+  handleEntryClick(press.entry, press.index, press, true);
 }
 
 function openMobileAction(action) {
@@ -259,14 +334,12 @@ function onSurfacePointerUp() {
   }
 }
 
-function openEntryGuard(entry) {
-  if (suppressOpen.value) {
+function handleEntryClick(entry, index, event, fromPointer = false) {
+  if (!fromPointer && suppressOpen.value) {
+    suppressOpen.value = false;
+    window.clearTimeout(suppressTimer);
     return;
   }
-  emit("open-entry", entry);
-}
-
-function handleEntryClick(entry, index, event) {
   if (event.shiftKey || event.ctrlKey || event.metaKey) {
     emit("toggle-selection", {
       path: entry.fullPath,
@@ -288,7 +361,7 @@ function handleEntryClick(entry, index, event) {
     return;
   }
 
-  openEntryGuard(entry);
+  emit("open-entry", entry);
 }
 
 onMounted(() => {
@@ -299,6 +372,9 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("resize", updateViewportMode);
   cancelLongPress();
+  clearEntryPress();
+  window.clearTimeout(suppressTimer);
+  window.clearTimeout(swallowClickTimer);
 });
 
 onMounted(() => {
@@ -312,32 +388,43 @@ watch(() => props.selectAllIndeterminate, (val) => {
     selectAllCheckbox.value.indeterminate = val;
   }
 });
+
+watch(() => props.embedded, updateViewportMode);
+
+function openUpload() {
+  showUploadModal.value = true;
+}
+
+defineExpose({ openUpload, closeActionMenu });
 </script>
 
 <template>
   <section
-    class="flex h-full min-h-0 flex-col rounded-[2rem] border p-4 shadow-[0_22px_60px_rgba(71,43,17,0.16)] backdrop-blur md:p-6"
-    :class="props.isDark ? 'border-stone-700 bg-stone-900/70 text-stone-100' : 'border-white/70 bg-white/70'"
+    class="flex h-full min-h-0 flex-col"
+    :class="[
+      props.isDark ? 'text-stone-100' : '',
+      embedded ? '' : 'app-frost app-card rounded-2xl p-4 md:p-6',
+    ]"
   >
     <!-- Header + toolbar -->
-    <div class="mb-5 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+    <div v-if="!embedded" class="mb-5 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
       <div>
         <p class="mb-2 text-xs font-semibold uppercase tracking-[0.24em]" :class="props.isDark ? 'text-emerald-300' : 'text-emerald-700'">{{ t('files.title') }}</p>
-        <h2 class="font-display text-2xl font-semibold md:text-3xl" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'">{{ currentPathLabel }}</h2>
+        <h2 class="font-display text-2xl font-semibold md:text-3xl" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'">{{ t('files.title') }}</h2>
       </div>
 
       <div class="flex min-h-11 flex-wrap items-center gap-2 xl:justify-end">
         <template v-if="selectedEntriesCount === 0">
-          <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60" :class="props.isDark ? 'bg-stone-100 text-stone-900 hover:bg-white' : 'bg-stone-900 text-white hover:bg-stone-800'" :disabled="!canGoUp || busyList" @click="emit('go-up')">
+          <button class="app-btn app-btn-primary px-3 py-2.5 text-sm" :disabled="!canGoUp || busyList" @click="emit('go-up')">
             <IconArrowLeft class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.goUp') }}</span>
           </button>
-          <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60 md:px-4" :class="props.isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" :disabled="busyList" @click="emit('refresh')">
+          <button class="app-btn app-btn-secondary px-3 py-2.5 text-sm md:px-4" :disabled="busyList" @click="emit('refresh')">
             <IconRefresh class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.refresh') }}</span>
           </button>
-          <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition md:px-4" :class="props.isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" @click="emit('new-folder')">
+          <button class="app-btn app-btn-secondary px-3 py-2.5 text-sm md:px-4" @click="emit('new-folder')">
             <IconFolderAdd class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.newFolder') }}</span>
           </button>
-          <button class="inline-flex items-center gap-1.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60 md:px-4" :class="props.isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" :disabled="busyUpload" @click="showUploadModal = true">
+          <button class="app-btn app-btn-secondary px-3 py-2.5 text-sm md:px-4" :disabled="busyUpload" @click="showUploadModal = true">
             <IconUpload class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.upload') }}</span>
           </button>
           <div class="ml-auto inline-flex items-center gap-1 rounded-xl p-1" :class="props.isDark ? 'bg-stone-800/90' : 'bg-stone-200/90'">
@@ -363,13 +450,13 @@ watch(() => props.selectAllIndeterminate, (val) => {
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-4 py-2.5 text-sm font-medium transition" :class="props.isDark ? 'bg-emerald-800 text-emerald-100 hover:bg-emerald-700' : 'bg-emerald-600 text-white hover:bg-emerald-700'" @click="emit('toggle-select-all')">
             {{ allSelected && entries.length >= entryTotal ? t('files.deselectAll') : t('files.selectAll') }}
           </button>
-          <button class="inline-flex items-center gap-1.5 rounded-2xl bg-rose-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-rose-700" @click="emit('delete-selected')">
+          <button class="inline-flex items-center gap-1.5 rounded-2xl bg-rose-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-rose-700" @click="emit('delete-selected')">
             <IconTrash class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.delete') }}</span>
           </button>
-          <button class="inline-flex items-center gap-1.5 rounded-2xl bg-amber-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-amber-700" @click="emit('copy-selected')">
+          <button class="inline-flex items-center gap-1.5 rounded-2xl bg-amber-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-amber-700" @click="emit('copy-selected')">
             <IconClipboardCopy class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.copy') }}</span>
           </button>
-          <button class="inline-flex items-center gap-1.5 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-medium text-white transition hover:-translate-y-0.5 hover:bg-sky-700" @click="emit('cut-selected')">
+          <button class="inline-flex items-center gap-1.5 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-sky-700" @click="emit('cut-selected')">
             <IconScissors class="h-4 w-4" /> <span class="hidden md:inline">{{ t('files.cut') }}</span>
           </button>
           <button class="inline-flex items-center gap-1.5 rounded-2xl px-4 py-2.5 text-sm font-medium transition" :class="props.isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" @click="emit('clear-selection')">
@@ -381,7 +468,7 @@ watch(() => props.selectAllIndeterminate, (val) => {
 
     <!-- Clipboard paste banner -->
     <div
-      v-if="clipboardCount > 0"
+      v-if="!embedded && clipboardCount > 0"
       class="mb-4 flex flex-col gap-3 rounded-2xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
       :class="props.isDark ? 'border-amber-700 bg-amber-950/30' : 'border-amber-300 bg-amber-50'"
     >
@@ -401,9 +488,31 @@ watch(() => props.selectAllIndeterminate, (val) => {
     </div>
 
     <!-- Breadcrumbs -->
-    <div class="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border px-4 py-3" :class="props.isDark ? 'border-stone-700 bg-stone-900/70' : 'border-stone-200/80 bg-white/70'">
+    <div v-if="!embedded" class="mb-4 flex flex-wrap items-center gap-2 rounded-2xl px-3 py-2.5 app-frost app-card">
+      <button
+        type="button"
+        class="file-path-nav"
+        :class="props.isDark ? 'text-stone-200 hover:bg-stone-800' : 'text-stone-700 hover:bg-stone-200'"
+        :disabled="!canGoBack || busyList"
+        :title="t('files.back')"
+        :aria-label="t('files.back')"
+        @click="emit('go-back')"
+      >
+        <IconChevronLeft class="h-5 w-5" />
+      </button>
+      <button
+        type="button"
+        class="file-path-nav"
+        :class="props.isDark ? 'text-stone-200 hover:bg-stone-800' : 'text-stone-700 hover:bg-stone-200'"
+        :disabled="!canGoForward || busyList"
+        :title="t('files.forward')"
+        :aria-label="t('files.forward')"
+        @click="emit('go-forward')"
+      >
+        <IconChevronRight class="h-5 w-5" />
+      </button>
       <button class="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium transition" :class="props.isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'" @click="emit('navigate', '')">
-        <IconHome class="h-4 w-4" /> root
+        <IconHome class="h-4 w-4" /> {{ t('files.root') }}
       </button>
       <template v-for="crumb in breadcrumbParts" :key="crumb.path">
         <span :class="props.isDark ? 'text-stone-500' : 'text-stone-400'">/</span>
@@ -416,11 +525,11 @@ watch(() => props.selectAllIndeterminate, (val) => {
     <!-- File list / grid -->
     <div class="min-h-0 flex-1">
       <div
-        class="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.5rem] border"
-        :class="props.isDark ? 'border-stone-700 bg-stone-900/60' : 'border-stone-200/80 bg-white/55'"
+        class="flex h-full min-h-0 flex-col overflow-hidden"
+        :class="embedded ? '' : 'rounded-xl app-frost app-card'"
       >
       <!-- List header -->
-      <div v-if="viewMode === 'list'" class="hidden grid-cols-[auto_minmax(0,2fr)_5rem_6rem_10rem_8rem] items-center gap-3 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] md:grid" :class="props.isDark ? 'bg-stone-800/80 text-stone-400' : 'bg-emerald-50/80 text-stone-500'">
+      <div v-if="viewMode === 'list' && !embedded" class="hidden grid-cols-[auto_minmax(0,2fr)_5rem_6rem_10rem_8rem] items-center gap-3 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] md:grid app-surface app-split-b" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">
         <label class="flex items-center justify-center">
           <input
             ref="selectAllCheckbox"
@@ -441,6 +550,7 @@ watch(() => props.selectAllIndeterminate, (val) => {
         <div
           ref="listSurfaceRef"
           class="relative min-h-0 flex-1 overflow-hidden"
+          style="touch-action: pan-y;"
           :class="dragSelect.active ? 'select-none' : ''"
           @pointerdown="onSurfacePointerDown"
           @pointermove="onSurfacePointerMove"
@@ -466,17 +576,14 @@ watch(() => props.selectAllIndeterminate, (val) => {
           :class="[
             isSelected(entry.fullPath)
               ? (props.isDark ? 'border-stone-700 bg-teal-500/10' : 'border-stone-200 bg-teal-50')
-              : (props.isDark ? 'border-stone-800 hover:bg-stone-800/70' : 'border-stone-200/70 hover:bg-stone-100/60'),
+              : (props.isDark ? 'border-stone-800' : 'border-stone-200'),
           ]"
-          :title="entryTooltip(entry)"
+          :title="embedded || isMobile ? undefined : entryTooltip(entry)"
           @click="handleEntryClick(entry, index, $event)"
-          @pointerdown="onEntryPointerDown(entry, $event)"
-          @pointermove="onEntryPointerMove"
-          @pointerup="cancelLongPress"
-          @pointerleave="cancelLongPress"
+          @pointerdown="onEntryPointerDown(entry, index, $event)"
           @contextmenu.prevent
         >
-          <div class="hidden gap-3 md:grid md:grid-cols-[auto_minmax(0,2fr)_5rem_6rem_10rem_8rem] md:items-center">
+          <div v-if="!embedded" class="hidden gap-3 md:grid md:grid-cols-[auto_minmax(0,2fr)_5rem_6rem_10rem_8rem] md:items-center">
             <label class="hidden items-center justify-center md:flex" @click.stop>
               <input
                 class="h-4 w-4 rounded border-stone-300 text-amber-700 focus:ring-amber-200"
@@ -490,7 +597,7 @@ watch(() => props.selectAllIndeterminate, (val) => {
               <span class="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
                 <img
                   v-if="isImageEntry(entry)"
-                  class="absolute inset-0 h-full w-full object-cover"
+                  class="pointer-events-none absolute inset-0 h-full w-full object-cover"
                   :src="thumbnailUrl(entry, 96)"
                   loading="lazy"
                   decoding="async"
@@ -520,7 +627,35 @@ watch(() => props.selectAllIndeterminate, (val) => {
             </div>
           </div>
 
-          <div class="md:hidden">
+          <div v-if="embedded" class="flex items-start gap-3">
+            <label v-if="showMobileCheckboxes" class="mt-2 flex items-center justify-center" @click.stop>
+              <input
+                class="h-4 w-4 rounded border-stone-300 text-teal-600 focus:ring-teal-200"
+                :checked="isSelected(entry.fullPath)"
+                type="checkbox"
+                @change="emit('toggle-selection', { path: entry.fullPath, index, additiveKey: true })"
+              />
+            </label>
+            <span class="relative flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+              <img
+                v-if="isImageEntry(entry)"
+                class="pointer-events-none absolute inset-0 h-full w-full object-cover"
+                :src="thumbnailUrl(entry, 96)"
+                loading="lazy"
+                decoding="async"
+                fetchpriority="low"
+                alt=""
+              />
+              <IconFolder v-if="entry.is_dir" class="h-5 w-5" />
+              <IconFile v-else-if="!isImageEntry(entry)" class="h-5 w-5" />
+            </span>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm font-medium" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'">{{ entry.name }}</p>
+              <p class="mt-1 truncate text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ entry.is_dir ? t('files.directory') : t('files.file') }}</p>
+              <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatSize(entry.size) }}</p>
+            </div>
+          </div>
+          <div v-else class="md:hidden">
             <div class="flex items-start justify-between gap-3">
               <div class="flex min-w-0 items-center gap-3">
                 <label v-if="showMobileCheckboxes" class="flex items-center justify-center" @click.stop>
@@ -534,7 +669,7 @@ watch(() => props.selectAllIndeterminate, (val) => {
                 <span class="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
                   <img
                     v-if="isImageEntry(entry)"
-                    class="absolute inset-0 h-full w-full object-cover"
+                    class="pointer-events-none absolute inset-0 h-full w-full object-cover"
                     :src="thumbnailUrl(entry, 96)"
                     loading="lazy"
                     decoding="async"
@@ -561,7 +696,7 @@ watch(() => props.selectAllIndeterminate, (val) => {
         v-else-if="viewMode === 'grid' && entries.length > 0"
         :items="entries"
         item-key="fullPath"
-        grid-class="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7"
+        :grid-class="fileGridClass"
         class="absolute inset-0"
         @scroll-near-bottom="onGridScrollNearBottom"
       >
@@ -570,33 +705,38 @@ watch(() => props.selectAllIndeterminate, (val) => {
           :key="entry.fullPath"
           :ref="(el) => setEntryRef(entry.fullPath, el)"
           data-entry-card="true"
-          class="group relative cursor-pointer select-none rounded-2xl border p-3 transition hover:-translate-y-0.5 hover:shadow-sm"
+          class="group relative cursor-pointer select-none rounded-2xl border p-3 transition"
           :class="[
             isSelected(entry.fullPath)
               ? (props.isDark ? 'border-teal-500 bg-teal-500/10' : 'border-teal-300 bg-teal-50')
-              : (props.isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200/80 bg-white/70 hover:border-stone-300'),
+              : embedded
+                ? (props.isDark ? 'border-stone-700 bg-stone-900/80' : 'border-stone-200 bg-white/70')
+                : 'app-surface app-card',
           ]"
-          :title="entryTooltip(entry)"
+          :title="embedded || isMobile ? undefined : entryTooltip(entry)"
           @click="handleEntryClick(entry, index, $event)"
-          @pointerdown="onEntryPointerDown(entry, $event)"
-          @pointermove="onEntryPointerMove"
-          @pointerup="cancelLongPress"
-          @pointerleave="cancelLongPress"
+          @pointerdown="onEntryPointerDown(entry, index, $event)"
           @contextmenu.prevent
         >
           <label class="absolute left-2 top-2 z-10 items-center justify-center rounded-md p-1 shadow-sm" :class="[props.isDark ? 'bg-stone-800/90' : 'bg-white/90', showMobileCheckboxes ? 'flex md:flex' : 'hidden md:flex']" @click.stop>
             <input
-              class="h-4 w-4 rounded border-stone-300 text-amber-700 focus:ring-amber-200"
+              class="h-4 w-4 rounded border-stone-300 text-teal-600 focus:ring-teal-200"
               :checked="isSelected(entry.fullPath)"
               type="checkbox"
               @change="emit('toggle-selection', { path: entry.fullPath, index, additiveKey: true })"
             />
           </label>
 
-          <div class="relative flex h-24 items-center justify-center overflow-hidden rounded-xl" :class="entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
+          <div
+            class="relative flex items-center justify-center overflow-hidden rounded-xl"
+            :class="[
+              embedded ? 'h-28' : 'h-24',
+              entry.is_dir ? (props.isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (props.isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600'),
+            ]"
+          >
             <img
               v-if="isImageEntry(entry)"
-              class="absolute inset-0 h-full w-full object-cover"
+              class="pointer-events-none absolute inset-0 h-full w-full object-cover"
               :src="thumbnailUrl(entry, 256)"
               loading="lazy"
               decoding="async"
@@ -607,10 +747,16 @@ watch(() => props.selectAllIndeterminate, (val) => {
             <IconFile v-else-if="!isImageEntry(entry)" class="h-10 w-10" />
           </div>
 
-          <div class="mt-3">
+          <div class="mt-3 min-w-0">
             <p class="truncate text-sm font-semibold" :class="props.isDark ? 'text-stone-100' : 'text-stone-900'" :title="entry.name">{{ entry.name }}</p>
-            <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ entry.is_dir ? t('files.directory') : formatSize(entry.size) }}</p>
-            <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatTime(entry.modified) }}</p>
+            <template v-if="embedded">
+              <p class="mt-1 truncate text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ entry.is_dir ? t('files.directory') : t('files.file') }}</p>
+              <p class="mt-1 truncate text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatSize(entry.size) }}</p>
+            </template>
+            <template v-else>
+              <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ entry.is_dir ? t('files.directory') : formatSize(entry.size) }}</p>
+              <p class="mt-1 text-xs" :class="props.isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatTime(entry.modified) }}</p>
+            </template>
           </div>
 
           <div class="mt-3 hidden gap-1.5 opacity-0 transition-opacity group-hover:opacity-100 md:flex" @click.stop>
@@ -637,8 +783,8 @@ watch(() => props.selectAllIndeterminate, (val) => {
       </div>
     </div>
 
-    <div v-if="actionMenuEntry" class="fixed inset-0 z-40 bg-black/35 md:hidden" @click="closeActionMenu()">
-      <div class="absolute left-1/2 top-1/2 w-[min(22rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-[1.75rem] p-4 shadow-2xl" :class="props.isDark ? 'bg-stone-900 text-stone-100' : 'bg-white text-stone-900'" @click.stop>
+    <div v-if="!embedded && actionMenuEntry" class="fixed inset-0 z-40 bg-black/35 md:hidden" @click="closeActionMenu()">
+      <div class="absolute left-1/2 top-1/2 w-[min(22rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-[1.75rem] p-4 shadow-2xl" :class="props.isDark ? 'bg-stone-900 text-stone-100' : 'bg-white text-stone-900'" @click.stop>
         <div class="mb-3 flex items-center justify-between">
           <div class="min-w-0">
             <p class="truncate text-base font-semibold">{{ actionMenuEntry.name }}</p>
@@ -659,7 +805,7 @@ watch(() => props.selectAllIndeterminate, (val) => {
     </div>
 
     <UploadModal
-      v-if="showUploadModal"
+      :show="showUploadModal"
       :busy-upload="busyUpload"
       :is-dark="props.isDark"
       @close="showUploadModal = false"

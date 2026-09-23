@@ -26,11 +26,11 @@ function toggle(key) {
 </script>
 
 <template>
-  <div class="flex gap-1.5">
+  <div class="color-label-edit flex flex-wrap gap-1.5">
     <button
       v-for="cl in COLOR_LABELS"
       :key="cl.key"
-      class="h-5 w-5 rounded-full transition"
+      class="h-6 w-6 rounded-full transition"
       :class="[
         cl.color,
         (modelValue.colorLabels || []).includes(cl.key)

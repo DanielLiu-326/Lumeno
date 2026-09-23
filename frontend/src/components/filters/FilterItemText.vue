@@ -1,5 +1,6 @@
 <script setup>
 import { t } from "../../i18n/index.js";
+import AppSlider from "../AppSlider.vue";
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -27,10 +28,10 @@ function onApply() {
       :value="modelValue.q || ''"
       type="search"
       :placeholder="t('filter.textPlaceholder')"
-      class="w-full rounded-lg border px-2 py-1.5 text-xs"
+      class="w-full rounded-lg border px-2 py-1.5 text-xs app-control"
       :class="isDark
-        ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500'
-        : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"
+        ? 'text-stone-100 placeholder:text-stone-500'
+        : 'text-stone-900 placeholder:text-stone-400'"
       @input="onInput($event.target.value)"
       @change="onApply"
       @keyup.enter="onApply"
@@ -40,19 +41,19 @@ function onApply() {
         <span>{{ t("albums.aiMinScore") }}</span>
         <span class="tabular-nums">{{ Number(modelValue.minScore ?? 0).toFixed(2) }}</span>
       </span>
-      <input
-        :value="Number(modelValue.minScore ?? 0)"
-        type="range"
-        min="0"
-        max="1"
-        step="0.01"
-        class="w-full accent-amber-500"
-        @input="onMinScore($event.target.value)"
+      <AppSlider
+        class="w-full shrink-0 grow-0"
+        :model-value="Number(modelValue.minScore ?? 0)"
+        :min="0"
+        :max="1"
+        :step="0.01"
+        :is-dark="isDark"
+        @update:model-value="onMinScore"
         @change="onApply"
       />
-      <span class="text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t("albums.aiMinScoreHint") }}</span>
     </label>
-    <p class="text-[10px] leading-relaxed" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+    <span class="text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t("albums.aiMinScoreHint") }}</span>
+    <p class="text-[11px] leading-relaxed" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
       {{ t("filter.textHint") }}
     </p>
   </div>

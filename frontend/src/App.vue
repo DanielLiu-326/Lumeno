@@ -12,12 +12,19 @@ import SettingsPanel from "./components/SettingsPanel.vue";
 import { useAlbumApp } from "./composables/useAlbumApp";
 import { normalizeDiscoveryPhoto } from "./utils/photoDetail.js";
 import { progressPercent, statusLabel, statusTone } from "./utils/format";
-import { IconBell, IconClose, IconMenu, IconMoon, IconPower, IconSun, IconTasks } from "./utils/icons";
+import { IconAlbum, IconBell, IconCalendarDay, IconClear, IconClose, IconFolder, IconGear, IconHome, IconMenu, IconMoon, IconSparkles, IconSun, IconTasks } from "./utils/icons";
 import { t, locale } from "./i18n/index.js";
+import { wallpaperLayerState } from "./utils/wallpaper.js";
+import { applyAccent } from "./utils/accent.js";
+import { scheduleSafeAreaSync } from "./utils/safeArea.js";
+import { withThemeTransition } from "./utils/themeTransition.js";
+import { layoutViewportSize } from "./utils/uiScale.js";
 
 const app = proxyRefs(useAlbumApp());
 const albumPanelRef = ref(null);
 const activeTab = ref("dashboard");
+const settingsSection = ref("preferences");
+const settingsFocus = ref(0);
 const mobileSidebarOpen = ref(false);
 const taskListOpen = ref(false);
 const notificationOpen = ref(false);
@@ -39,13 +46,15 @@ const averageTaskProgress = computed(() => {
   return Math.round(total / activeTasks.value.length);
 });
 const taskPieStyle = computed(() => ({
-  background: `conic-gradient(#f97316 ${averageTaskProgress.value}%, #e7e5e4 0)`,
+  background: `conic-gradient(var(--color-amber-500) ${averageTaskProgress.value}%, #e7e5e4 0)`,
 }));
 const unreadNotificationCount = computed(
   () => notifications.value.filter((item) => !item.read).length,
 );
 
 const isDark = computed(() => theme.value === "dark");
+const wallpaperLayer = computed(() => wallpaperLayerState(app.userWallpaper, isDark.value));
+watch(() => app.userAccent, (next) => applyAccent(next), { immediate: true });
 const activeTabTitle = computed(() => {
   if (activeTab.value === "dashboard") return t("nav.dashboard");
   if (activeTab.value === "albums") return t("nav.albums");
@@ -54,19 +63,64 @@ const activeTabTitle = computed(() => {
   if (activeTab.value === "daily_picks") return t("nav.daily_picks");
   return t("nav.files");
 });
+const activeTabIcon = computed(() => {
+  if (activeTab.value === "dashboard") return IconHome;
+  if (activeTab.value === "albums") return IconAlbum;
+  if (activeTab.value === "settings") return IconGear;
+  if (activeTab.value === "on_this_day") return IconCalendarDay;
+  if (activeTab.value === "daily_picks") return IconSparkles;
+  return IconFolder;
+});
 
-function applyTheme(nextTheme) {
-  theme.value = nextTheme;
-  document.documentElement.classList.toggle("dark", nextTheme === "dark");
-  localStorage.setItem("album-theme", nextTheme);
+const THEME_COLOR = {
+  light: "#f4efe7",
+  dark: "#0f172a",
+};
+
+function applyThemeColor(nextTheme) {
+  const color = nextTheme === "dark" ? THEME_COLOR.dark : THEME_COLOR.light;
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute("name", "theme-color");
+    document.head.appendChild(meta);
+  }
+  meta.setAttribute("content", color);
+  document.documentElement.style.backgroundColor = color;
+  document.body.style.backgroundColor = color;
+}
+
+function applyTheme(nextTheme, animate = false) {
+  withThemeTransition(() => {
+    theme.value = nextTheme;
+    document.documentElement.classList.toggle("dark", nextTheme === "dark");
+    localStorage.setItem("album-theme", nextTheme);
+    applyThemeColor(nextTheme);
+  }, { animate });
+}
+
+function syncAppViewport() {
+  const { height } = layoutViewportSize();
+  document.documentElement.style.setProperty("--app-height", `${height}px`);
+  scheduleSafeAreaSync();
+}
+
+function hideBrowserChrome() {
+  if (window.innerWidth >= 768) return;
+  if (window.scrollY < 1) window.scrollTo(0, 1);
+}
+
+function onViewportChange() {
+  hideBrowserChrome();
+  syncAppViewport();
 }
 
 function updateViewportMode() {
-  isMobile.value = window.innerWidth < 768;
+  isMobile.value = window.innerWidth < 768 || window.screen.width < 768;
 }
 
 function toggleTheme() {
-  applyTheme(isDark.value ? "light" : "dark");
+  applyTheme(isDark.value ? "light" : "dark", true);
 }
 
 function openTaskList() {
@@ -98,19 +152,47 @@ async function clearFinishedTasksFromPanel() {
   await app.clearFinishedTasks();
 }
 
+function preventBrowserPageZoom(event) {
+  if (event.touches && event.touches.length > 1) {
+    event.preventDefault();
+  }
+}
+
+function preventBrowserGesture(event) {
+  event.preventDefault();
+}
+
 onMounted(() => {
   const saved = localStorage.getItem("album-theme");
   applyTheme(saved === "dark" ? "dark" : "light");
   updateViewportMode();
+  syncAppViewport();
+  hideBrowserChrome();
   document.addEventListener("click", onGlobalClick);
   document.addEventListener("keydown", onGlobalKeyDown);
+  document.addEventListener("touchmove", preventBrowserPageZoom, { passive: false });
+  document.addEventListener("touchstart", hideBrowserChrome, { passive: true });
+  document.addEventListener("gesturestart", preventBrowserGesture, { passive: false });
+  document.addEventListener("gesturechange", preventBrowserGesture, { passive: false });
   window.addEventListener("resize", updateViewportMode);
+  window.addEventListener("resize", onViewportChange);
+  window.addEventListener("orientationchange", onViewportChange);
+  window.visualViewport?.addEventListener("resize", onViewportChange);
+  window.visualViewport?.addEventListener("scroll", onViewportChange);
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", onGlobalClick);
   document.removeEventListener("keydown", onGlobalKeyDown);
+  document.removeEventListener("touchmove", preventBrowserPageZoom);
+  document.removeEventListener("touchstart", hideBrowserChrome);
+  document.removeEventListener("gesturestart", preventBrowserGesture);
+  document.removeEventListener("gesturechange", preventBrowserGesture);
   window.removeEventListener("resize", updateViewportMode);
+  window.removeEventListener("resize", onViewportChange);
+  window.removeEventListener("orientationchange", onViewportChange);
+  window.visualViewport?.removeEventListener("resize", onViewportChange);
+  window.visualViewport?.removeEventListener("scroll", onViewportChange);
   if (toastTimer) {
     clearTimeout(toastTimer);
   }
@@ -187,7 +269,10 @@ watch(
 
 watch(
   () => activeTab.value,
-  async (tab) => {
+  async (tab, prev) => {
+    if (prev === "settings" && tab !== "settings") {
+      await app.refreshPreferences();
+    }
     if (tab === "albums") {
       await app.refreshAlbums();
     } else if (tab === "dashboard") {
@@ -197,6 +282,20 @@ watch(
     }
   },
 );
+
+function switchTab(tab) {
+  if (tab === "settings") {
+    settingsSection.value = "preferences";
+  }
+  activeTab.value = tab;
+}
+
+function openAccountSettings() {
+  settingsSection.value = "account";
+  settingsFocus.value += 1;
+  activeTab.value = "settings";
+  mobileSidebarOpen.value = false;
+}
 
 async function openDashboardAlbum(album) {
   activeTab.value = "albums";
@@ -217,6 +316,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
   <!-- Login: full-screen standalone page -->
   <LoginPanel
     v-if="!app.loggedIn"
+    :is-dark="isDark"
     :busy-login="app.busy.login"
     :login-form="app.loginForm"
     @submit="app.login"
@@ -224,14 +324,27 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
   />
 
   <!-- Main layout: sidebar + content -->
-  <div v-else class="flex h-screen overflow-hidden" :class="isDark ? 'bg-stone-950 text-stone-100' : ''">
+  <div
+    v-else
+    class="relative flex overflow-hidden"
+    :class="isDark ? 'text-stone-100' : ''"
+    :style="{ height: 'var(--app-height, 100dvh)' }"
+  >
+    <div class="pointer-events-none absolute inset-0" :style="wallpaperLayer.style"></div>
+    <div
+      v-if="wallpaperLayer.showGrid"
+      class="pointer-events-none absolute inset-0 opacity-25 [background-image:linear-gradient(rgba(125,98,73,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(125,98,73,0.06)_1px,transparent_1px)] [background-size:28px_28px] [mask-image:linear-gradient(to_bottom,rgba(0,0,0,0.75),transparent_88%)]"
+    ></div>
+
     <AppSidebar
-      class="hidden md:flex"
+      class="relative z-10 hidden md:flex"
       :active-tab="activeTab"
       :is-dark="isDark"
       :username="app.currentUser"
       :avatar="app.userAvatar"
-      @switch-tab="(tab) => { activeTab = tab; }"
+      @switch-tab="switchTab"
+      @open-account="openAccountSettings"
+      @logout="app.logout"
     />
 
     <Transition
@@ -254,46 +367,48 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
     >
       <div v-if="mobileSidebarOpen" class="fixed inset-y-0 left-0 z-[71] w-72 md:hidden">
         <AppSidebar
-          class="flex h-full w-full"
+          class="app-overlay-screen flex h-full w-full"
           :active-tab="activeTab"
           :is-dark="isDark"
           :username="app.currentUser"
           :avatar="app.userAvatar"
-          @switch-tab="(tab) => { activeTab = tab; mobileSidebarOpen = false; }"
+          @switch-tab="(tab) => { switchTab(tab); mobileSidebarOpen = false; }"
+          @open-account="openAccountSettings"
+          @logout="app.logout"
         />
       </div>
     </Transition>
 
-    <div class="relative flex flex-1 flex-col overflow-hidden">
-      <!-- Background -->
+    <div class="relative z-10 flex flex-1 flex-col overflow-hidden">
       <div
-        class="pointer-events-none absolute inset-0"
-        :style="isDark ? 'background: radial-gradient(circle at top left, rgba(251, 146, 60, 0.12), transparent 32%), radial-gradient(circle at top right, rgba(20, 184, 166, 0.12), transparent 26%), linear-gradient(160deg, #111827 0%, #0f172a 44%, #020617 100%)' : 'background: radial-gradient(circle at top left, rgba(177, 77, 40, 0.18), transparent 28%), radial-gradient(circle at top right, rgba(29, 106, 97, 0.18), transparent 22%), linear-gradient(160deg, #f8f3ec 0%, #f4efe7 44%, #efe4d6 100%)'"
-      ></div>
-      <div
-        class="pointer-events-none absolute inset-0 opacity-25 [background-image:linear-gradient(rgba(125,98,73,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(125,98,73,0.06)_1px,transparent_1px)] [background-size:28px_28px] [mask-image:linear-gradient(to_bottom,rgba(0,0,0,0.75),transparent_88%)]"
-      ></div>
-
-      <div class="relative z-50 border-b px-4 py-3 backdrop-blur" :class="isDark ? 'border-stone-700/70 bg-stone-900/85' : 'border-stone-200/60 bg-white/55'">
+        class="relative z-50 app-split-b px-4 pb-3 app-frost-toolbar"
+        :style="{ paddingTop: 'calc(0.75rem + var(--safe-top, 0px))' }"
+      >
         <div class="flex items-center justify-between gap-3">
           <div class="flex min-w-0 items-center gap-3">
             <button
-              class="inline-flex h-10 w-10 items-center justify-center rounded-xl transition md:hidden"
-              :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+              v-if="isMobile"
+              class="app-btn app-btn-icon h-11 w-11"
               :title="t('topbar.openSidebar')"
               @click="mobileSidebarOpen = true"
             >
               <IconMenu class="h-5 w-5" />
             </button>
+            <component
+              v-else
+              :is="activeTabIcon"
+              class="h-5 w-5 shrink-0"
+              :class="isDark ? 'text-stone-400' : 'text-stone-500'"
+              aria-hidden="true"
+            />
             <div class="min-w-0">
-              <p class="text-xs uppercase tracking-[0.2em] text-stone-500">{{ activeTabTitle }}</p>
+            <p class="text-xs font-medium uppercase tracking-[0.2em]" :class="isDark ? 'text-stone-400' : 'text-stone-600'">{{ activeTabTitle }}</p>
             </div>
           </div>
 
           <div class="relative flex items-center gap-2" data-topbar-menu>
             <button
-              class="relative inline-flex h-10 w-10 items-center justify-center rounded-xl transition"
-              :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+              class="app-btn app-btn-icon relative h-11 w-11 md:h-10 md:w-10"
               :title="t('topbar.tasks')"
               @click.stop="openTaskList"
             >
@@ -312,8 +427,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             </button>
 
             <button
-              class="relative inline-flex h-10 w-10 items-center justify-center rounded-xl transition"
-              :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+              class="app-btn app-btn-icon relative h-11 w-11 md:h-10 md:w-10"
               :title="t('topbar.notifications')"
               @click.stop="openNotifications"
             >
@@ -327,29 +441,29 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             </button>
 
             <button
-              class="inline-flex h-10 w-10 items-center justify-center rounded-xl transition"
-              :class="isDark ? 'bg-stone-800 text-amber-300 hover:bg-stone-700' : 'bg-stone-200 text-amber-700 hover:bg-stone-300'"
+              class="app-btn app-btn-icon h-11 w-11 md:h-10 md:w-10"
               :title="isDark ? t('topbar.switchToLight') : t('topbar.switchToDark')"
               @click="toggleTheme"
             >
-              <IconSun v-if="isDark" class="h-5 w-5" />
-              <IconMoon v-else class="h-5 w-5" />
+              <IconSun v-if="isDark" class="h-5 w-5 text-yellow-300" />
+              <IconMoon v-else class="h-5 w-5 text-yellow-700" />
             </button>
 
-            <button
-              class="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-rose-600 text-white transition hover:bg-rose-700"
-              @click="app.logout"
-              :title="t('topbar.logout')"
-            >
-              <IconPower class="h-4 w-4" />
-            </button>
-
+            <Teleport to="body">
+            <Transition name="app-dropdown" :duration="{ enter: 300, leave: 200 }">
             <div
               v-if="notificationOpen"
-              class="z-40 overflow-hidden border shadow-xl md:absolute md:right-0 md:top-12 md:w-[22rem] md:rounded-2xl"
-              :class="isMobile ? (isDark ? 'fixed inset-0 z-[80] h-screen w-screen border-none rounded-none bg-stone-950' : 'fixed inset-0 z-[80] h-screen w-screen border-none rounded-none bg-white') : (isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white')"
+              data-topbar-menu
+              class="app-dropdown-surface app-frost-popover z-[90]"
+              :class="isMobile
+                ? 'app-overlay-screen fixed inset-0 flex flex-col border-none rounded-none'
+                : 'fixed right-4 top-[calc(var(--safe-top,0px)+4.25rem)] w-[22rem] rounded-2xl'"
+              @click.stop
             >
-              <div class="flex items-center justify-between border-b px-4 py-3" :class="isDark ? 'border-stone-700' : 'border-stone-200'">
+              <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[inherit]">
+              <div
+                class="app-split-b flex shrink-0 items-center justify-between px-4 py-3"
+              >
                 <p class="text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-900'">{{ t('topbar.notificationCenter') }}</p>
                 <div class="flex items-center gap-2">
                   <button class="inline-flex items-center rounded-full px-3 py-1.5 text-xs font-medium transition" :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'" @click="clearNotifications">
@@ -360,12 +474,11 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
                   </button>
                 </div>
               </div>
-              <div class="app-scrollbar overflow-y-auto overflow-x-hidden" :class="isMobile ? 'h-[calc(100vh-4rem)]' : 'max-h-80'">
+              <div class="app-scrollbar overflow-y-auto overflow-x-hidden" :class="isMobile ? 'min-h-0 flex-1' : 'max-h-80'">
                 <div
                   v-for="item in notifications"
                   :key="item.id"
-                  class="border-b px-4 py-3 last:border-b-0"
-                  :class="isDark ? 'border-stone-800' : 'border-stone-100'"
+                  class="app-split-b px-4 py-3 last:border-b-0"
                 >
                   <p class="truncate text-sm" :class="item.kind === 'error' ? 'text-rose-500' : (isDark ? 'text-stone-200' : 'text-stone-800')" :title="item.text">
                     {{ item.text }}
@@ -376,30 +489,47 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
                   {{ t('topbar.noNotifications') }}
                 </div>
               </div>
+              </div>
             </div>
+            </Transition>
+            </Teleport>
 
+            <Teleport to="body">
+            <Transition name="app-dropdown" :duration="{ enter: 300, leave: 200 }">
             <div
               v-if="taskListOpen"
-              class="z-40 overflow-hidden border shadow-xl md:absolute md:right-12 md:top-12 md:w-[26rem] md:rounded-2xl"
-              :class="isMobile ? (isDark ? 'fixed inset-0 z-[80] h-screen w-screen border-none rounded-none bg-stone-950' : 'fixed inset-0 z-[80] h-screen w-screen border-none rounded-none bg-white') : (isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white')"
+              data-topbar-menu
+              class="app-dropdown-surface app-frost-popover z-[90]"
+              :class="isMobile
+                ? 'app-overlay-screen fixed inset-0 flex flex-col border-none rounded-none'
+                : 'fixed right-16 top-[calc(var(--safe-top,0px)+4.25rem)] w-[26rem] rounded-2xl'"
+              @click.stop
             >
-              <div class="flex items-center justify-between border-b px-4 py-3" :class="isDark ? 'border-stone-700' : 'border-stone-200'">
+              <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[inherit]">
+              <div
+                class="app-split-b flex shrink-0 items-center justify-between px-4 py-3"
+              >
                 <p class="text-sm font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-900'">{{ t('topbar.tasks') }}</p>
                 <div class="flex items-center gap-2">
-                  <button class="inline-flex items-center rounded-full px-3 py-1.5 text-xs font-medium transition" :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'" @click="clearFinishedTasksFromPanel">
-                    {{ t('topbar.clearFinished') }}
+                  <button
+                    class="inline-flex h-9 w-9 items-center justify-center rounded-full transition"
+                    :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
+                    :title="t('topbar.clearFinished')"
+                    :aria-label="t('topbar.clearFinished')"
+                    @click="clearFinishedTasksFromPanel"
+                  >
+                    <IconClear class="h-4 w-4" />
                   </button>
                   <button class="inline-flex h-9 w-9 items-center justify-center rounded-full transition" :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'" @click="taskListOpen = false">
                     <IconClose class="h-4 w-4" />
                   </button>
                 </div>
               </div>
-              <div class="app-scrollbar overflow-y-auto overflow-x-hidden" :class="isMobile ? 'h-[calc(100vh-4rem)]' : 'max-h-96'">
+              <div class="app-scrollbar overflow-y-auto overflow-x-hidden" :class="isMobile ? 'min-h-0 flex-1' : 'max-h-96'">
                 <div
                   v-for="task in app.tasks"
                   :key="task.id"
-                  class="border-b px-4 py-3 last:border-b-0"
-                  :class="isDark ? 'border-stone-800' : 'border-stone-100'"
+                  class="app-split-b px-4 py-3 last:border-b-0"
                 >
                   <div class="flex min-w-0 items-start justify-between gap-3">
                     <p class="min-w-0 truncate text-sm font-medium" :class="isDark ? 'text-stone-100' : 'text-stone-900'" :title="task.name">{{ task.name }}</p>
@@ -440,17 +570,28 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
                   {{ t('topbar.noTasks') }}
                 </div>
               </div>
+              </div>
             </div>
+            </Transition>
+            </Teleport>
           </div>
         </div>
       </div>
 
-      <div class="relative z-10 flex flex-1 gap-5 overflow-hidden p-3 md:p-6">
+      <div
+        class="relative z-10 flex min-h-0 flex-1 overflow-hidden"
+        :class="isMobile && activeTab === 'albums' ? 'p-0' : 'gap-5 p-3 md:p-6'"
+      >
         <!-- Keep mounted so photo detail overlay works from other tabs. -->
-        <div v-show="activeTab === 'albums'" class="min-h-0 min-w-0 w-full">
+        <div
+          v-show="activeTab === 'albums'"
+          class="min-h-0 min-w-0 h-full w-full"
+          :class="activeTab === 'albums' ? '' : 'pointer-events-none'"
+        >
           <AlbumPanel
             ref="albumPanelRef"
             :is-dark="isDark"
+            :grid-paused="activeTab !== 'albums'"
             :busy-albums="app.busy.albums"
             :albums="app.albums"
             :shared-albums="app.sharedAlbums"
@@ -465,6 +606,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             :similar-loading="app.aiSimilarLoading"
             :album-people="app.albumPeople"
             :album-people-loading="app.albumPeopleLoading"
+            :album-face-hints-loading="app.albumFaceHintsLoading"
             :album-face-suggestions="app.albumFaceSuggestionsDisplay"
             :album-faces-editable="app.albumFacesEditable"
             :album-faces-owner="app.albumFacesOwner"
@@ -499,7 +641,6 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             @show-photos="app.showAlbumPhotos"
             @find-similar="app.findSimilarPhotos"
             @search-text="app.searchAlbumByText"
-            @filter-person="app.filterAlbumByPerson"
             @refresh-album-people="() => app.refreshPeopleForAlbum()"
             @patch-album-person="(id, updates) => app.patchAlbumPerson(id, updates)"
             @remove-album-center="(body) => app.removeAlbumPersonCenter(body)"
@@ -527,7 +668,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
               :data="app.dashboard"
               :loading="app.dashboardLoading"
               :error="app.dashboardError"
-              @refresh="app.refreshDashboard"
+              @refresh="() => app.refreshDashboard()"
               @navigate="(tab) => (activeTab = tab)"
               @select-album="openDashboardAlbum"
             />
@@ -543,6 +684,8 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
               :busy-list="app.busy.list"
               :busy-upload="app.busy.upload"
               :can-go-up="app.canGoUp"
+              :can-go-back="app.canGoBack"
+              :can-go-forward="app.canGoForward"
               :clipboard-count="app.clipboard.length"
               :clipboard-mode="app.clipboardMode"
               :current-path="app.currentPath"
@@ -562,6 +705,8 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
               @delete-selected="app.deleteSelected"
               @download-entry="app.downloadEntry"
               @go-up="app.goUp"
+              @go-back="app.goBack"
+              @go-forward="app.goForward"
               @load-more="app.loadMoreEntries"
               @navigate="app.navigateTo"
               @new-folder="app.promptNewFolder"
@@ -583,6 +728,8 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
           <div class="min-h-0 min-w-0 w-full">
             <SettingsPanel
               :is-dark="isDark"
+              :initial-section="settingsSection"
+              :section-focus="settingsFocus"
               :members="app.members"
               :settings="app.settings"
               :ai-status="app.aiStatus"
@@ -590,8 +737,11 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
               :current-user="app.currentUser"
               :current-locale="app.userLocale"
               :user-avatar="app.userAvatar"
+              :wallpaper="app.userWallpaper"
+              :accent="app.userAccent"
               :on-update-password="app.updatePassword"
               :on-upload-avatar="app.uploadAvatar"
+              :on-upload-wallpaper="app.uploadWallpaper"
               :on-ai-index="app.queueAiIndex"
               :user-role="app.userRole"
               :webdav-shares="app.webdavShares"
@@ -601,6 +751,8 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
               @update-member="app.updateMember"
               @update-password="app.updatePassword"
               @update-preferences="app.updatePreferences"
+              @preview-wallpaper="app.previewWallpaper"
+              @preview-accent="app.previewAccent"
               @delete-member="app.deleteMember"
               @reset-member-password="({ username, new_password }) => app.resetMemberPassword(username, new_password)"
             />
@@ -622,7 +774,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
 
       <!-- Conflict resolution modal -->
       <ConflictModal
-        v-if="app.conflictModalVisible"
+        :show="app.conflictModalVisible"
         :is-dark="isDark"
         @choose="app.resolveConflict"
         @cancel="app.cancelConflict"
@@ -637,8 +789,8 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
         >
           <button
             v-if="toastVisible"
-            class="fixed left-1/2 top-4 z-[140] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 rounded-xl border px-4 py-3 text-left shadow-2xl"
-            :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'"
+            class="fixed left-1/2 z-[140] w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 rounded-xl app-frost app-card px-4 py-3 text-left shadow-2xl"
+            :style="{ top: 'calc(var(--safe-top, 0px) + 1rem)' }"
             @click="notificationOpen = true; toastVisible = false"
             :title="toastMessage"
           >
@@ -660,7 +812,8 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
     >
       <div
         v-if="toastVisible && !app.loggedIn"
-        class="fixed left-1/2 top-4 z-[140] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 rounded-xl border border-stone-200 bg-white px-4 py-3 text-left shadow-2xl"
+        class="fixed left-1/2 z-[140] w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 rounded-xl border border-stone-200/60 bg-white/70 px-4 py-3 text-left shadow-2xl app-frost"
+        :style="{ top: 'calc(var(--safe-top, 0px) + 1rem)' }"
         :title="toastMessage"
       >
         <p class="truncate text-sm text-stone-800">{{ toastMessage }}</p>

@@ -1,11 +1,17 @@
-//! Domain AI pipelines owned by the index task (Task → Pipeline → Provider).
+//! AI index pipeline hierarchy.
+//!
+//! Start at [`AiIndexPipeline`]:
+//!
+//! `scan → duplicates → embeddings → faces → finalize`
+//!
+//! Embedding and face inference use the shared `ImagePipeline`
+//! (`read → decode → infer → save`) from the parent `pipeline` module.
 
 mod duplicate;
 mod embedding;
 mod face;
 mod finalize;
+mod index;
+pub(crate) mod scan;
 
-pub(crate) use duplicate::run_duplicate_pipeline;
-pub(crate) use embedding::run_embedding_pipeline;
-pub(crate) use face::run_face_pipeline;
-pub(crate) use finalize::run_finalize_pipeline;
+pub(crate) use index::{AiIndexPipeline, IndexPipelineError};

@@ -7,12 +7,16 @@
 //! Old / incompatible JSON fails to parse and loads as empty (no migration).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use super::album_cache::{appearance_identity_key, decode_f32_vector_b64, max_similarity_to_centers, NamedPersonCenter};
+use super::album_cache::{
+    NamedPersonCenter, appearance_identity_key, decode_f32_vector_b64, max_similarity_to_centers,
+};
+use crate::backend::ai::faces::iou_box_xywh;
 use crate::backend::constants::MAX_PERSON_NAME_LEN;
+use crate::backend::constants::{DEFAULT_PERSON_MATCH_MIN_SCORE, RECONCILE_FACE_IOU_MIN};
 
 pub const FACES_CONFIG_VERSION: u32 = 3;
 
@@ -54,6 +58,14 @@ impl AlbumPerson {
 
     pub fn appearance_count(&self) -> usize {
         self.centers.iter().map(|c| c.appearances.len()).sum()
+    }
+
+    /// Distinct source photos this person appears in (not face-box count).
+    pub fn visible_photo_count(&self) -> usize {
+        self.appearances_iter()
+            .map(|a| a.source.as_str())
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// Remove appearances whose identity keys are in `selected`.
@@ -242,6 +254,281 @@ pub fn normalize_person_name(name: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// Album-relative photo path key used to group appearances and detections.
+pub fn normalize_source_path(source: &str) -> String {
+    source
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string()
+}
+
+/// One face detected during the current index pass (for reconcile).
+#[derive(Debug, Clone)]
+pub struct ReconcileDetection {
+    pub face_id: String,
+    pub box_xywh: [f32; 4],
+    pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileStats {
+    pub updated: usize,
+    pub unchanged: usize,
+    pub unmatched_appearances: usize,
+}
+
+struct AppearanceRef {
+    person_id: String,
+    center_idx: usize,
+    app_idx: usize,
+    old_box: [f32; 4],
+}
+
+fn boxes_close(left: &[f32; 4], right: &[f32; 4]) -> bool {
+    (0..4).all(|i| (left[i] - right[i]).abs() < 1e-3)
+}
+
+fn decode_center_embedding(center: &PersonCenter) -> Option<Vec<f32>> {
+    center
+        .center_b64
+        .as_deref()
+        .and_then(|encoded| decode_f32_vector_b64(encoded, None).ok())
+        .filter(|vector| !vector.is_empty())
+}
+
+fn apply_detection_to_appearance(
+    config: &mut FacesConfig,
+    person_id: &str,
+    center_idx: usize,
+    app_idx: usize,
+    detection: &ReconcileDetection,
+) -> bool {
+    let Some(person) = config.find_person_mut(person_id) else {
+        return false;
+    };
+    let Some(center) = person.centers.get_mut(center_idx) else {
+        return false;
+    };
+    let Some(app) = center.appearances.get_mut(app_idx) else {
+        return false;
+    };
+    let changed = !boxes_close(&app.box_xywh, &detection.box_xywh)
+        || app.face_id.as_deref() != Some(detection.face_id.as_str());
+    app.box_xywh = detection.box_xywh;
+    app.face_id = Some(detection.face_id.clone());
+    changed
+}
+
+fn reconcile_source(
+    config: &mut FacesConfig,
+    refs: &[AppearanceRef],
+    detections: &[ReconcileDetection],
+    stats: &mut ReconcileStats,
+) {
+    if refs.is_empty() {
+        return;
+    }
+    let mut matched = vec![false; refs.len()];
+    let mut det_used = vec![false; detections.len()];
+
+    // Exact box match (re-index with stable detector output).
+    for (ri, reference) in refs.iter().enumerate() {
+        for (di, detection) in detections.iter().enumerate() {
+            if det_used[di] || !boxes_close(&reference.old_box, &detection.box_xywh) {
+                continue;
+            }
+            if apply_detection_to_appearance(
+                config,
+                &reference.person_id,
+                reference.center_idx,
+                reference.app_idx,
+                detection,
+            ) {
+                stats.updated += 1;
+            } else {
+                stats.unchanged += 1;
+            }
+            matched[ri] = true;
+            det_used[di] = true;
+            break;
+        }
+    }
+
+    // IoU match (box drift after re-detect).
+    let mut iou_pairs = Vec::new();
+    for (ri, reference) in refs.iter().enumerate() {
+        if matched[ri] {
+            continue;
+        }
+        for (di, detection) in detections.iter().enumerate() {
+            let iou = iou_box_xywh(&reference.old_box, &detection.box_xywh);
+            if iou >= RECONCILE_FACE_IOU_MIN {
+                iou_pairs.push((iou, ri, di));
+            }
+        }
+    }
+    iou_pairs.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (_, ri, di) in iou_pairs {
+        if matched[ri] || det_used[di] {
+            continue;
+        }
+        let reference = &refs[ri];
+        let detection = &detections[di];
+        if apply_detection_to_appearance(
+            config,
+            &reference.person_id,
+            reference.center_idx,
+            reference.app_idx,
+            detection,
+        ) {
+            stats.updated += 1;
+        } else {
+            stats.unchanged += 1;
+        }
+        matched[ri] = true;
+        det_used[di] = true;
+    }
+
+    // Embedding fallback: match unmatched appearances to same-photo detections via person centers.
+    for (ri, reference) in refs.iter().enumerate() {
+        if matched[ri] {
+            continue;
+        }
+        let mut best: Option<(usize, f32)> = None;
+        for (di, detection) in detections.iter().enumerate() {
+            if det_used[di] {
+                continue;
+            }
+            let Some(score) = config.person_match_score(
+                reference.person_id.as_str(),
+                &detection.embedding,
+                decode_center_embedding,
+            ) else {
+                continue;
+            };
+            if score < DEFAULT_PERSON_MATCH_MIN_SCORE {
+                continue;
+            }
+            if best
+                .map(|(_, best_score)| score > best_score)
+                .unwrap_or(true)
+            {
+                best = Some((di, score));
+            }
+        }
+        let Some((di, _)) = best else {
+            stats.unmatched_appearances += 1;
+            continue;
+        };
+        let detection = &detections[di];
+        if apply_detection_to_appearance(
+            config,
+            &reference.person_id,
+            reference.center_idx,
+            reference.app_idx,
+            detection,
+        ) {
+            stats.updated += 1;
+        } else {
+            stats.unchanged += 1;
+        }
+        matched[ri] = true;
+        det_used[di] = true;
+    }
+}
+
+/// After face re-detection, remap named appearances in `faces.json` onto new boxes/ids.
+pub fn reconcile_faces_config(
+    config: &mut FacesConfig,
+    detections_by_source: &HashMap<String, Vec<ReconcileDetection>>,
+) -> ReconcileStats {
+    let mut by_source: HashMap<String, Vec<AppearanceRef>> = HashMap::new();
+    for person in &config.people {
+        for (center_idx, center) in person.centers.iter().enumerate() {
+            for (app_idx, appearance) in center.appearances.iter().enumerate() {
+                let source = normalize_source_path(&appearance.source);
+                by_source.entry(source).or_default().push(AppearanceRef {
+                    person_id: person.id.clone(),
+                    center_idx,
+                    app_idx,
+                    old_box: appearance.box_xywh,
+                });
+            }
+        }
+    }
+
+    let mut stats = ReconcileStats::default();
+    for (source, refs) in by_source {
+        let Some(detections) = detections_by_source.get(&source) else {
+            stats.unmatched_appearances += refs.len();
+            continue;
+        };
+        if detections.is_empty() {
+            stats.unmatched_appearances += refs.len();
+            continue;
+        }
+        reconcile_source(config, &refs, detections, &mut stats);
+    }
+    config.sanitize_covers();
+    stats
+}
+
+/// Named-appearance lookup for excluding assigned faces from natural clustering.
+pub struct AssignedFaceFilter {
+    identity_keys: HashSet<String>,
+    face_ids: HashSet<String>,
+    boxes_by_source: HashMap<String, Vec<[f32; 4]>>,
+}
+
+impl AssignedFaceFilter {
+    pub fn from_config(config: &FacesConfig) -> Self {
+        let mut identity_keys = HashSet::new();
+        let mut face_ids = HashSet::new();
+        let mut boxes_by_source: HashMap<String, Vec<[f32; 4]>> = HashMap::new();
+        for appearance in config
+            .people
+            .iter()
+            .flat_map(|person| person.appearances_iter())
+        {
+            identity_keys.insert(appearance.identity_key());
+            if let Some(face_id) = appearance.face_id.as_deref() {
+                face_ids.insert(face_id.to_string());
+            }
+            boxes_by_source
+                .entry(normalize_source_path(&appearance.source))
+                .or_default()
+                .push(appearance.box_xywh);
+        }
+        Self {
+            identity_keys,
+            face_ids,
+            boxes_by_source,
+        }
+    }
+
+    /// Whether a detected face belongs to a named person (exact key, face_id, or IoU on same photo).
+    pub fn is_assigned(&self, source: &str, box_xywh: &[f32; 4], face_id: Option<&str>) -> bool {
+        let key = appearance_identity_key(source, box_xywh);
+        if self.identity_keys.contains(&key) {
+            return true;
+        }
+        if face_id.is_some_and(|id| self.face_ids.contains(id)) {
+            return true;
+        }
+        let source = normalize_source_path(source);
+        self.boxes_by_source.get(&source).is_some_and(|boxes| {
+            boxes
+                .iter()
+                .any(|named| iou_box_xywh(named, box_xywh) >= RECONCILE_FACE_IOU_MIN)
+        })
+    }
+}
+
 impl FacesConfig {
     /// Stable keys for named appearances (`hash(source|box)`).
     pub fn assigned_appearance_keys(&self) -> HashSet<String> {
@@ -280,7 +567,11 @@ impl FacesConfig {
         Ok(())
     }
 
-    pub fn set_cover(&mut self, person_id: &str, appearance: &PersonAppearance) -> Result<(), String> {
+    pub fn set_cover(
+        &mut self,
+        person_id: &str,
+        appearance: &PersonAppearance,
+    ) -> Result<(), String> {
         let key = appearance.identity_key();
         let person = self
             .find_person_mut(person_id)
@@ -546,6 +837,7 @@ mod tests {
         assert!(!raw.contains("face_id"));
         assert!(!raw.contains("center_id"));
         assert_eq!(loaded.people[0].appearance_count(), 2);
+        assert_eq!(loaded.people[0].visible_photo_count(), 2);
 
         let score = loaded
             .person_match_score(&person_id, &[0.0, 1.0], |c| {
@@ -556,6 +848,30 @@ mod tests {
             .unwrap();
         assert!(score > 0.99);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn visible_photo_count_dedupes_same_source() {
+        let mut config = FacesConfig::default();
+        config
+            .adopt_cluster_as_person(
+                "Pat",
+                vec![
+                    PersonAppearance::new("a.jpg", [0.1, 0.1, 0.2, 0.2]),
+                    PersonAppearance::new("a.jpg", [0.5, 0.5, 0.2, 0.2]),
+                    PersonAppearance::new("b.jpg", [0.1, 0.1, 0.2, 0.2]),
+                ],
+                PersonCenter {
+                    id: "c1".to_string(),
+                    label: None,
+                    embedding_ref: None,
+                    center_b64: None,
+                    appearances: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(config.people[0].appearance_count(), 3);
+        assert_eq!(config.people[0].visible_photo_count(), 2);
     }
 
     #[test]
@@ -715,11 +1031,12 @@ mod tests {
                 },
             )
             .unwrap();
-        config.set_cover(
-            &person_id,
-            &PersonAppearance::new("a.jpg", [0.1, 0.2, 0.3, 0.4]),
-        )
-        .unwrap();
+        config
+            .set_cover(
+                &person_id,
+                &PersonAppearance::new("a.jpg", [0.1, 0.2, 0.3, 0.4]),
+            )
+            .unwrap();
         let person = config.find_person_mut(&person_id).unwrap();
         person.centers.clear();
         config.sanitize_covers();
@@ -765,10 +1082,11 @@ mod tests {
         let person = config.find_person(&person_id).unwrap();
         assert_eq!(person.centers.len(), 1);
         assert_eq!(person.centers[0].id, c2);
-        assert!(!config.assigned_appearance_keys().contains(
-            &PersonAppearance::new("a.jpg", [0.1, 0.2, 0.3, 0.4])
-            .identity_key(),
-        ));
+        assert!(
+            !config
+                .assigned_appearance_keys()
+                .contains(&PersonAppearance::new("a.jpg", [0.1, 0.2, 0.3, 0.4]).identity_key(),)
+        );
     }
 
     #[test]
@@ -777,6 +1095,179 @@ mod tests {
         let (person_id, _, _) = two_center_person(&mut config);
         assert!(config.remove_center(&person_id, "missing").is_err());
         assert!(config.remove_center("missing", "c1").is_err());
+    }
+
+    #[test]
+    fn assigned_face_filter_matches_reconciled_box_by_iou() {
+        let mut config = FacesConfig::default();
+        config
+            .adopt_cluster_as_person(
+                "Ada",
+                vec![PersonAppearance {
+                    source: "a.jpg".into(),
+                    box_xywh: [0.11, 0.11, 0.20, 0.20],
+                    face_id: Some("named-face".into()),
+                }],
+                PersonCenter {
+                    id: "c1".into(),
+                    label: None,
+                    embedding_ref: None,
+                    center_b64: None,
+                    appearances: Vec::new(),
+                },
+            )
+            .unwrap();
+        let filter = AssignedFaceFilter::from_config(&config);
+        assert!(filter.is_assigned("a.jpg", &[0.10, 0.10, 0.20, 0.20], None));
+        assert!(filter.is_assigned("a.jpg", &[0.10, 0.10, 0.20, 0.20], Some("named-face")));
+        assert!(!filter.is_assigned("b.jpg", &[0.10, 0.10, 0.20, 0.20], None));
+    }
+
+    #[test]
+    fn reconcile_faces_config_matches_by_iou() {
+        let mut config = FacesConfig::default();
+        let old_box = [0.10, 0.10, 0.20, 0.20];
+        let person_id = config
+            .adopt_cluster_as_person(
+                "Ada",
+                vec![PersonAppearance::new("2026/photo.jpg", old_box)],
+                PersonCenter {
+                    id: "c1".into(),
+                    label: None,
+                    embedding_ref: None,
+                    center_b64: Some(encode_f32_vector_b64(&[1.0, 0.0])),
+                    appearances: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let new_box = [0.11, 0.11, 0.20, 0.20];
+        let mut detections = HashMap::new();
+        detections.insert(
+            "2026/photo.jpg".to_string(),
+            vec![ReconcileDetection {
+                face_id: "new-face-id".to_string(),
+                box_xywh: new_box,
+                embedding: vec![0.0, 1.0],
+            }],
+        );
+        let stats = reconcile_faces_config(&mut config, &detections);
+        assert_eq!(stats.updated, 1);
+        assert_eq!(stats.unmatched_appearances, 0);
+
+        let app = &config.find_person(&person_id).unwrap().centers[0].appearances[0];
+        assert_eq!(app.box_xywh, new_box);
+        assert_eq!(app.face_id.as_deref(), Some("new-face-id"));
+        assert!(
+            config
+                .assigned_appearance_keys()
+                .contains(&PersonAppearance::new("2026/photo.jpg", new_box).identity_key(),)
+        );
+    }
+
+    #[test]
+    fn reconcile_faces_config_falls_back_to_embedding() {
+        let mut config = FacesConfig::default();
+        let person_id = config
+            .adopt_cluster_as_person(
+                "Bob",
+                vec![PersonAppearance::new("x.jpg", [0.05, 0.05, 0.15, 0.15])],
+                PersonCenter {
+                    id: "c1".into(),
+                    label: None,
+                    embedding_ref: None,
+                    center_b64: Some(encode_f32_vector_b64(&[1.0, 0.0])),
+                    appearances: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let new_box = [0.55, 0.55, 0.15, 0.15];
+        let mut detections = HashMap::new();
+        detections.insert(
+            "x.jpg".to_string(),
+            vec![ReconcileDetection {
+                face_id: "emb-match".to_string(),
+                box_xywh: new_box,
+                embedding: vec![1.0, 0.0],
+            }],
+        );
+        let stats = reconcile_faces_config(&mut config, &detections);
+        assert_eq!(stats.updated, 1);
+        let app = &config.find_person(&person_id).unwrap().centers[0].appearances[0];
+        assert_eq!(app.box_xywh, new_box);
+        assert_eq!(app.face_id.as_deref(), Some("emb-match"));
+    }
+
+    #[test]
+    fn reconcile_faces_config_one_to_one_two_people() {
+        let mut config = FacesConfig::default();
+        let box_a = [0.10, 0.10, 0.20, 0.20];
+        let box_b = [0.55, 0.10, 0.20, 0.20];
+        config
+            .adopt_cluster_as_person(
+                "Left",
+                vec![PersonAppearance::new("group.jpg", box_a)],
+                PersonCenter {
+                    id: "c1".into(),
+                    label: None,
+                    embedding_ref: None,
+                    center_b64: Some(encode_f32_vector_b64(&[1.0, 0.0])),
+                    appearances: Vec::new(),
+                },
+            )
+            .unwrap();
+        config
+            .adopt_cluster_as_person(
+                "Right",
+                vec![PersonAppearance::new("group.jpg", box_b)],
+                PersonCenter {
+                    id: "c2".into(),
+                    label: None,
+                    embedding_ref: None,
+                    center_b64: Some(encode_f32_vector_b64(&[0.0, 1.0])),
+                    appearances: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let drift_a = [0.12, 0.12, 0.20, 0.20];
+        let drift_b = [0.57, 0.12, 0.20, 0.20];
+        let mut detections = HashMap::new();
+        detections.insert(
+            "group.jpg".to_string(),
+            vec![
+                ReconcileDetection {
+                    face_id: "face-a".to_string(),
+                    box_xywh: drift_a,
+                    embedding: vec![1.0, 0.0],
+                },
+                ReconcileDetection {
+                    face_id: "face-b".to_string(),
+                    box_xywh: drift_b,
+                    embedding: vec![0.0, 1.0],
+                },
+            ],
+        );
+        let stats = reconcile_faces_config(&mut config, &detections);
+        assert_eq!(stats.updated, 2);
+        assert_eq!(stats.unmatched_appearances, 0);
+
+        let mut boxes: Vec<[f32; 4]> = config
+            .people
+            .iter()
+            .flat_map(|p| {
+                p.centers
+                    .iter()
+                    .flat_map(|c| c.appearances.iter().map(|a| a.box_xywh))
+            })
+            .collect();
+        boxes.sort_by(|left, right| {
+            left[0]
+                .partial_cmp(&right[0])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        assert_eq!(boxes, vec![drift_a, drift_b]);
     }
 
     #[test]

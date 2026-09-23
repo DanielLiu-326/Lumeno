@@ -47,7 +47,7 @@ cargo +nightly run
 
 服务监听在 `http://localhost:3000`。首次运行时会创建管理员账户，并在 `dist/data/` 写入用户、会话、设置和 HMAC 密钥等持久化数据。
 
-> 未设置 `BOOTSTRAP_ADMIN_USER` 和 `BOOTSTRAP_ADMIN_PASSWORD` 时，应用会使用 `admin` / `changeme` 创建初始管理员。生产环境务必显式设置这两个变量。
+> 未设置 `BOOTSTRAP_ADMIN_PASSWORD` 时，首次启动会生成随机管理员密码并只打印一次到标准错误。可用 `BOOTSTRAP_ADMIN_USER` 自定义用户名（默认 `admin`）。
 
 ## 开发与构建
 
@@ -78,7 +78,7 @@ npm run dev
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `BOOTSTRAP_ADMIN_USER` | 首次启动时创建的管理员用户名 | `admin` |
-| `BOOTSTRAP_ADMIN_PASSWORD` | 首次启动时创建的管理员密码 | `changeme` |
+| `BOOTSTRAP_ADMIN_PASSWORD` | 首次启动时创建的管理员密码 | 未设置则生成随机密码并打印一次 |
 | `TRUST_PROXY` | 设为 `1` 或 `true` 后信任反向代理的 `X-Forwarded-Proto`，用于 HTTPS Cookie 判断 | 未启用 |
 
 只有在反向代理会正确覆盖客户端传入的 `X-Forwarded-Proto` 时，才应启用 `TRUST_PROXY`。
@@ -97,7 +97,7 @@ npm run dev
 ## 反向代理与安全
 
 - 使用 HTTPS 暴露服务，并仅在可信代理后启用 `TRUST_PROXY`。
-- 更改默认管理员密码，限制 `dist/data/` 的文件系统访问权限。
+- 首次启动请从日志记下管理员密码（或自行设置 `BOOTSTRAP_ADMIN_PASSWORD`），并限制 `dist/data/` 的文件系统访问权限。
 - WebDAV 路径为 `/dav/`；应与主站使用同一套认证和 HTTPS 策略。
 - 不要将 `.env` 文件、Cloudflare 凭据或 `dist/data/` 内容提交到版本控制。
 
@@ -123,7 +123,7 @@ cd .. && cargo +nightly test
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `BOOTSTRAP_ADMIN_USER` | 首次启动时创建的管理员用户名 | `admin` |
-| `BOOTSTRAP_ADMIN_PASSWORD` | 首次启动时创建的管理员密码 | `changeme` |
+| `BOOTSTRAP_ADMIN_PASSWORD` | 首次启动时创建的管理员密码 | 未设置则生成随机密码并打印一次 |
 | `TRUST_PROXY` | 设为 `1` 或 `true` 后信任反向代理的 `X-Forwarded-Proto`，用于 HTTPS Cookie 判断 | 未启用 |
 
 只有在反向代理会正确覆盖客户端传入的 `X-Forwarded-Proto` 时，才应启用 `TRUST_PROXY`。
@@ -142,7 +142,7 @@ cd .. && cargo +nightly test
 ## 反向代理与安全
 
 - 使用 HTTPS 暴露服务，并仅在可信代理后启用 `TRUST_PROXY`。
-- 更改默认管理员密码，限制 `dist/data/` 的文件系统访问权限。
+- 首次启动请从日志记下管理员密码（或自行设置 `BOOTSTRAP_ADMIN_PASSWORD`），并限制 `dist/data/` 的文件系统访问权限。
 - WebDAV 路径为 `/dav/`；应与主站使用同一套认证和 HTTPS 策略。
 - 不要将 `.env` 文件、Cloudflare 凭据或 `dist/data/` 内容提交到版本控制。
 

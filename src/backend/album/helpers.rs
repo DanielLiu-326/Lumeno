@@ -1,39 +1,25 @@
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use axum::body::Body;
-use axum::extract::{Path, Query};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::Response;
-use axum::{Extension, Json};
-use base64::Engine;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
-use function_name::named;
-use futures::future::BoxFuture;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256, Sha512};
-use std::collections::{HashMap, HashSet};
+use serde_json::Value;
+use std::collections::HashSet;
 use std::io::BufReader;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::u8;
-use tokio::sync::Notify;
-use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::backend::common::{
-    AppError, AppState, ConcurrencyLimiter, ConcurrencyPermit, Token, create_response,
-    into_host_path_safely, move_file_or_dir,
+use crate::backend::common::{AppError, AppState, into_host_path_safely, move_file_or_dir};
+use crate::backend::i18n::trf;
+use crate::backend::tasks::{
+    Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused,
 };
-use crate::backend::i18n::{RequestLocale, tr, trf};
-use crate::backend::tasks::{Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::media::{
-    collect_album_images, ensure_thumbnail_cached, exif_cache_key, find_xmp_sidecar, is_image_path,
-    is_raw_path,
+    collect_album_images, exif_cache_key, find_xmp_sidecar, is_image_path, is_raw_path,
 };
 use super::types::*;
 
@@ -96,9 +82,16 @@ fn album_dir_name(album_dir: &FsPath) -> String {
 }
 
 pub(crate) fn is_safe_album_cache_id(cache_id: &str) -> bool {
-    !cache_id.is_empty()
-        && !cache_id.starts_with('.')
-        && !cache_id.contains(['/', '\\', '\0'])
+    !cache_id.is_empty() && !cache_id.starts_with('.') && !cache_id.contains(['/', '\\', '\0'])
+}
+
+/// Single path segment for per-owner cache dirs. Matches username rules so
+/// `cache/thumbnails/{owner}` cannot escape the thumbnails root.
+pub(crate) fn is_safe_cache_owner(owner: &str) -> bool {
+    !owner.is_empty()
+        && owner.len() <= 16
+        && !owner.starts_with('.')
+        && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Ensure official `album_meta.json` has a stable cache pointer.
@@ -243,7 +236,10 @@ pub(crate) fn parse_xmp_meta(content: &str) -> ImageSoftwareMeta {
 }
 
 /// Write a `<darktable:colorlabels>` block using a quick-xml Writer.
-pub(crate) fn write_colorlabels_block<W: std::io::Write>(writer: &mut Writer<W>, labels: &[ColorLabel]) {
+pub(crate) fn write_colorlabels_block<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    labels: &[ColorLabel],
+) {
     if labels.is_empty() {
         return;
     }
@@ -489,6 +485,16 @@ pub(crate) fn is_user_visible_album_dir(name: &str) -> bool {
     !name.is_empty() && !name.starts_with("__")
 }
 
+/// Returns the two canonical XMP sidecar names for an image file:
+/// `{stem}.xmp` (Lightroom style) and `{filename}.xmp` (Darktable style).
+pub(crate) fn possible_xmp_names(image_name: &str) -> [String; 2] {
+    let stem = FsPath::new(image_name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    [format!("{stem}.xmp"), format!("{image_name}.xmp")]
+}
+
 pub(crate) fn album_display_name(meta: &AlbumMeta, dir_name: &str) -> String {
     let trimmed = meta.name.trim();
     if trimmed.is_empty() {
@@ -505,6 +511,45 @@ pub(crate) fn album_access_key(viewer: &str, owner: &str, dir_name: &str) -> Str
     } else {
         format!("{owner}/{dir_name}")
     }
+}
+
+/// Normalize a cover path to `albums/{album}/...` under the album folder.
+/// Empty input clears the cover. Paths from another album are rejected.
+pub(crate) fn normalize_album_cover_path(
+    cover: &str,
+    album_name: &str,
+    previous_album_name: &str,
+) -> Option<String> {
+    let cover = cover.trim().replace('\\', "/");
+    let cover = cover.trim_start_matches('/').to_string();
+    if cover.is_empty() {
+        return Some(String::new());
+    }
+    let new_prefix = format!("albums/{album_name}/");
+    let old_prefix = format!("albums/{previous_album_name}/");
+    let rest = if let Some(rest) = cover.strip_prefix(&new_prefix) {
+        rest.to_string()
+    } else if previous_album_name != album_name {
+        if let Some(rest) = cover.strip_prefix(&old_prefix) {
+            rest.to_string()
+        } else if !cover.contains('/') {
+            cover
+        } else {
+            return None;
+        }
+    } else if !cover.contains('/') {
+        cover
+    } else {
+        return None;
+    };
+    if rest.is_empty()
+        || rest
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    Some(format!("{new_prefix}{rest}"))
 }
 
 pub(crate) fn normalize_tags(tags: &[String]) -> Vec<String> {
@@ -674,7 +719,7 @@ pub(crate) async fn ensure_exif_cached(
         .await
         .map_err(|_| AppError::NotFound(source.display().to_string()))?;
 
-    let cache_key = exif_cache_key(source, &metadata);
+    let cache_key = exif_cache_key(data_path, source, &metadata);
     let cache_path = cache_exif_root(data_path).join(format!("{cache_key}.json"));
 
     if cache_path.exists() {
@@ -793,7 +838,7 @@ pub(crate) fn read_exif_cache_if_present(
     source: &FsPath,
     metadata: &std::fs::Metadata,
 ) -> Option<ExifCacheEntry> {
-    let cache_key = exif_cache_key(source, metadata);
+    let cache_key = exif_cache_key(data_path, source, metadata);
     let cache_path = cache_exif_root(data_path).join(format!("{cache_key}.json"));
     let cached_raw = std::fs::read_to_string(cache_path).ok()?;
     let cached = serde_json::from_str::<ExifCacheEntry>(&cached_raw).ok()?;
@@ -834,11 +879,14 @@ pub(crate) async fn write_image_software_meta_if_needed(
     Ok(())
 }
 
-
 // ── Migration: JSON sidecars → XMP ───────────────────────────────────────────
 
 #[async_recursion]
-pub(crate) async fn scan_json_sidecars_recursive(dir: &FsPath, excluded_dir: &FsPath, out: &mut Vec<PathBuf>) {
+pub(crate) async fn scan_json_sidecars_recursive(
+    dir: &FsPath,
+    excluded_dir: &FsPath,
+    out: &mut Vec<PathBuf>,
+) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
         return;
     };
@@ -1074,6 +1122,53 @@ pub(crate) async fn rebuild_album_index(
     Ok(Some(index))
 }
 
+pub(crate) fn import_album_task_key(owner: &str, album: &str) -> String {
+    format!("import-album:{owner}:{album}")
+}
+
+pub(crate) async fn queue_rebuild_album_index(
+    cfg: Arc<AppState>,
+    task_owner: String,
+    root_path: PathBuf,
+    album_owner: String,
+    album_name: String,
+    locale: &str,
+) {
+    let task = Arc::new(RebuildIndexTask::new(
+        trf(
+            locale,
+            "task.rebuild_index",
+            &[("album", album_name.clone())],
+        ),
+        task_owner,
+        Some(cfg.clone()),
+        cfg.data_path.clone(),
+        root_path,
+        album_owner,
+        album_name,
+        locale.to_string(),
+    ));
+    let _ = cfg.task_mgr.add_task_if_absent(task).await;
+}
+
+pub(crate) async fn refresh_album_index_after_changes(
+    cfg: &Arc<AppState>,
+    root_path: &FsPath,
+    username: &str,
+    album_name: &str,
+    locale: &str,
+) {
+    queue_rebuild_album_index(
+        cfg.clone(),
+        username.to_string(),
+        root_path.to_path_buf(),
+        username.to_string(),
+        album_name.to_string(),
+        locale,
+    )
+    .await;
+}
+
 pub(crate) async fn import_album_files(
     cfg: &Arc<AppState>,
     root_path: &FsPath,
@@ -1084,6 +1179,8 @@ pub(crate) async fn import_album_files(
     conflict_action: crate::backend::files::ConflictAction,
     task_base: Option<&TaskBase>,
     cancel: Option<&AtomicBool>,
+    rebuild_after: bool,
+    locale: &str,
 ) -> Result<usize, AppError> {
     let album_base = albums_root(root_path).join(album_name);
     tokio::fs::create_dir_all(&album_base)
@@ -1178,9 +1275,8 @@ pub(crate) async fn import_album_files(
         {
             let image_dir = image.parent().unwrap_or_else(|| FsPath::new(""));
             let target_dir = dst.parent().unwrap_or_else(|| FsPath::new(""));
-            let stem = image.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let img_name_str = image.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            for xmp_filename in [format!("{stem}.xmp"), format!("{img_name_str}.xmp")] {
+            for xmp_filename in possible_xmp_names(img_name_str) {
                 let xmp_src = image_dir.join(&xmp_filename);
                 if xmp_src.exists() {
                     let xmp_dst = target_dir.join(&xmp_filename);
@@ -1205,24 +1301,9 @@ pub(crate) async fn import_album_files(
         return Ok(imported);
     }
 
-    let _ = rebuild_album_index(
-        cfg.data_path.as_path(),
-        root_path,
-        username,
-        album_name,
-        None,
-        None,
-        None,
-    )
-    .await;
-
-    let _ = crate::backend::ai::queue_owner_ai_index(
-        cfg.clone(),
-        username.to_string(),
-        Some(album_name.to_string()),
-        "en",
-    )
-    .await;
+    if rebuild_after {
+        refresh_album_index_after_changes(cfg, root_path, username, album_name, locale).await;
+    }
 
     Ok(imported)
 }
@@ -1353,6 +1434,20 @@ impl Task for RebuildIndexTask {
     }
 }
 
+/// Drop leftover files under `albums/__uploading/...` after a successful import.
+/// Regular user folders passed as import sources are never removed.
+async fn cleanup_upload_staging_sources(root_path: &FsPath, sources: &[String]) {
+    let staging_root = albums_root(root_path).join("__uploading");
+    for source in sources {
+        let Ok(full) = into_host_path_safely(root_path, source) else {
+            continue;
+        };
+        if full.starts_with(&staging_root) {
+            let _ = tokio::fs::remove_dir_all(&full).await;
+        }
+    }
+}
+
 pub(crate) struct ImportAlbumTask {
     base: TaskBase,
     cfg: Arc<AppState>,
@@ -1399,6 +1494,10 @@ impl Task for ImportAlbumTask {
         &self.base
     }
 
+    fn deduplication_key(&self) -> Option<String> {
+        Some(import_album_task_key(&self.username, &self.album_name))
+    }
+
     fn cancellable(&self) -> bool {
         true
     }
@@ -1421,6 +1520,8 @@ impl Task for ImportAlbumTask {
             self.conflict_action,
             Some(&self.base),
             Some(&self.cancel),
+            false,
+            self.locale.as_str(),
         )
         .await
         {
@@ -1432,17 +1533,22 @@ impl Task for ImportAlbumTask {
                     self.base.set_status(TaskStatus::Cancelled).await;
                     return;
                 }
+                cleanup_upload_staging_sources(&self.root_path, &self.sources).await;
                 self.base
                     .set_cur_task(format!("Finished, {imported} photos imported"))
                     .await;
                 self.base.set_status(TaskStatus::Finished).await;
-                let _ = crate::backend::ai::queue_owner_ai_index(
-                    self.cfg.clone(),
-                    self.username.clone(),
-                    Some(self.album_name.clone()),
-                    self.locale.as_str(),
-                )
-                .await;
+                if imported > 0 {
+                    queue_rebuild_album_index(
+                        self.cfg.clone(),
+                        self.username.clone(),
+                        self.root_path.clone(),
+                        self.username.clone(),
+                        self.album_name.clone(),
+                        self.locale.as_str(),
+                    )
+                    .await;
+                }
             }
             Err(e) => {
                 if self.cancel.load(Ordering::Relaxed) {
@@ -1490,15 +1596,19 @@ pub(crate) async fn load_or_queue_album_index(
     album_name: &str,
     locale: &str,
 ) -> Result<Option<AlbumIndex>, AppError> {
-    if let Some(index) = load_existing_album_index(
-        cfg.data_path.as_path(),
-        root_path,
-        index_owner,
-        album_name,
-    )
-    .await?
+    if let Some(index) =
+        load_existing_album_index(cfg.data_path.as_path(), root_path, index_owner, album_name)
+            .await?
     {
         return Ok(Some(index));
+    }
+
+    if cfg
+        .task_mgr
+        .has_active_key(&import_album_task_key(index_owner, album_name))
+        .await
+    {
+        return Ok(None);
     }
 
     let task = Arc::new(RebuildIndexTask::new(
@@ -1519,3 +1629,39 @@ pub(crate) async fn load_or_queue_album_index(
     Ok(None)
 }
 
+#[cfg(test)]
+mod cover_path_tests {
+    use super::normalize_album_cover_path;
+
+    #[test]
+    fn keeps_album_relative_cover() {
+        assert_eq!(
+            normalize_album_cover_path("albums/Trip/a.jpg", "Trip", "Trip").as_deref(),
+            Some("albums/Trip/a.jpg")
+        );
+    }
+
+    #[test]
+    fn rewrites_cover_after_rename() {
+        assert_eq!(
+            normalize_album_cover_path("albums/Old/a.jpg", "New", "Old").as_deref(),
+            Some("albums/New/a.jpg")
+        );
+    }
+
+    #[test]
+    fn rejects_cover_from_another_album() {
+        assert_eq!(
+            normalize_album_cover_path("albums/Other/a.jpg", "Trip", "Trip"),
+            None
+        );
+    }
+
+    #[test]
+    fn clears_empty_cover() {
+        assert_eq!(
+            normalize_album_cover_path("  ", "Trip", "Trip").as_deref(),
+            Some("")
+        );
+    }
+}

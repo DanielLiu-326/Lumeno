@@ -210,8 +210,6 @@ impl TaskManager {
         });
     }
 
-    /// Adds a task unless another pending or running task has the same key.
-    /// Returns the active task ID and whether a new task was started.
     pub async fn add_task_if_absent(&self, task: Arc<dyn Task>) -> (Uuid, bool) {
         let Some(key) = task.deduplication_key() else {
             let id = task.uuid();
@@ -241,6 +239,23 @@ impl TaskManager {
             task.execute().await;
         });
         (id, true)
+    }
+
+    pub async fn has_active_key(&self, key: &str) -> bool {
+        let tasks = self.task_set.lock().await;
+        for existing in tasks.values() {
+            if existing.deduplication_key().as_deref() != Some(key) {
+                continue;
+            }
+            let status = *existing.base().status.lock().await;
+            if matches!(
+                status,
+                TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     pub async fn get_task_for_user(&self, id: &Uuid, username: &str) -> Option<Arc<dyn Task>> {

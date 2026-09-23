@@ -1,19 +1,39 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, Transition } from "vue";
 import {
   IconFolderAdd, IconRefresh, IconStar, IconStarOff, IconFilter, IconDatabase,
-  IconCamera, IconClose, IconChevronLeft, IconChevronRight, IconExpand,
+  IconCamera, IconClose, IconChevronLeft, IconChevronRight, IconExpand, IconCollapse,
+  IconViewOriginal,
   IconArrowLeft, IconTrash, IconPencil, IconPlus, IconImage, IconCheck,
-  IconImport, IconZoomIn, IconZoomOut, IconDownload, IconSparkles, IconSearch, IconWand,
+  IconImport, IconZoomIn, IconZoomOut, IconDownload, IconSparkles, IconSearch,   IconWand,
+  IconGrid, IconList, IconGear, IconAlertCircle, IconSort,
 } from "../utils/icons";
 import { t } from "../i18n/index.js";
-import TimelineChart from "./TimelineChart.vue";
+import { albumCoverUrl } from "../utils/albumCover.js";
 import ImportSourceModal from "./ImportSourceModal.vue";
 import CloudFilePicker from "./CloudFilePicker.vue";
 import FilterSidebar from "./FilterSidebar.vue";
+import FilterSheet from "../mobile/sheets/FilterSheet.vue";
+import SortSheet from "../mobile/sheets/SortSheet.vue";
+import ActionSheet from "../mobile/sheets/ActionSheet.vue";
 import AlbumAiToolsModal from "./AlbumAiToolsModal.vue";
 import VirtualGrid from "./VirtualGrid.vue";
 import LazyImage from "./LazyImage.vue";
+import { VList } from "virtua/vue";
+import PhotoCard from "./PhotoCard.vue";
+import ViewSettingsDialog from "./ViewSettingsDialog.vue";
+import AppDialog from "./AppDialog.vue";
+import AppSlider from "./AppSlider.vue";
+import TagChips from "./TagChips.vue";
+import {
+  COLOR_LABELS,
+  THUMB_DEFAULT,
+  THUMB_DETAILS_MIN,
+  THUMB_MAX,
+  hasBelowInfo,
+  loadViewLayout,
+  saveViewLayout,
+} from "../utils/photoCardLayout.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -35,6 +55,8 @@ const props = defineProps({
   availableFormats: { type: Array, default: () => [] },
   dateHistogram: { type: Array, default: () => [] },
   filters: { type: Object, required: true },
+  isolateFilters: { type: Boolean, default: false },
+  emptyLabel: { type: String, default: "" },
   sort: { type: Array, default: () => [] },
   formatSize: { type: Function, required: true },
   formatTime: { type: Function, required: true },
@@ -44,6 +66,7 @@ const props = defineProps({
   selectedCollectionId: { type: String, default: "all" },
   albumPeople: { type: Array, default: () => [] },
   albumPeopleLoading: { type: Boolean, default: false },
+  albumFaceHintsLoading: { type: Boolean, default: false },
   albumFaceSuggestions: { type: Object, default: () => ({ clusters: [] }) },
   albumFacesEditable: { type: Boolean, default: true },
   albumFacesOwner: { type: String, default: "" },
@@ -57,6 +80,10 @@ const props = defineProps({
   onLoadDuplicatesInModal: { type: Function, default: null },
   /** Fetch album-index metadata for paths (EXIF for AI-tool photo opens). */
   fetchPhotosByPaths: { type: Function, default: null },
+  /** Phone shell: hide list + desktop toolbar, keep grid/detail/dialogs. */
+  embedded: { type: Boolean, default: false },
+  /** Pause virtualized grid work while the album overlay is off-screen. */
+  gridPaused: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -82,13 +109,13 @@ const emit = defineEmits([
   "load-more-photos",
   "delete-photos",
   "select-collection",
-  "filter-person",
   "refresh-album-people",
   "patch-album-person",
   "remove-album-center",
   "delete-album-person",
   "adopt-album-cluster",
   "merge-album-cluster",
+  "detail-photo",
 ]);
 
 const importSourceModalOpen = ref(false);
@@ -125,22 +152,51 @@ function handleLocalFileChange(event) {
 }
 
 
-const isMobile = ref(false);
+const isMobile = ref(!!props.embedded);
 const filterSortPanelOpen = ref(false);
+const filterPanelOpen = ref(false);
+const sortPanelOpen = ref(false);
 const aiToolsPanelOpen = ref(false);
+const aiToolsPickerOpen = ref(false);
+const aiToolsInitialSection = ref("faces");
 const mobileSearchOpen = ref(false);
 const mobileSearchInputRef = ref(null);
 const thumbnailPopoverOpen = ref(false);
 const thumbnailBtnRef = ref(null);
 const thumbnailPopoverStyle = ref({});
-const THUMB_DEFAULT = 2;
-const thumbnailSize = ref(THUMB_DEFAULT);
+const viewSettingsOpen = ref(false);
+const viewLayout = ref(loadViewLayout(props.currentUser, { mobile: props.embedded }));
+const zoomChromeLock = ref(null);
+const thumbnailSize = computed({
+  get: () => viewLayout.value.thumbnailSize,
+  set: (value) => {
+    if (!zoomChromeLock.value) {
+      zoomChromeLock.value = {
+        compact: thumbsOnlyLook.value,
+        thumbsOnly: thumbsOnlyLook.value,
+        hideOverlays: hideCardOverlays.value,
+      };
+    }
+    viewLayout.value.thumbnailSize = value;
+    nextTick(() => {
+      if (!photoGridRef.value?.isZoomBusy?.()) zoomChromeLock.value = null;
+    });
+  },
+});
+const forcedThumbsOnly = computed(() => thumbnailSize.value < THUMB_DETAILS_MIN);
+const thumbsOnlyLook = computed(() =>
+  viewLayout.value.compact || forcedThumbsOnly.value || !hasBelowInfo(viewLayout.value),
+);
+const hideCardOverlays = computed(() => forcedThumbsOnly.value);
+const gridCompact = computed(() => zoomChromeLock.value?.compact ?? thumbsOnlyLook.value);
+const gridHideOverlays = computed(() => zoomChromeLock.value?.hideOverlays ?? hideCardOverlays.value);
+const gridThumbsOnly = computed(() => zoomChromeLock.value?.thumbsOnly ?? thumbsOnlyLook.value);
 
 function toggleThumbnailPopover() {
   thumbnailPopoverOpen.value = !thumbnailPopoverOpen.value;
   if (thumbnailPopoverOpen.value && thumbnailBtnRef.value) {
     const rect = thumbnailBtnRef.value.getBoundingClientRect();
-    const pw = 192; // w-48 = 12rem = 192px
+    const pw = 288;
     let left = rect.left + rect.width / 2 - pw / 2;
     if (left + pw > window.innerWidth - 8) left = window.innerWidth - 8 - pw;
     if (left < 8) left = 8;
@@ -152,7 +208,232 @@ function toggleThumbnailPopover() {
   }
 }
 
+function setViewCompact(compact) {
+  if (!compact && thumbnailSize.value < THUMB_DETAILS_MIN) {
+    viewLayout.value = {
+      ...viewLayout.value,
+      compact: false,
+      thumbnailSize: THUMB_DETAILS_MIN,
+    };
+    return;
+  }
+  viewLayout.value = { ...viewLayout.value, compact };
+}
+
+const thumbSizeToastOpen = ref(false);
+let thumbWheelAcc = 0;
+let thumbToastTimer = 0;
+
+function showThumbSizeToast() {
+  thumbSizeToastOpen.value = true;
+  window.clearTimeout(thumbToastTimer);
+  thumbToastTimer = window.setTimeout(() => {
+    thumbSizeToastOpen.value = false;
+  }, 1400);
+}
+
+function stepThumbnailSize(event) {
+  const raw = event.deltaY;
+  const dy = event.deltaMode === 1 ? raw * 16 : event.deltaMode === 2 ? raw * 120 : raw;
+  if (dy && thumbWheelAcc && Math.sign(dy) !== Math.sign(thumbWheelAcc)) {
+    thumbWheelAcc = 0;
+  }
+  thumbWheelAcc += dy;
+  if (Math.abs(thumbWheelAcc) < 36) return false;
+  const dir = thumbWheelAcc > 0 ? -1 : 1;
+  thumbWheelAcc = 0;
+  const next = nextDistinctThumbSize(thumbnailSize.value, dir);
+  if (next === thumbnailSize.value) return false;
+  thumbnailSize.value = next;
+  return true;
+}
+
+function onThumbSizeWheel(event) {
+  stepThumbnailSize(event);
+}
+
+const photoPaneRef = ref(null);
+const photoGridRef = ref(null);
+const pinchLive = ref(false);
+let pinchSession = null;
+
+function rememberZoomFocal(event) {
+  const rect = photoGridRef.value?.getHostRect?.();
+  if (!rect) return;
+  photoGridRef.value?.setZoomFocal?.(event.clientX - rect.left, event.clientY - rect.top);
+}
+
+function onGridZooming(active) {
+  if (active) return;
+  zoomChromeLock.value = null;
+  pinchSession = null;
+  pinchLive.value = false;
+  unbindPinchWindowGuards();
+}
+
+function preventAlbumDragLock(event) {
+  if (event.button !== 0) return;
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  if (target.closest("input, textarea, select, button, a, label, [contenteditable='true']")) return;
+  event.preventDefault();
+}
+
+function onPhotoPaneWheel(event) {
+  if (!(event.ctrlKey || event.metaKey)) return;
+  if (inSpecialView.value || detailPhoto.value) return;
+  event.preventDefault();
+  rememberZoomFocal(event);
+  stepThumbnailSize(event);
+  showThumbSizeToast();
+}
+
+function photoPaneTouchDistance(touches) {
+  return Math.hypot(
+    touches[0].clientX - touches[1].clientX,
+    touches[0].clientY - touches[1].clientY,
+  );
+}
+
+function photoPaneTouchCenter(touches) {
+  const rect = photoGridRef.value?.getHostRect?.()
+    || photoPaneRef.value?.getBoundingClientRect();
+  if (!rect) return { x: 0, y: 0 };
+  return {
+    x: (touches[0].clientX + touches[1].clientX) / 2 - rect.left,
+    y: (touches[0].clientY + touches[1].clientY) / 2 - rect.top,
+  };
+}
+
+function onPhotoPaneTouchStart(event) {
+  if (inSpecialView.value || detailPhoto.value) return;
+  if (event.touches.length < 2) return;
+  const grid = photoGridRef.value;
+  if (!grid) return;
+  if (!pinchSession && grid.isZoomBusy?.()) grid.resetInteraction?.();
+  const center = photoPaneTouchCenter(event.touches);
+  const started = grid.beginPinch?.({
+    focalX: center.x,
+    focalY: center.y,
+  });
+  if (!started) return;
+  event.preventDefault();
+  pinchLive.value = true;
+  pinchSession = {
+    startDist: photoPaneTouchDistance(event.touches),
+    startSize: thumbnailSize.value,
+    scale: 1,
+  };
+  bindPinchWindowGuards();
+}
+
+function onPhotoPaneTouchMove(event) {
+  if (!pinchSession || event.touches.length < 2) return;
+  event.preventDefault();
+  const scale = photoPaneTouchDistance(event.touches) / Math.max(pinchSession.startDist, 1);
+  const center = photoPaneTouchCenter(event.touches);
+  pinchSession.scale = scale;
+  photoGridRef.value?.updatePinch?.({
+    scale,
+    focalX: center.x,
+    focalY: center.y,
+  });
+}
+
+function onPhotoPaneTouchEnd(event) {
+  if (!pinchSession) return;
+  if (event.touches.length >= 2) return;
+  pinchSession = null;
+  pinchLive.value = false;
+  unbindPinchWindowGuards();
+  if (event.type === "touchcancel") {
+    photoGridRef.value?.cancelPinch?.();
+    return;
+  }
+  photoGridRef.value?.commitPinchSnap?.({
+    commit: (next) => {
+      thumbnailSize.value = next;
+      showThumbSizeToast();
+    },
+  });
+}
+
+let pinchWindowBound = false;
+
+function bindPinchWindowGuards() {
+  if (pinchWindowBound) return;
+  pinchWindowBound = true;
+  const opts = { capture: true };
+  window.addEventListener("touchend", onPhotoPaneTouchEnd, opts);
+  window.addEventListener("touchcancel", onPhotoPaneTouchEnd, opts);
+}
+
+function unbindPinchWindowGuards() {
+  if (!pinchWindowBound) return;
+  pinchWindowBound = false;
+  const opts = { capture: true };
+  window.removeEventListener("touchend", onPhotoPaneTouchEnd, opts);
+  window.removeEventListener("touchcancel", onPhotoPaneTouchEnd, opts);
+}
+
+function bindPhotoPaneGestures(el) {
+  if (!el) return;
+  const opts = { passive: false, capture: true };
+  el.addEventListener("touchstart", onPhotoPaneTouchStart, opts);
+  el.addEventListener("touchmove", onPhotoPaneTouchMove, opts);
+  el.addEventListener("touchend", onPhotoPaneTouchEnd, opts);
+  el.addEventListener("touchcancel", onPhotoPaneTouchEnd, opts);
+}
+
+function unbindPhotoPaneGestures(el) {
+  if (!el) return;
+  const opts = { passive: false, capture: true };
+  el.removeEventListener("touchstart", onPhotoPaneTouchStart, opts);
+  el.removeEventListener("touchmove", onPhotoPaneTouchMove, opts);
+  el.removeEventListener("touchend", onPhotoPaneTouchEnd, opts);
+  el.removeEventListener("touchcancel", onPhotoPaneTouchEnd, opts);
+  unbindPinchWindowGuards();
+}
+
+function onThumbToastWheel(event) {
+  event.preventDefault();
+  stepThumbnailSize(event);
+  showThumbSizeToast();
+}
+
+function openViewSettings() {
+  thumbnailPopoverOpen.value = false;
+  viewSettingsOpen.value = true;
+}
+
+function setViewLayout(layout) {
+  viewLayout.value = layout;
+}
+
+watch(photoPaneRef, (el, prev) => {
+  unbindPhotoPaneGestures(prev);
+  bindPhotoPaneGestures(el);
+}, { flush: "post" });
+
+watch(viewLayout, (layout) => {
+  saveViewLayout(props.currentUser, layout, { mobile: props.embedded });
+}, { deep: true });
+
+watch(() => props.currentUser, (user) => {
+  viewLayout.value = loadViewLayout(user, { mobile: props.embedded });
+});
+
 const detailPhoto = ref(null);
+const detailPanelRef = ref(null);
+watch(detailPhoto, (p) => {
+  emit("detail-photo", p);
+  if (!p || props.embedded) return;
+  desktopSearchInputRef.value?.blur();
+  nextTick(() => {
+    detailPanelRef.value?.focus({ preventScroll: true });
+  });
+});
+const detailClosing = ref(false);
 /** When set, detail prev/next navigates this list instead of albumPhotos (AI tools context). */
 const detailNavPhotos = ref(null);
 const detailExpanded = ref(false);
@@ -174,11 +455,13 @@ function loadDetailViewPreferences() {
 const savedDetailViewPreferences = loadDetailViewPreferences();
 const detailOriginalPreference = ref(savedDetailViewPreferences.original ?? true);
 const detailDarktablePreference = ref(savedDetailViewPreferences.darktable ?? true);
+const detailFullscreenPreference = ref(savedDetailViewPreferences.fullscreen ?? false);
 
 function saveDetailViewPreferences() {
   localStorage.setItem(DETAIL_VIEW_PREFERENCES_KEY, JSON.stringify({
     original: detailOriginalPreference.value,
     darktable: detailDarktablePreference.value,
+    fullscreen: detailFullscreenPreference.value,
   }));
 }
 
@@ -186,7 +469,7 @@ const selectMode = ref(false);
 const selectedPhotoPaths = ref(new Set());
 const editRating = ref(0);
 const editColorLabels = ref([]);
-const editTagsText = ref("");
+const editTags = ref([]);
 const imageLoading = ref(false);
 
 // Darktable preview / export
@@ -213,30 +496,29 @@ const shareForm = ref({ username: "", canWrite: false, canDelete: false });
 const shareMutationPending = ref(false);
 
 function updateMobile() {
+  if (props.embedded) {
+    isMobile.value = true;
+    return;
+  }
   isMobile.value = window.innerWidth < 768
     || window.screen.width < 768
     || window.navigator.maxTouchPoints > 0
     || window.matchMedia("(pointer: coarse)").matches;
 }
+
 onMounted(() => {
   updateMobile();
-  filterSortPanelOpen.value = !isMobile.value;
+  filterSortPanelOpen.value = props.embedded ? false : !isMobile.value;
   window.addEventListener("resize", updateMobile);
   window.addEventListener("keydown", onDetailKeydown);
 });
 onBeforeUnmount(() => {
   window.removeEventListener("resize", updateMobile);
   window.removeEventListener("keydown", onDetailKeydown);
+  window.clearTimeout(thumbToastTimer);
+  unbindPhotoPaneGestures(photoPaneRef.value);
   hideFullscreenControls();
 });
-
-const COLOR_LABELS = [
-  { key: "red", color: "bg-red-500", ring: "ring-red-400" },
-  { key: "yellow", color: "bg-yellow-400", ring: "ring-yellow-300" },
-  { key: "green", color: "bg-emerald-500", ring: "ring-emerald-400" },
-  { key: "blue", color: "bg-blue-500", ring: "ring-blue-400" },
-  { key: "purple", color: "bg-purple-500", ring: "ring-purple-400" },
-];
 
 function colorLabels(value) {
   const labels = Array.isArray(value) ? value : String(value || "").split(",");
@@ -249,6 +531,105 @@ const currentAlbumObj = computed(() =>
   props.albums.find((a) => a.dir_name === props.currentAlbum)
   || props.sharedAlbums.find((a) => a.dir_name === props.currentAlbum)
 );
+
+const albumHeroId = ref("");
+const canAlbumVt = typeof document !== "undefined"
+  && typeof document.startViewTransition === "function";
+
+function prefersReducedMotion() {
+  return typeof window !== "undefined"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function albumHeroStyle(dirName) {
+  if (!dirName || albumHeroId.value !== dirName) return undefined;
+  return { viewTransitionName: "album-hero" };
+}
+
+const ALBUM_VT_MS = 340;
+const ALBUM_FETCH_LEAD_MS = 80;
+const ALBUM_PHOTO_LOAD_MIN_MS = 600;
+const albumPhotoLoadHold = ref(false);
+let albumPhotoLoadToken = 0;
+let albumPhotoLoadTimer = 0;
+let stopAlbumPhotoLoadWatch = null;
+
+function beginAlbumPhotoLoadHold() {
+  if (albumPhotoLoadTimer) {
+    window.clearTimeout(albumPhotoLoadTimer);
+    albumPhotoLoadTimer = 0;
+  }
+  stopAlbumPhotoLoadWatch?.();
+  stopAlbumPhotoLoadWatch = null;
+  const token = ++albumPhotoLoadToken;
+  const startedAt = performance.now();
+  albumPhotoLoadHold.value = true;
+  stopAlbumPhotoLoadWatch = watch(
+    () => props.busyAlbums,
+    (busy) => {
+      if (busy || token !== albumPhotoLoadToken) return;
+      stopAlbumPhotoLoadWatch?.();
+      stopAlbumPhotoLoadWatch = null;
+      const remain = Math.max(0, ALBUM_PHOTO_LOAD_MIN_MS - (performance.now() - startedAt));
+      albumPhotoLoadTimer = window.setTimeout(() => {
+        albumPhotoLoadTimer = 0;
+        if (token !== albumPhotoLoadToken) return;
+        albumPhotoLoadHold.value = false;
+      }, remain);
+    },
+    { immediate: true },
+  );
+}
+
+function endAlbumPhotoLoadHold() {
+  albumPhotoLoadToken += 1;
+  if (albumPhotoLoadTimer) {
+    window.clearTimeout(albumPhotoLoadTimer);
+    albumPhotoLoadTimer = 0;
+  }
+  stopAlbumPhotoLoadWatch?.();
+  stopAlbumPhotoLoadWatch = null;
+  albumPhotoLoadHold.value = false;
+}
+
+watch(
+  () => props.currentAlbum,
+  (album, previous) => {
+    if (!album) {
+      endAlbumPhotoLoadHold();
+      return;
+    }
+    if (album === previous) return;
+    if (previous === undefined && !props.busyAlbums && props.albumPhotos.length > 0) return;
+    beginAlbumPhotoLoadHold();
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  endAlbumPhotoLoadHold();
+});
+
+function albumEnterDeferMs() {
+  if (!canAlbumVt || prefersReducedMotion()) return 0;
+  return Math.max(0, ALBUM_VT_MS - ALBUM_FETCH_LEAD_MS);
+}
+
+async function runAlbumViewTransition(mutate) {
+  if (!canAlbumVt || prefersReducedMotion()) {
+    mutate();
+    return;
+  }
+  const transition = document.startViewTransition(async () => {
+    mutate();
+    await nextTick();
+  });
+  try {
+    await transition.finished;
+  } catch {
+    /* aborted */
+  }
+}
 
 function openCreateDialog() {
   albumDialogMode.value = "create";
@@ -363,15 +744,34 @@ async function submitShare() {
   }
 }
 
+function setShareFormWrite(value) {
+  shareForm.value.canWrite = value;
+  if (!value) shareForm.value.canDelete = false;
+}
+
+function setShareFormDelete(value) {
+  shareForm.value.canDelete = value;
+  if (value) shareForm.value.canWrite = true;
+}
+
 async function updateSharePermission(share, field, value) {
   if (!shareDialogAlbum.value || shareMutationPending.value) return;
   shareMutationPending.value = true;
   try {
+    let canWrite = share.can_write;
+    let canDelete = share.can_delete;
+    if (field === "can_write") {
+      canWrite = value;
+      if (!value) canDelete = false;
+    } else {
+      canDelete = value;
+      if (value) canWrite = true;
+    }
     const payload = {
       dirName: shareDialogAlbum.value.dir_name,
       username: share.username,
-      canWrite: field === "can_write" ? value : share.can_write,
-      canDelete: field === "can_delete" ? value : share.can_delete,
+      canWrite,
+      canDelete,
     };
     if (props.onShareAlbum) {
       await props.onShareAlbum(payload);
@@ -425,32 +825,132 @@ const inSimilarView = computed(() => props.albumViewMode === 'similar');
 const inTextView = computed(() => props.albumViewMode === 'text');
 const inSpecialView = computed(() => inDuplicatesView.value || inSimilarView.value || inTextView.value);
 
-const textSearchInput = ref('');
+watch(inSpecialView, (on) => {
+  if (!on) return;
+  filterPanelOpen.value = false;
+  sortPanelOpen.value = false;
+});
 
-function submitTextSearch() {
+const textSearchInput = ref('');
+const desktopSearchInputRef = ref(null);
+/** Desktop toolbar search stays on the album grid. null means the album itself. */
+const desktopSearchPhotos = ref(null);
+const desktopSearchLoading = ref(false);
+const desktopSearchError = ref("");
+let desktopSearchToken = 0;
+
+const showingDesktopSearch = computed(() => desktopSearchPhotos.value !== null);
+const desktopSearchBar = computed(() => !inSpecialView.value && !isMobile.value);
+const gridPhotos = computed(() => (showingDesktopSearch.value ? desktopSearchPhotos.value : props.albumPhotos));
+
+function resetDesktopSearch() {
+  desktopSearchToken += 1;
+  desktopSearchPhotos.value = null;
+  desktopSearchLoading.value = false;
+  desktopSearchError.value = "";
+}
+
+watch(() => props.currentAlbum, (album, previous) => {
+  if (previous === undefined || album === previous) return;
+  resetDesktopSearch();
+  textSearchInput.value = '';
+});
+
+async function submitTextSearch() {
   const text = textSearchInput.value.trim();
-  if (!text) return;
+  if (!text) {
+    clearTextSearch();
+    return;
+  }
+  if (!isMobile.value && !props.embedded && typeof props.onSearchTextInModal === 'function') {
+    const token = ++desktopSearchToken;
+    desktopSearchLoading.value = true;
+    desktopSearchError.value = "";
+    if (desktopSearchPhotos.value === null) desktopSearchPhotos.value = [];
+    try {
+      const data = await props.onSearchTextInModal({
+        text,
+        scope: 'current_album',
+        limit: 10000,
+      });
+      if (token !== desktopSearchToken) return;
+      desktopSearchPhotos.value = data?.results || [];
+    } catch (error) {
+      if (token !== desktopSearchToken) return;
+      desktopSearchPhotos.value = [];
+      desktopSearchError.value = error?.message || "";
+    } finally {
+      if (token === desktopSearchToken) desktopSearchLoading.value = false;
+    }
+    return;
+  }
   emit('search-text', { text, scope: 'current_album' });
 }
 
 function clearTextSearch() {
   textSearchInput.value = '';
+  if (showingDesktopSearch.value || desktopSearchLoading.value) {
+    resetDesktopSearch();
+    return;
+  }
   emit('show-photos');
 }
 
+function onAlbumBack() {
+  if (showingDesktopSearch.value || desktopSearchLoading.value) {
+    clearTextSearch();
+    return;
+  }
+  exitAlbum();
+}
+
+watch(showingDesktopSearch, (on) => {
+  if (!on) return;
+  thumbnailPopoverOpen.value = false;
+  viewSettingsOpen.value = false;
+  selectMode.value = false;
+  selectedPhotoPaths.value = new Set();
+});
+
 function toggleFilterSortPanel() {
+  if (isMobile.value) {
+    toggleFilterPanel();
+    return;
+  }
   filterSortPanelOpen.value = !filterSortPanelOpen.value;
 }
 
-function toggleAiToolsPanel() {
-  aiToolsPanelOpen.value = !aiToolsPanelOpen.value;
-  if (aiToolsPanelOpen.value) {
-    emit("refresh-album-people");
-    if (isMobile.value) {
-      filterSortPanelOpen.value = false;
-      mobileSearchOpen.value = false;
-    }
+function toggleFilterPanel() {
+  sortPanelOpen.value = false;
+  if (isMobile.value) {
+    filterPanelOpen.value = !filterPanelOpen.value;
+    return;
   }
+  filterSortPanelOpen.value = !filterSortPanelOpen.value;
+}
+
+function toggleSortPanel() {
+  filterPanelOpen.value = false;
+  sortPanelOpen.value = !sortPanelOpen.value;
+}
+
+function closeFilterSortOverlays() {
+  filterSortPanelOpen.value = false;
+  filterPanelOpen.value = false;
+  sortPanelOpen.value = false;
+}
+
+function toggleAiToolsPanel() {
+  if (aiToolsPanelOpen.value) {
+    aiToolsPanelOpen.value = false;
+    aiToolsPickerOpen.value = false;
+    return;
+  }
+  aiToolsPanelOpen.value = true;
+  emit("refresh-album-people");
+  if (!isMobile.value) return;
+  closeFilterSortOverlays();
+  mobileSearchOpen.value = false;
 }
 
 async function openMobileSearch() {
@@ -464,13 +964,21 @@ function closeMobileSearch() {
 }
 
 function enterAlbum(album) {
-  emit("select-album", album.dir_name);
+  albumHeroId.value = album.dir_name;
+  runAlbumViewTransition(() => {
+    emit("select-album", { dirName: album.dir_name, deferMs: albumEnterDeferMs() });
+  });
 }
 
 function exitAlbum() {
+  albumHeroId.value = props.currentAlbum;
   selectMode.value = false;
   selectedPhotoPaths.value.clear();
-  emit("select-album", "");
+  runAlbumViewTransition(() => {
+    emit("select-album", "");
+  }).finally(() => {
+    albumHeroId.value = "";
+  });
 }
 
 function toggleSelectMode() {
@@ -486,11 +994,201 @@ function togglePhotoSelect(photo) {
   selectedPhotoPaths.value = new Set(s);
 }
 
+function selectPhotoFromMenu(photo) {
+  if (!photo?.path) return;
+  if (!selectMode.value) {
+    selectMode.value = true;
+    selectedPhotoPaths.value = new Set([photo.path]);
+    return;
+  }
+  const next = new Set(selectedPhotoPaths.value);
+  next.add(photo.path);
+  selectedPhotoPaths.value = next;
+}
+
+const menuPhoto = ref(null);
+const menuHasXmp = ref(false);
+const photoMenuOpen = ref(false);
+const photoAlbumOpen = ref(false);
+const suppressPhotoClick = ref(false);
+let menuXmpToken = 0;
+let photoPress = null;
+let suppressPhotoClickTimer = 0;
+
+function clearPhotoPress() {
+  if (photoPress?.timer) window.clearTimeout(photoPress.timer);
+  photoPress = null;
+  window.removeEventListener("pointermove", onPhotoPressMove);
+  window.removeEventListener("pointerup", clearPhotoPress);
+  window.removeEventListener("pointercancel", clearPhotoPress);
+}
+
+function armSuppressPhotoClick() {
+  suppressPhotoClick.value = true;
+  window.clearTimeout(suppressPhotoClickTimer);
+  suppressPhotoClickTimer = window.setTimeout(() => {
+    suppressPhotoClick.value = false;
+  }, 450);
+}
+
+function onPhotoPointerDown(photo, event) {
+  if (!isMobile.value || !event.isPrimary || event.button > 0) return;
+  clearPhotoPress();
+  photoPress = {
+    photo,
+    x: event.clientX,
+    y: event.clientY,
+    timer: window.setTimeout(() => {
+      const pressed = photoPress?.photo;
+      clearPhotoPress();
+      if (!pressed) return;
+      armSuppressPhotoClick();
+      openPhotoMenu(pressed);
+    }, 450),
+  };
+  window.addEventListener("pointermove", onPhotoPressMove);
+  window.addEventListener("pointerup", clearPhotoPress);
+  window.addEventListener("pointercancel", clearPhotoPress);
+}
+
+function onPhotoPressMove(event) {
+  if (!photoPress) return;
+  const dx = event.clientX - photoPress.x;
+  const dy = event.clientY - photoPress.y;
+  if (dx * dx + dy * dy > 144) clearPhotoPress();
+}
+
+function onPhotoContextMenu(photo, event) {
+  if (!isMobile.value) return;
+  event.preventDefault();
+  clearPhotoPress();
+  armSuppressPhotoClick();
+  openPhotoMenu(photo);
+}
+
+function onGridPhotoClick(photo) {
+  if (suppressPhotoClick.value) {
+    suppressPhotoClick.value = false;
+    window.clearTimeout(suppressPhotoClickTimer);
+    return;
+  }
+  if (selectMode.value) togglePhotoSelect(photo);
+  else if (showingDesktopSearch.value) openPhotoDetail(photo, { navPhotos: desktopSearchPhotos.value });
+  else openDetail(photo);
+}
+
+async function openPhotoMenu(photo) {
+  menuPhoto.value = photo;
+  menuHasXmp.value = false;
+  photoMenuOpen.value = true;
+  const token = ++menuXmpToken;
+  try {
+    const owner = photo.owner || currentAlbumOwner.value;
+    const ownerParam = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+    const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(photo.path)}${ownerParam}`, { credentials: "same-origin" });
+    if (!res.ok || token !== menuXmpToken || menuPhoto.value?.path !== photo.path) return;
+    const data = await res.json();
+    menuHasXmp.value = !!data.has_xmp;
+  } catch {
+    if (token === menuXmpToken) menuHasXmp.value = false;
+  }
+}
+
+const photoMenuActions = computed(() => {
+  const items = [
+    { id: "select", label: t("albums.select"), icon: IconCheck },
+    { id: "download", label: t("detail.downloadOriginal"), icon: IconDownload },
+    { id: "export", label: t("detail.downloadEdited"), icon: IconDownload, disabled: !menuHasXmp.value },
+  ];
+  if (currentAlbumCanWrite.value) {
+    items.push({ id: "cover", label: t("detail.setAsCover"), icon: IconImage });
+  }
+  items.push(
+    { id: "album", label: t("detail.addToAlbum"), icon: IconImage, disabled: addableAlbums.value.length === 0 },
+    { id: "similar", label: t("detail.findSimilar"), icon: IconSparkles },
+  );
+  if (currentAlbumCanDelete.value) {
+    items.push({ id: "delete", label: t("detail.delete"), icon: IconTrash, danger: true });
+  }
+  return items;
+});
+
+const photoMenuAlbumActions = computed(() => addableAlbums.value.map((album) => ({
+  id: album.dir_name,
+  label: album.name || album.dir_name,
+  subtitle: album.owner || "",
+})));
+
+function downloadPhotoFile(photo) {
+  if (!photo?.path) return;
+  const a = document.createElement("a");
+  a.href = getOriginalUrl(photo.path, photo.owner);
+  a.download = "";
+  a.click();
+}
+
+function onPhotoMenuAction(action) {
+  const photo = menuPhoto.value;
+  photoMenuOpen.value = false;
+  if (!photo || !action?.id) return;
+  if (action.id === "select") {
+    selectPhotoFromMenu(photo);
+    menuPhoto.value = null;
+  } else if (action.id === "download") {
+    downloadPhotoFile(photo);
+    menuPhoto.value = null;
+  } else if (action.id === "export") {
+    if (!menuHasXmp.value) return;
+    exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0 };
+    showExportDialog.value = true;
+  } else if (action.id === "cover") {
+    setCoverFromPhoto(photo);
+    menuPhoto.value = null;
+  } else if (action.id === "album") {
+    window.setTimeout(() => {
+      if (menuPhoto.value?.path === photo.path) photoAlbumOpen.value = true;
+    }, 280);
+  } else if (action.id === "similar") {
+    emit("find-similar", photo);
+    menuPhoto.value = null;
+  } else if (action.id === "delete") {
+    if (!window.confirm(t("msg.confirmDeletePhoto", { name: photo.name }))) return;
+    emit("delete-photos", [photo.path]);
+    if (detailPhoto.value?.path === photo.path) {
+      detailPhoto.value = null;
+      detailExpanded.value = false;
+    }
+    menuPhoto.value = null;
+  }
+}
+
+function onPhotoMenuAlbum(action) {
+  const photo = menuPhoto.value;
+  photoAlbumOpen.value = false;
+  menuPhoto.value = null;
+  if (!photo?.path || !action?.id) return;
+  emit("copy-photo-to-album", {
+    photoPath: photo.path,
+    sourceAlbum: props.currentAlbum,
+    targetAlbum: action.id,
+  });
+}
+
+function closePhotoAlbumMenu() {
+  photoAlbumOpen.value = false;
+  menuPhoto.value = null;
+}
+
+onBeforeUnmount(() => {
+  clearPhotoPress();
+  window.clearTimeout(suppressPhotoClickTimer);
+});
+
 async function selectAllPhotos() {
   if (props.loadAllPhotos) {
     await props.loadAllPhotos();
   }
-  selectedPhotoPaths.value = new Set(props.albumPhotos.map((p) => p.path));
+  selectedPhotoPaths.value = new Set(gridPhotos.value.map((p) => p.path));
 }
 
 function clearSelection() {
@@ -516,11 +1214,7 @@ function confirmDeleteSinglePhoto() {
 }
 
 function getAlbumCoverThumbnail(album) {
-  if (album.cover) {
-    const ownerParam = album.owner ? `&owner=${encodeURIComponent(album.owner)}` : "";
-    return `/api/thumbnail/${encodeURIComponent(album.cover)}?size=400${ownerParam}`;
-  }
-  return "";
+  return albumCoverUrl(album, 400, currentAlbumOwner.value);
 }
 
 function duplicateDisplayName(photo) {
@@ -573,29 +1267,122 @@ const hasActiveSort = computed(() => props.sort.length > 0);
 function applyFilters() { emit("apply-filters"); }
 
 // ── Thumbnail size helpers ──
-const THUMB_GRID_CLASSES = [
-  "grid-cols-2 gap-1 sm:grid-cols-2",
-  "grid-cols-2 gap-1.5 sm:grid-cols-3",
-  "grid-cols-3 gap-1.5 sm:grid-cols-4",
-  "grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7",
-  "grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8",
-  "grid-cols-4 gap-2 sm:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10",
+const THUMB_GRID_COLS = [
+  "grid-cols-1 sm:grid-cols-1 lg:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-2",
+  "grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3",
+  "grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5",
+  "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7",
+  "grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8",
+  "grid-cols-4 sm:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10",
+  "grid-cols-5 sm:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 2xl:grid-cols-12",
+  "grid-cols-6 sm:grid-cols-7 lg:grid-cols-10 xl:grid-cols-12 2xl:grid-cols-14",
+  "grid-cols-7 sm:grid-cols-8 lg:grid-cols-12 xl:grid-cols-14 2xl:grid-cols-16",
+  "grid-cols-8 sm:grid-cols-10 lg:grid-cols-14 xl:grid-cols-16 2xl:grid-cols-18",
 ];
+const TW_BREAKPOINTS = { sm: 640, md: 768, lg: 1024, xl: 1280, "2xl": 1536 };
 
-const thumbMaxIdx = THUMB_GRID_CLASSES.length - 1;
-const thumbGridClass = computed(() => THUMB_GRID_CLASSES[thumbMaxIdx - thumbnailSize.value] || THUMB_GRID_CLASSES[3]);
+function parseGridCols(spec, width = window.innerWidth) {
+  let cols = 1;
+  const re = /(?:^|\s)(?:(sm|md|lg|xl|2xl):)?grid-cols-(\d+)/g;
+  let match = re.exec(spec);
+  while (match) {
+    const bp = match[1];
+    const count = Number(match[2]);
+    if (!bp || width >= (TW_BREAKPOINTS[bp] || 0)) cols = count;
+    match = re.exec(spec);
+  }
+  return Math.max(1, cols);
+}
+
+function thumbColsForSize(size) {
+  const spec = THUMB_GRID_COLS[THUMB_MAX - size] || THUMB_GRID_COLS[3];
+  return parseGridCols(spec);
+}
+
+function nextDistinctThumbSize(from, dir) {
+  const startCols = thumbColsForSize(from);
+  let size = from;
+  while (true) {
+    const next = size + dir;
+    if (next < 0 || next > THUMB_MAX) return size;
+    size = next;
+    if (thumbColsForSize(size) !== startCols) return size;
+  }
+}
+const THUMB_GAP_PX = [4, 6, 6, 8, 8, 8, 8, 10, 10, 10];
+
+const thumbMaxIdx = THUMB_MAX;
+const thumbZoomClasses = Array.from(
+  { length: THUMB_MAX + 1 },
+  (_, size) => `grid ${THUMB_GRID_COLS[THUMB_MAX - size]} items-start gap-[var(--photo-gap)]`,
+);
+const thumbZoomGaps = computed(() => Array.from(
+  { length: THUMB_MAX + 1 },
+  (_, size) => {
+    const thumbsOnly = viewLayout.value.compact
+      || size < THUMB_DETAILS_MIN
+      || !hasBelowInfo(viewLayout.value);
+    return thumbsOnly ? 0 : (THUMB_GAP_PX[THUMB_MAX - size] ?? 6);
+  },
+));
+const thumbGapPx = computed(() => {
+  if (thumbsOnlyLook.value) return 0;
+  const idx = thumbMaxIdx - thumbnailSize.value;
+  return THUMB_GAP_PX[idx] ?? 6;
+});
+const thumbGridClass = computed(() => {
+  const idx = thumbMaxIdx - thumbnailSize.value;
+  const cols = THUMB_GRID_COLS[idx] || THUMB_GRID_COLS[3];
+  return `${cols} items-start gap-[var(--photo-gap)]`;
+});
+
+const DUP_PREVIEW_LIMIT = 12;
+const dupExpanded = ref({});
+
+watch(
+  () => props.duplicateGroups,
+  () => {
+    dupExpanded.value = {};
+  },
+);
+
+function dupGroupKey(group, index = 0) {
+  return group?.group_key || group?.id || `dup-${index}`;
+}
+
+function dupGroupPhotos(group, index = 0) {
+  const photos = group?.photos || [];
+  const key = dupGroupKey(group, index);
+  if (dupExpanded.value[key] || photos.length <= DUP_PREVIEW_LIMIT) return photos;
+  return photos.slice(0, DUP_PREVIEW_LIMIT);
+}
+
+function dupHiddenCount(group, index = 0) {
+  const photos = group?.photos || [];
+  const key = dupGroupKey(group, index);
+  if (dupExpanded.value[key] || photos.length <= DUP_PREVIEW_LIMIT) return 0;
+  return photos.length - DUP_PREVIEW_LIMIT;
+}
+
+function expandDupGroup(group, index = 0) {
+  const key = dupGroupKey(group, index);
+  dupExpanded.value = { ...dupExpanded.value, [key]: true };
+}
 
 // ── Photo grid / detail helpers ──
 function handlePhotosScrollNearBottom() {
-  if (!props.busyAlbums) {
-    emit("load-more-photos");
-  }
+  if (showingDesktopSearch.value) return;
+  emit("load-more-photos");
 }
 
 function getThumbnail(path, size = 320, owner = null) {
   const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
   const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
   return `/api/thumbnail/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
+}
+
+function getGridThumbnail(photo) {
+  return getThumbnail(photo.path, 360, photo.owner ?? currentAlbumOwner.value);
 }
 
 const detailPhotoList = computed(() => detailNavPhotos.value || props.albumPhotos);
@@ -614,8 +1401,8 @@ const detailDirty = computed(() => {
   const currentLabels = [...editColorLabels.value].sort().join(",");
   const originalLabels = colorLabels(p.color_label).sort().join(",");
   if (currentLabels !== originalLabels) return true;
-  const currentTags = editTagsText.value.split(",").map((s) => s.trim()).filter(Boolean).join(", ");
-  const originalTags = (p.tags || []).join(", ");
+  const currentTags = [...editTags.value].map((s) => s.trim()).filter(Boolean).sort().join(",");
+  const originalTags = [...(p.tags || [])].map((s) => String(s).trim()).filter(Boolean).sort().join(",");
   if (currentTags !== originalTags) return true;
   return false;
 });
@@ -700,28 +1487,41 @@ async function enrichPhotosWithIndexMeta(stubs) {
   return list.map((stub) => mergePhotoMeta(stub, byPath.get(stub.path)));
 }
 
+function withAlbumOwner(photo) {
+  if (!photo) return photo;
+  const owner = photo.owner || currentAlbumOwner.value;
+  return owner && photo.owner !== owner ? { ...photo, owner } : photo;
+}
+
 function openDetail(photo, expanded = detailOriginalPreference.value, options = {}) {
+  detailRequestToken += 1;
+  detailClosing.value = false;
   if (!options.fromNav) {
     detailNavPhotos.value = options.navPhotos ?? null;
+    const fullscreen = options.fullscreen ?? detailFullscreenPreference.value;
+    detailFullscreen.value = fullscreen;
+    if (fullscreen) showFullscreenControls();
+    else hideFullscreenControls();
   }
   beginDetailImageLoad();
-  detailPhoto.value = photo;
+  const next = withAlbumOwner(photo);
+  detailPhoto.value = next;
   detailExpanded.value = expanded;
-  detailDimensions.value = photo.width > 0 && photo.height > 0
-    ? `${photo.width} * ${photo.height}`
+  detailDimensions.value = next.width > 0 && next.height > 0
+    ? `${next.width} * ${next.height}`
     : null;
-  editRating.value = photo.rating || 0;
-  editColorLabels.value = colorLabels(photo.color_label);
-  editTagsText.value = (photo.tags || []).join(", ");
+  editRating.value = next.rating || 0;
+  editColorLabels.value = colorLabels(next.color_label);
+  editTags.value = (next.tags || []).map((tag) => String(tag).trim()).filter(Boolean);
   // Restore darktable after XMP check; keep expanded preference immediately.
   darktablePreview.value = false;
   hasXmpSidecar.value = false;
-  checkXmpSidecar(photo.path, photo.owner);
+  checkXmpSidecar(next.path, next.owner);
 }
 
 function openPhotoDetail(photo, options = {}) {
   if (!photo?.path) return;
-  const { navPhotos = null, fullscreen = false, expanded } = options;
+  const { navPhotos = null, fullscreen, expanded } = options;
   void (async () => {
     const stubs = (navPhotos?.length ? navPhotos : [photo]).map((entry) => ({
       ...entry,
@@ -732,11 +1532,8 @@ function openPhotoDetail(photo, options = {}) {
     if (!main) return;
     openDetail(main, expanded ?? detailOriginalPreference.value, {
       navPhotos: enriched.length > 1 ? enriched : null,
+      fullscreen,
     });
-    if (fullscreen) {
-      detailFullscreen.value = true;
-      showFullscreenControls();
-    }
   })();
 }
 
@@ -753,11 +1550,21 @@ function onAiToolsOpenPhoto({ photo, navPhotos } = {}) {
   })();
 }
 
-function closeDetail() {
-  if (detailDirty.value && !window.confirm(t('msg.unsavedChangesClose'))) return;
+function closeDetail(options = {}) {
+  const force = options === true || options.force;
+  if (!force && !props.embedded && detailDirty.value && !window.confirm(t('msg.unsavedChangesClose'))) return;
   detailOriginalPreference.value = detailExpanded.value;
   detailDarktablePreference.value = darktablePreview.value;
+  detailFullscreenPreference.value = detailFullscreen.value;
   saveDetailViewPreferences();
+  detailRequestToken += 1;
+  detailClosing.value = true;
+  showExportDialog.value = false;
+  if (props.embedded) finishCloseDetail();
+}
+
+function finishCloseDetail() {
+  if (!detailClosing.value) return;
   detailPhoto.value = null;
   detailNavPhotos.value = null;
   detailExpanded.value = false;
@@ -766,17 +1573,17 @@ function closeDetail() {
   detailDimensions.value = null;
   detailImageFallback.value = false;
   darktablePreview.value = false;
-  showExportDialog.value = false;
+  detailClosing.value = false;
 }
 
 function goDetailPrev() {
   if (!hasPrev.value) return;
-  if (detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
+  if (!props.embedded && detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
   openDetail(detailPhotoList.value[detailIndex.value - 1], detailExpanded.value, { fromNav: true });
 }
 function goDetailNext() {
   if (!hasNext.value) return;
-  if (detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
+  if (!props.embedded && detailDirty.value && !window.confirm(t('msg.unsavedChangesSwitch'))) return;
   openDetail(detailPhotoList.value[detailIndex.value + 1], detailExpanded.value, { fromNav: true });
 }
 function toggleExpanded() {
@@ -788,6 +1595,8 @@ function toggleExpanded() {
 function toggleDetailFullscreen() {
   beginDetailImageLoad();
   detailFullscreen.value = !detailFullscreen.value;
+  detailFullscreenPreference.value = detailFullscreen.value;
+  saveDetailViewPreferences();
   if (detailFullscreen.value) showFullscreenControls();
   else hideFullscreenControls();
 }
@@ -820,17 +1629,78 @@ function onDetailWheel(e) {
   else goDetailPrev();
 }
 
+function focusDesktopSearchFromShortcut(event) {
+  if (event.defaultPrevented || event.altKey || event.shiftKey || event.isComposing) return false;
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") return false;
+  if (props.embedded || props.gridPaused || !inAlbumView.value || !desktopSearchBar.value) return false;
+  if (
+    detailPhoto.value
+    || showExportDialog.value
+    || showAddToAlbumModal.value
+    || showAlbumDialog.value
+    || showShareDialog.value
+    || aiToolsPanelOpen.value
+    || viewSettingsOpen.value
+    || importSourceModalOpen.value
+    || cloudPickerOpen.value
+  ) return false;
+  const target = event.target;
+  if (
+    target instanceof HTMLElement
+    && target !== desktopSearchInputRef.value
+    && target.closest("input, textarea, select, [contenteditable='true']")
+  ) return false;
+  const input = desktopSearchInputRef.value;
+  if (!input) return false;
+  event.preventDefault();
+  thumbnailPopoverOpen.value = false;
+  input.focus();
+  input.select();
+  return true;
+}
+
 function onDetailKeydown(e) {
-  if (!detailPhoto.value || e.altKey || e.ctrlKey || e.metaKey) return;
+  if (focusDesktopSearchFromShortcut(e)) return;
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  if (e.key === "Escape") {
+    if (e.defaultPrevented || props.embedded || !detailPhoto.value || detailClosing.value) return;
+    e.preventDefault();
+    if (showExportDialog.value) {
+      showExportDialog.value = false;
+      menuPhoto.value = null;
+      return;
+    }
+    if (showAddToAlbumModal.value) {
+      showAddToAlbumModal.value = false;
+      return;
+    }
+    if (photoMenuOpen.value) {
+      photoMenuOpen.value = false;
+      return;
+    }
+    if (photoAlbumOpen.value) {
+      closePhotoAlbumMenu();
+      return;
+    }
+    closeDetail();
+    return;
+  }
+  if (!detailPhoto.value) return;
   const target = e.target;
   if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
   if (e.key === "ArrowLeft") {
     e.preventDefault();
     goDetailPrev();
-  } else if (e.key === "ArrowRight") {
+    return;
+  }
+  if (e.key === "ArrowRight") {
     e.preventDefault();
     goDetailNext();
+    return;
   }
+  // A bare letter otherwise starts the browser's page search, which walks the
+  // virtual grid under the viewer and locks the tab.
+  if (e.key.length === 1) e.preventDefault();
 }
 function toggleDarktablePreview() {
   if (!hasXmpSidecar.value) return;
@@ -865,14 +1735,18 @@ function getDarktablePreviewUrl(path, size = 1600, owner = null) {
   return `/api/albums/darktable_preview/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
 }
 
+let detailRequestToken = 0;
+
 async function checkXmpSidecar(path, owner = null) {
+  const token = detailRequestToken;
   try {
     const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
     const ownerParam = resolvedOwner ? `?owner=${encodeURIComponent(resolvedOwner)}` : "";
     const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(path)}${ownerParam}`, { credentials: "same-origin" });
+    if (token !== detailRequestToken) return;
     if (res.ok) {
       const data = await res.json();
-      if (!detailPhoto.value || detailPhoto.value.path !== path) return;
+      if (token !== detailRequestToken || !detailPhoto.value || detailPhoto.value.path !== path) return;
       hasXmpSidecar.value = !!data.has_xmp;
       if (hasXmpSidecar.value) {
         const wantDarktable = detailDarktablePreference.value;
@@ -885,7 +1759,7 @@ async function checkXmpSidecar(path, owner = null) {
       hasXmpSidecar.value = false;
     }
   } catch {
-    hasXmpSidecar.value = false;
+    if (token === detailRequestToken) hasXmpSidecar.value = false;
   }
 }
 
@@ -900,7 +1774,7 @@ const detailImageSrc = computed(() => {
 
   // Explicit darktable toggle (requires XMP): always use darktable_preview.
   if (darktablePreview.value && hasXmpSidecar.value) {
-    const size = detailFullscreen.value || detailExpanded.value ? 0 : 1600;
+    const size = detailFullscreen.value || detailExpanded.value || isMobile.value ? 0 : 1600;
     return getDarktablePreviewUrl(detailPhoto.value.path, size);
   }
 
@@ -917,7 +1791,7 @@ const detailImageSrc = computed(() => {
     return getOriginalUrl(detailPhoto.value.path);
   }
 
-  return getThumbnail(detailPhoto.value.path, 800);
+  return getThumbnail(detailPhoto.value.path, isMobile.value ? 1600 : 1200);
 });
 
 function downloadOriginal() {
@@ -935,17 +1809,18 @@ function openExportDialog() {
 }
 
 async function doExport() {
-  if (!detailPhoto.value || exporting.value) return;
+  const photo = menuPhoto.value || detailPhoto.value;
+  if (!photo || exporting.value) return;
   exporting.value = true;
   try {
     const body = {
-      path: detailPhoto.value.path,
+      path: photo.path,
       format: exportForm.value.format,
       quality: exportForm.value.quality,
       max_width: exportForm.value.maxWidth || 0,
     };
-    if (detailPhoto.value.owner || currentAlbumOwner.value) {
-      body.owner = detailPhoto.value.owner || currentAlbumOwner.value;
+    if (photo.owner || currentAlbumOwner.value) {
+      body.owner = photo.owner || currentAlbumOwner.value;
     }
     const res = await fetch("/api/albums/export", {
       method: "POST",
@@ -969,6 +1844,7 @@ async function doExport() {
     a.click();
     URL.revokeObjectURL(url);
     showExportDialog.value = false;
+    menuPhoto.value = null;
   } catch (e) {
     alert(e.message || "Export failed");
   } finally {
@@ -985,7 +1861,7 @@ function setDetailColorLabel(key) {
 
 function savePhotoMeta() {
   if (!detailPhoto.value) return;
-  const tags = editTagsText.value.split(",").map((s) => s.trim()).filter(Boolean);
+  const tags = [...editTags.value].map((s) => s.trim()).filter(Boolean);
   emit("update-photo-meta", {
     path: detailPhoto.value.path,
     album: detailPhoto.value.album,
@@ -1035,53 +1911,108 @@ async function doAddToAlbum(targetAlbum) {
 }
 
 function getAddableAlbumCover(album) {
-  if (album.cover) {
-    const ownerParam = album.owner ? `&owner=${encodeURIComponent(album.owner)}` : "";
-    return `/api/thumbnail/${encodeURIComponent(album.cover)}?size=160${ownerParam}`;
-  }
-  return "";
+  return albumCoverUrl(album, 160);
 }
 
-// Use first photo as cover suggestion when setting cover
 function setCoverFromPhoto(photo) {
-  if (!currentAlbumObj.value) return;
+  if (!currentAlbumObj.value || !currentAlbumCanWrite.value || !photo?.path) return;
   emit("update-album", {
     dirName: currentAlbumObj.value.dir_name,
     cover: photo.path,
   });
 }
 
-defineExpose({ openPhotoDetail });
+defineExpose({
+  openPhotoDetail,
+  openAiToolsPhoto: onAiToolsOpenPhoto,
+  closeDetail,
+  openImportModal,
+  toggleSelectMode,
+  toggleFilterSortPanel,
+  toggleFilterPanel,
+  toggleSortPanel,
+  toggleAiToolsPanel,
+  openViewSettings,
+  viewLayout,
+  setViewLayout,
+  openMobileSearch,
+  closeMobileSearch,
+  submitTextSearch,
+  openCreateDialog,
+  openEditDialog,
+  openShareDialog,
+  confirmDeleteAlbum,
+  textSearchInput,
+  selectMode,
+  selectedPhotoCount: computed(() => selectedPhotoPaths.value.size),
+  selectAllPhotos,
+  clearSelection,
+  confirmDeleteSelected,
+  filterSortPanelOpen,
+  filterPanelOpen,
+  sortPanelOpen,
+  aiToolsPanelOpen,
+  aiToolsPickerOpen,
+  hasActiveFilters,
+  hasActiveSort,
+  inSpecialView,
+  isSharedAlbum,
+  currentAlbumCanDelete,
+  currentAlbumCanWrite,
+  currentAlbumObj,
+  detailPhoto,
+  detailIndex,
+  detailPhotoList,
+  goDetailPrev,
+  goDetailNext,
+  hasPrev,
+  hasNext,
+  thumbnailSize,
+  setThumbnailSize(value) {
+    thumbnailSize.value = Number(value);
+  },
+  setViewCompact,
+  viewCompact: computed(() => !!viewLayout.value.compact),
+  forcedThumbsOnly,
+  resetThumbnailSize() {
+    thumbnailSize.value = THUMB_DEFAULT;
+  },
+});
 </script>
 
 <template>
   <section
-    class="flex h-full min-h-0 flex-col border shadow-[0_22px_60px_rgba(71,43,17,0.16)] backdrop-blur rounded-2xl md:rounded-[2rem]"
-    :class="isDark ? 'border-stone-700 bg-stone-900/70 text-stone-100' : 'border-white/70 bg-white/70'"
+    class="flex h-full min-h-0 flex-col overflow-hidden"
+    :class="[
+      isDark ? 'text-stone-100' : '',
+      embedded ? '' : 'app-frost-glass',
+      embedded || isMobile ? 'rounded-none' : 'app-card rounded-2xl',
+    ]"
   >
     <!-- ═══════════════════════════════════════════
          VIEW 1: Album List
          ═══════════════════════════════════════════ -->
-    <Transition name="album-view" mode="out-in">
-    <div v-if="!inAlbumView" key="album-list" class="flex min-h-0 flex-1 flex-col">
+    <component
+      :is="canAlbumVt ? 'div' : Transition"
+      v-bind="canAlbumVt ? { class: 'contents' } : { name: 'album-view', mode: 'out-in' }"
+    >
+    <div v-if="!embedded && !inAlbumView" key="album-list" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <!-- Toolbar -->
-      <div class="flex items-center gap-1.5 border-b px-2.5 py-2 md:gap-2 md:px-4 md:py-3" :class="isDark ? 'border-stone-700/60' : 'border-stone-200/60'">
-        <h2 class="text-sm font-bold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t('albums.title') }}</h2>
+      <div class="album-toolbar relative z-10 flex shrink-0 items-center gap-1.5 app-split-b px-2.5 py-2.5 app-frost-toolbar md:gap-2 md:px-4 md:py-3">
+        <h2 class="text-sm font-semibold font-display" :class="isDark ? 'text-stone-100' : 'text-stone-800'">{{ t('albums.title') }}</h2>
         <div class="flex-1"></div>
-        <button class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="isDark ? 'bg-stone-100 text-stone-900 hover:bg-white' : 'bg-stone-900 text-white hover:bg-stone-800'"
+        <button class="app-btn app-btn-primary px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           @click="openCreateDialog">
-          <IconPlus class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.create') }}</span>
+          <IconPlus class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.create') }}</span>
         </button>
-        <button class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
+        <button class="app-btn app-btn-secondary px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           @click="emit('refresh-albums')">
-          <IconRefresh class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.refresh') }}</span>
+          <IconRefresh class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.refresh') }}</span>
         </button>
       </div>
 
       <!-- Album grid -->
-      <div class="app-scrollbar min-h-0 flex-1 overflow-y-auto p-3 md:p-5">
+      <div class="album-no-drag app-scrollbar min-h-0 flex-1 overflow-y-auto p-3 md:p-5" @mousedown="preventAlbumDragLock" @dragstart.prevent>
         <div v-if="busyAlbums && albums.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loading') }}</div>
         <div v-else-if="albums.length === 0" class="flex flex-col items-center justify-center gap-3 py-16">
           <IconImage class="h-12 w-12" :class="isDark ? 'text-stone-600' : 'text-stone-300'" />
@@ -1089,11 +2020,14 @@ defineExpose({ openPhotoDetail });
         </div>
         <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:gap-4 lg:grid-cols-3 xl:grid-cols-4">
           <article v-for="album in albums" :key="album.dir_name"
-            class="group cursor-pointer overflow-hidden rounded-xl border transition hover:shadow-lg"
-            :class="isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-500' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
+            class="group cursor-pointer overflow-hidden rounded-xl app-surface app-card transition"
             @click="enterAlbum(album)">
             <!-- Cover area -->
-            <div class="relative aspect-[16/10] overflow-hidden" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
+            <div
+              class="relative aspect-[16/10] overflow-hidden"
+              :class="isDark ? 'bg-stone-800' : 'bg-stone-100'"
+              :style="albumHeroStyle(album.dir_name)"
+            >
               <img v-if="album.cover"
                 class="h-full w-full object-cover transition group-hover:scale-105"
                 :src="getAlbumCoverThumbnail(album)" loading="lazy" decoding="async" alt="" />
@@ -1149,10 +2083,13 @@ defineExpose({ openPhotoDetail });
             :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.sharedAlbums') }}</h3>
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:gap-4 lg:grid-cols-3 xl:grid-cols-4">
             <article v-for="album in sharedAlbums" :key="album.dir_name"
-              class="group cursor-pointer overflow-hidden rounded-xl border transition hover:shadow-lg"
-              :class="isDark ? 'border-blue-800/40 bg-stone-900/80 hover:border-blue-600/60' : 'border-blue-200 bg-white/80 hover:border-blue-300'"
+              class="group cursor-pointer overflow-hidden rounded-xl app-surface app-card transition"
               @click="enterAlbum(album)">
-              <div class="relative aspect-[16/10] overflow-hidden" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
+              <div
+                class="relative aspect-[16/10] overflow-hidden"
+                :class="isDark ? 'bg-stone-800' : 'bg-stone-100'"
+                :style="albumHeroStyle(album.dir_name)"
+              >
                 <img v-if="album.cover"
                   class="h-full w-full object-cover transition group-hover:scale-105"
                   :src="getAlbumCoverThumbnail(album)" loading="lazy" decoding="async" alt="" />
@@ -1185,24 +2122,42 @@ defineExpose({ openPhotoDetail });
     <!-- ═══════════════════════════════════════════
          VIEW 2: Photo Browser (inside an album)
          ═══════════════════════════════════════════ -->
-    <div v-else key="photo-browser" class="flex min-h-0 flex-1 flex-col">
-      <!-- Top toolbar -->
-      <div class="flex items-center gap-1.5 border-b px-2.5 py-2 md:gap-2 md:px-4 md:py-3" :class="isDark ? 'border-stone-700/60' : 'border-stone-200/60'">
-        <button class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
-          @click="exitAlbum">
-          <IconArrowLeft class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.back') }}</span>
+    <div v-else key="photo-browser" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div class="relative z-10 flex shrink-0 flex-col">
+      <!-- Top toolbar (desktop / non-embedded mobile). Phone shell supplies its own chrome. -->
+      <div v-if="!embedded" class="album-toolbar grid items-center gap-1.5 app-split-b px-2.5 py-2.5 app-frost-toolbar md:gap-2 md:px-4 md:py-3"
+        :class="desktopSearchBar ? 'grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]' : 'grid-cols-[minmax(0,1fr)_0px_minmax(0,1fr)]'">
+        <div class="flex min-w-0 items-center gap-1.5 md:gap-2">
+        <button class="app-btn app-btn-secondary px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          @click="onAlbumBack">
+          <IconArrowLeft class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.back') }}</span>
         </button>
+        <div
+          class="relative h-10 w-14 shrink-0 overflow-hidden rounded-lg md:h-8 md:w-12"
+          :class="isDark ? 'bg-stone-800' : 'bg-stone-200'"
+          :style="{ viewTransitionName: 'album-hero' }"
+        >
+          <img
+            v-if="currentAlbumObj?.cover"
+            class="h-full w-full object-cover"
+            :src="getAlbumCoverThumbnail(currentAlbumObj)"
+            alt=""
+          />
+          <div v-else class="flex h-full w-full items-center justify-center">
+            <IconImage class="h-4 w-4" :class="isDark ? 'text-stone-500' : 'text-stone-400'" />
+          </div>
+        </div>
         <h2 class="min-w-0 truncate text-sm font-bold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">
           {{ currentAlbumObj?.name || currentAlbum }}
           <span v-if="isSharedAlbum" class="ml-1 text-xs font-normal" :class="isDark ? 'text-blue-400' : 'text-blue-600'">
             (​{{ t('albums.from', { owner: currentAlbumOwner }) }})
           </span>
         </h2>
-        <div class="flex-1"></div>
-        <!-- Desktop: full search field -->
-        <div v-if="!inSpecialView && !isMobile" class="flex min-w-0 max-w-xs flex-1 items-center gap-1 lg:max-w-sm">
+        </div>
+        <!-- Desktop: search field, centered on the toolbar -->
+        <div v-if="desktopSearchBar" class="flex w-[min(28rem,40vw)] max-w-full items-center gap-1">
           <input
+            ref="desktopSearchInputRef"
             v-model="textSearchInput"
             type="search"
             :placeholder="t('albums.textSearchPlaceholder')"
@@ -1219,7 +2174,7 @@ defineExpose({ openPhotoDetail });
             <IconSearch class="h-3.5 w-3.5" />
           </button>
           <button
-            v-if="textSearchInput"
+            v-if="textSearchInput || showingDesktopSearch"
             class="inline-flex shrink-0 items-center rounded-xl px-2 py-1.5 text-xs transition"
             :class="isDark ? 'bg-stone-800 text-stone-300 hover:bg-stone-700' : 'bg-stone-200 text-stone-600 hover:bg-stone-300'"
             :title="t('albums.clear')"
@@ -1228,6 +2183,8 @@ defineExpose({ openPhotoDetail });
             <IconClose class="h-3.5 w-3.5" />
           </button>
         </div>
+        <div v-else></div>
+        <div class="flex min-w-0 items-center justify-end gap-1.5 md:gap-2">
         <!-- Mobile: collapsed search button / expanded field -->
         <template v-if="!inSpecialView && isMobile">
           <button
@@ -1268,86 +2225,81 @@ defineExpose({ openPhotoDetail });
             </button>
           </div>
         </template>
-        <button v-if="!isSharedAlbum && !inSpecialView && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+        <button v-if="!isSharedAlbum && !inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
           :class="isDark ? 'bg-emerald-700 text-white hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'"
           @click="openImportModal">
-          <IconImport class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.import') }}</span>
+          <IconImport class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.import') }}</span>
         </button>
-        <!-- Hidden file input for local import -->
-        <input ref="localFileInput" type="file" class="hidden" multiple accept="image/*,video/*,.raw,.arw,.nef,.cr2,.cr3,.orf,.rw2,.dng,.raf,.srw,.x3f,.3fr,.mef,.pef,.nrw,.rwl,.iiq,.erf,.fff" @change="handleLocalFileChange" />
-        <!-- Import source picker modal -->
-        <ImportSourceModal
-          v-if="importSourceModalOpen"
-          :is-dark="isDark"
-          @local="handleImportLocal"
-          @cloud="handleImportCloud"
-          @close="importSourceModalOpen = false"
-        />
-        <!-- Cloud file picker -->
-        <CloudFilePicker
-          v-if="cloudPickerOpen"
-          :is-dark="isDark"
-          :fetch-list="fetchList"
-          @confirm="handleCloudPickerConfirm"
-          @close="cloudPickerOpen = false"
-        />
-        <button v-if="currentAlbumCanDelete && !inSpecialView && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="selectMode
-            ? (isDark ? 'bg-sky-600 text-white hover:bg-sky-500' : 'bg-sky-500 text-white hover:bg-sky-600')
-            : (isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300')"
+        <button v-if="currentAlbumCanDelete && !inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :class="selectMode ? 'app-btn-accent' : 'app-btn-secondary'"
           @click="toggleSelectMode">
-          <IconCheck class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.select') }}</span>
+          <IconCheck class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.select') }}</span>
         </button>
-        <button v-if="!(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="isDark ? 'bg-stone-800 text-stone-100 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
+        <button v-if="!showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn app-btn-secondary px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           @click="emit('rebuild-index')">
-          <IconDatabase class="h-3.5 w-3.5" /><span class="hidden sm:inline">{{ t('albums.rebuildIndex') }}</span>
+          <IconDatabase class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.rebuildIndex') }}</span>
         </button>
         <button
           v-if="inSpecialView"
-          class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900'"
+          class="app-btn app-btn-accent px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           @click="emit('show-photos')"
         >
           <IconImage class="h-3.5 w-3.5" />
-          <span class="hidden sm:inline">{{ t('albums.backToPhotos') }}</span>
+          <span class="hidden md:inline">{{ t('albums.backToPhotos') }}</span>
         </button>
-        <button v-if="!inSpecialView && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="filterSortPanelOpen
-            ? (isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900')
-            : (isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300')"
+        <button v-if="!inSpecialView && !showingDesktopSearch && !isMobile" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :class="filterSortPanelOpen ? 'app-btn-accent' : 'app-btn-secondary'"
           @click="toggleFilterSortPanel">
           <IconFilter class="h-3.5 w-3.5" />
-          <span class="hidden sm:inline">{{ t('albums.filterAndSort') }}</span>
+          <span class="hidden md:inline">{{ t('albums.filterAndSort') }}</span>
           <span v-if="hasActiveFilters || hasActiveSort" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
         </button>
-        <button v-if="!(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-          :class="aiToolsPanelOpen || inSpecialView
-            ? (isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900')
-            : (isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300')"
+        <button v-if="!inSpecialView && !showingDesktopSearch && isMobile && !mobileSearchOpen" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :class="filterPanelOpen ? 'app-btn-accent' : 'app-btn-secondary'"
+          :title="t('albums.filters')"
+          @click="toggleFilterPanel">
+          <IconFilter class="h-3.5 w-3.5" />
+          <span v-if="hasActiveFilters" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+        </button>
+        <button v-if="!inSpecialView && !showingDesktopSearch && isMobile && !mobileSearchOpen" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :class="sortPanelOpen ? 'app-btn-accent' : 'app-btn-secondary'"
+          :title="t('albums.sort')"
+          @click="toggleSortPanel">
+          <IconSort class="h-3.5 w-3.5" />
+          <span v-if="hasActiveSort" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+        </button>
+        <button v-if="!showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :class="aiToolsPanelOpen || inSpecialView ? 'app-btn-accent' : 'app-btn-secondary'"
           @click="toggleAiToolsPanel">
           <IconWand class="h-3.5 w-3.5" />
-          <span class="hidden sm:inline">{{ t('albums.aiTools') }}</span>
+          <span class="hidden md:inline">{{ t('albums.aiTools') }}</span>
         </button>
-        <div v-if="!inSpecialView && !(isMobile && mobileSearchOpen)" class="relative">
-          <button ref="thumbnailBtnRef" class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
-            :class="thumbnailPopoverOpen
-              ? (isDark ? 'bg-violet-500/20 text-violet-200' : 'bg-violet-100 text-violet-900')
-              : (isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300')"
+        <div v-if="!inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="relative">
+          <button ref="thumbnailBtnRef" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+            :class="thumbnailPopoverOpen || viewSettingsOpen ? 'app-btn-accent' : 'app-btn-secondary'"
             @click="toggleThumbnailPopover">
-            <IconZoomIn class="h-3.5 w-3.5" />
-            <span class="hidden sm:inline">{{ t('albums.thumbnailSize') }}</span>
+            <IconGrid class="h-3.5 w-3.5" />
+            <span class="hidden md:inline">{{ t('view.settings') }}</span>
           </button>
           <teleport to="body">
+            <Transition name="app-dropdown" :duration="{ enter: 300, leave: 200 }">
             <div v-if="thumbnailPopoverOpen" class="fixed inset-0 z-40" @click="thumbnailPopoverOpen = false" @wheel.prevent="thumbnailPopoverOpen = false">
-              <div class="z-50 w-48 rounded-xl border p-3 shadow-lg"
+              <div class="app-dropdown-surface app-frost-popover z-50 w-72 origin-top rounded-2xl p-3.5 shadow-xl"
                 :style="thumbnailPopoverStyle"
-                :class="isDark ? 'border-stone-700 bg-stone-900' : 'border-stone-200 bg-white'"
                 @click.stop @wheel.stop>
-                <div class="flex items-center gap-1.5">
+                <p class="mb-2 text-[11px] font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.thumbnailSize') }}</p>
+                <div class="flex items-center gap-1.5" @wheel.prevent.stop="onThumbSizeWheel">
                   <IconZoomOut class="h-3.5 w-3.5 shrink-0" :class="isDark ? 'text-stone-400' : 'text-stone-500'" />
-                  <input type="range" min="0" :max="thumbMaxIdx" v-model.number="thumbnailSize"
-                    class="w-full accent-violet-500" />
+                  <AppSlider
+                    v-model="thumbnailSize"
+                    :min="0"
+                    :max="thumbMaxIdx"
+                    :tick="THUMB_DETAILS_MIN"
+                    :tick-title="t('view.detailsMinTick')"
+                    :is-dark="isDark"
+                    :aria-label="t('albums.thumbnailSize')"
+                    @wheel.prevent.stop="onThumbSizeWheel"
+                  />
                   <IconZoomIn class="h-3.5 w-3.5 shrink-0" :class="isDark ? 'text-stone-400' : 'text-stone-500'" />
                   <button class="shrink-0 rounded p-0.5 transition"
                     :class="isDark ? 'text-stone-400 hover:text-stone-200 hover:bg-stone-700' : 'text-stone-400 hover:text-stone-600 hover:bg-stone-200'"
@@ -1355,15 +2307,64 @@ defineExpose({ openPhotoDetail });
                     <IconRefresh class="h-3.5 w-3.5" />
                   </button>
                 </div>
+                <div class="mt-3 grid grid-cols-2 gap-1 rounded-xl p-0.5"
+                  :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
+                  <button type="button"
+                    class="relative inline-flex items-center justify-center gap-1 rounded-[0.65rem] px-2 py-1.5 text-[11px] font-medium transition"
+                    :class="!viewLayout.compact
+                      ? (isDark ? 'bg-stone-700 text-stone-50 shadow-sm' : 'bg-white text-stone-900 shadow-sm')
+                      : (isDark ? 'text-stone-400 hover:text-stone-200' : 'text-stone-500 hover:text-stone-700')"
+                    :title="forcedThumbsOnly ? t('view.detailsTooSmall') : undefined"
+                    @click="setViewCompact(false)">
+                    <IconList class="h-3.5 w-3.5" />
+                    {{ t('view.details') }}
+                    <IconAlertCircle
+                      v-if="forcedThumbsOnly"
+                      class="absolute -right-1 -top-1 h-3.5 w-3.5 text-amber-400 drop-shadow"
+                    />
+                  </button>
+                  <button type="button"
+                    class="inline-flex items-center justify-center gap-1 rounded-[0.65rem] px-2 py-1.5 text-[11px] font-medium transition"
+                    :class="viewLayout.compact
+                      ? (isDark ? 'bg-stone-700 text-stone-50 shadow-sm' : 'bg-white text-stone-900 shadow-sm')
+                      : (isDark ? 'text-stone-400 hover:text-stone-200' : 'text-stone-500 hover:text-stone-700')"
+                    @click="setViewCompact(true)">
+                    <IconImage class="h-3.5 w-3.5" />
+                    {{ t('view.thumbsOnly') }}
+                  </button>
+                </div>
+                <button type="button"
+                  class="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11px] font-medium transition"
+                  :class="isDark ? 'text-amber-200 hover:bg-stone-800' : 'text-amber-800 hover:bg-amber-50'"
+                  @click="openViewSettings">
+                  <IconGear class="h-3.5 w-3.5" />
+                  {{ t('view.moreSettings') }}
+                </button>
               </div>
             </div>
+            </Transition>
           </teleport>
         </div>
+        </div>
       </div>
+      <input ref="localFileInput" type="file" class="hidden" multiple accept="image/*,video/*,.raw,.arw,.nef,.cr2,.cr3,.orf,.rw2,.dng,.raf,.srw,.x3f,.3fr,.mef,.pef,.nrw,.rwl,.iiq,.erf,.fff" @change="handleLocalFileChange" />
+      <ImportSourceModal
+        :show="importSourceModalOpen"
+        :is-dark="isDark"
+        @local="handleImportLocal"
+        @cloud="handleImportCloud"
+        @close="importSourceModalOpen = false"
+      />
+      <CloudFilePicker
+        :show="cloudPickerOpen"
+        :is-dark="isDark"
+        :fetch-list="fetchList"
+        @confirm="handleCloudPickerConfirm"
+        @close="cloudPickerOpen = false"
+      />
 
       <!-- Selection action bar -->
-      <div v-if="selectMode && !inSpecialView" class="flex items-center gap-2 border-b px-2.5 py-1.5 md:px-4"
-        :class="isDark ? 'border-stone-700/60 bg-stone-800/80' : 'border-stone-200/60 bg-stone-100/80'">
+      <div v-if="selectMode && !inSpecialView && !showingDesktopSearch && !embedded" class="flex items-center gap-2 app-split-b px-2.5 py-1.5 app-frost-toolbar md:px-4">
         <span class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
           {{ t('albums.selectedPhotos', { count: selectedPhotoPaths.size }) }}
         </span>
@@ -1378,8 +2379,9 @@ defineExpose({ openPhotoDetail });
           class="inline-flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-medium transition"
           :class="isDark ? 'bg-rose-700 text-white hover:bg-rose-600' : 'bg-rose-600 text-white hover:bg-rose-700'"
           @click="confirmDeleteSelected">
-          <IconTrash class="h-3.5 w-3.5" />{{ t('albums.deleteSelected') }}
+          <IconTrash class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.deleteSelected') }}</span>
         </button>
+      </div>
       </div>
 
       <!-- Main content: filter/sort sidebar + photo grid + AI tools -->
@@ -1387,9 +2389,8 @@ defineExpose({ openPhotoDetail });
         <!-- Desktop filter/sort sidebar -->
         <FilterSidebar
           v-if="!isMobile && filterSortPanelOpen"
-          v-show="!inSpecialView"
+          v-show="!inSpecialView && !showingDesktopSearch"
           :is-dark="isDark"
-          :is-mobile="false"
           :collections="collections"
           :selected-collection-id="selectedCollectionId"
           :available-tags="availableTags"
@@ -1408,89 +2409,110 @@ defineExpose({ openPhotoDetail });
           @close="filterSortPanelOpen = false"
         />
 
-        <!-- Mobile filter/sort drawer -->
-        <teleport to="body">
-          <template v-if="isMobile">
-            <Transition name="drawer-backdrop" appear>
-              <div
-                v-show="filterSortPanelOpen && !inSpecialView"
-                class="fixed inset-0 z-[90] bg-black/50 backdrop-blur-sm"
-                style="position: fixed; inset: 0; z-index: 90;"
-                @click="filterSortPanelOpen = false"
-              ></div>
-            </Transition>
-            <Transition name="mobile-drawer" appear>
-              <FilterSidebar
-                v-show="filterSortPanelOpen && !inSpecialView"
-                style="position: fixed; inset: 0 auto 0 0; z-index: 91; width: min(18rem, 85vw);"
-                :is-dark="isDark"
-                :is-mobile="true"
-                :collections="collections"
-                :selected-collection-id="selectedCollectionId"
-                :available-tags="availableTags"
-                :available-cameras="availableCameras"
-                :available-lenses="availableLenses"
-                :available-formats="availableFormats"
-                :date-histogram="dateHistogram"
-                :filters="filters"
-                :sort="sort"
-                :available-people="albumPeople"
-                :current-user="currentUser"
-                :current-album="currentAlbum"
-                @apply="applyFilters"
-                @update-sort="(s) => emit('update-sort', s)"
-                @select-collection="(n) => emit('select-collection', n)"
-                @close="filterSortPanelOpen = false"
-              />
-            </Transition>
-          </template>
-        </teleport>
+        <FilterSheet
+          v-if="isMobile"
+          :show="filterPanelOpen && !inSpecialView && !showingDesktopSearch"
+          :is-dark="isDark"
+          :collections="collections"
+          :selected-collection-id="selectedCollectionId"
+          :available-tags="availableTags"
+          :available-cameras="availableCameras"
+          :available-lenses="availableLenses"
+          :available-formats="availableFormats"
+          :date-histogram="dateHistogram"
+          :filters="filters"
+          :persist-filters="!isolateFilters"
+          :available-people="albumPeople"
+          :current-user="currentUser"
+          :current-album="currentAlbum"
+          @apply="applyFilters"
+          @select-collection="(n) => emit('select-collection', n)"
+          @close="filterPanelOpen = false"
+        />
+        <SortSheet
+          v-if="isMobile"
+          :show="sortPanelOpen && !inSpecialView && !showingDesktopSearch"
+          :is-dark="isDark"
+          :sort="sort"
+          @update-sort="(s) => emit('update-sort', s)"
+          @close="sortPanelOpen = false"
+        />
 
         <!-- Photo grid / duplicate groups -->
-        <div class="relative min-h-0 flex-1 overflow-hidden p-2 md:p-3">
-          <div v-if="inDuplicatesView" class="app-scrollbar absolute inset-0 overflow-y-auto p-2 md:p-3">
+        <div
+          ref="photoPaneRef"
+          v-show="!gridPaused"
+          class="album-no-drag relative min-h-0 flex-1 overflow-hidden"
+          :class="!inSpecialView && !showingDesktopSearch && gridThumbsOnly ? 'p-0' : 'p-2 md:p-3'"
+          :style="{ '--photo-gap': `${thumbGapPx}px`, touchAction: pinchLive ? 'none' : 'pan-y' }"
+          @mousedown="preventAlbumDragLock"
+          @dragstart.prevent
+          @wheel.capture="onPhotoPaneWheel"
+        >
+          <div v-if="inDuplicatesView" class="absolute inset-0 overflow-hidden">
             <div v-if="busyAlbums && duplicateGroups.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
             <div v-else-if="!busyAlbums && duplicateGroups.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noDuplicateGroups') }}</div>
-            <div v-else class="flex flex-col gap-4 md:gap-5">
-              <div class="flex items-center justify-between px-1">
+            <div v-else class="flex h-full min-h-0 flex-col">
+              <div class="flex shrink-0 items-center justify-between px-1 pb-3">
                 <p class="text-xs font-semibold uppercase tracking-wide" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.showDuplicates') }}</p>
                 <p class="text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ duplicateTotal }}</p>
               </div>
-              <section v-for="group in duplicateGroups" :key="group.group_key"
-                class="rounded-2xl border p-3 md:p-4"
-                :class="isDark ? 'border-stone-700 bg-stone-900/70' : 'border-stone-200 bg-white/80'">
-                <div class="mb-3 flex flex-wrap items-center gap-2">
-                  <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold"
-                    :class="isDark ? 'bg-amber-900/40 text-amber-200' : 'bg-amber-100 text-amber-800'">
-                    {{ group.kind === 'near' ? t('albums.duplicatesNear') : t('albums.duplicatesExact') }}
-                  </span>
-                  <span class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-700'">
-                    {{ t('albums.duplicateGroupPhotos', { count: group.photo_count }) }}
-                  </span>
-                  <span v-if="group.kind === 'near'" class="truncate text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
-                    {{ t('albums.duplicatesDistance', { distance: group.max_hamming_distance }) }}
-                  </span>
-                  <span v-else-if="group.sha256" class="truncate text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
-                    {{ group.sha256.slice(0, 16) }}
-                  </span>
-                </div>
-                <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-                  <article v-for="photo in group.photos" :key="photo.stable_id"
-                    class="group cursor-pointer rounded-xl border p-1.5 transition hover:shadow-md sm:p-2"
-                    :class="isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
-                    @click="openDuplicateDetail(photo)">
-                    <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                      <LazyImage img-class="h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360)" alt="" />
-                    </div>
-                    <p class="mt-1.5 truncate text-xs font-semibold" :title="duplicateDisplayName(photo)">{{ duplicateDisplayName(photo) }}</p>
-                    <p class="truncate text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatSize(photo.size_bytes) }}</p>
-                  </article>
-                </div>
-              </section>
+              <div class="relative min-h-0 flex-1 overflow-hidden">
+                <VList
+                  :data="duplicateGroups"
+                  class="app-scrollbar absolute inset-0"
+                  :bufferSize="600"
+                >
+                  <template #default="{ item: group, index }">
+                    <section class="pb-4 md:pb-5">
+                      <div class="rounded-2xl app-surface app-card p-3 md:p-4">
+                        <div class="mb-3 flex flex-wrap items-center gap-2">
+                          <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                            :class="isDark ? 'bg-amber-900/40 text-amber-200' : 'bg-amber-100 text-amber-800'">
+                            {{ group.kind === 'near' ? t('albums.duplicatesNear') : t('albums.duplicatesExact') }}
+                          </span>
+                          <span class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-700'">
+                            {{ t('albums.duplicateGroupPhotos', { count: group.photo_count }) }}
+                          </span>
+                          <span v-if="group.kind === 'near'" class="truncate text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+                            {{ t('albums.duplicatesDistance', { distance: group.max_hamming_distance }) }}
+                          </span>
+                          <span v-else-if="group.sha256" class="truncate text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+                            {{ group.sha256.slice(0, 16) }}
+                          </span>
+                        </div>
+                        <div class="grid" :class="thumbGridClass">
+                          <article
+                            v-for="photo in dupGroupPhotos(group, index)"
+                            :key="photo.stable_id"
+                            class="group min-w-0 self-start cursor-pointer rounded-xl app-surface app-card p-1.5 transition sm:p-2"
+                            @click="openDuplicateDetail(photo)"
+                          >
+                            <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
+                              <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360)" alt="" />
+                            </div>
+                            <p class="mt-1.5 truncate text-xs font-semibold" :title="duplicateDisplayName(photo)">{{ duplicateDisplayName(photo) }}</p>
+                            <p class="truncate text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatSize(photo.size_bytes) }}</p>
+                          </article>
+                        </div>
+                        <button
+                          v-if="dupHiddenCount(group, index) > 0"
+                          type="button"
+                          class="mt-3 w-full rounded-xl px-3 py-2 text-xs font-medium transition"
+                          :class="isDark ? 'bg-stone-800 text-stone-300 hover:bg-stone-700' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'"
+                          @click="expandDupGroup(group, index)"
+                        >
+                          {{ t('albums.duplicatesShowMore', { count: dupHiddenCount(group, index) }) }}
+                        </button>
+                      </div>
+                    </section>
+                  </template>
+                </VList>
+              </div>
             </div>
           </div>
 
-          <div v-else-if="inTextView" class="app-scrollbar absolute inset-0 overflow-y-auto p-2 md:p-3">
+          <div v-else-if="inTextView" class="app-scrollbar absolute inset-0 overflow-y-auto">
             <div class="mb-3 flex flex-wrap items-center gap-2 px-1">
               <button class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition"
                 :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
@@ -1503,13 +2525,12 @@ defineExpose({ openPhotoDetail });
             </div>
             <div v-if="similarLoading" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
             <div v-else-if="similarResults.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noTextResults') }}</div>
-            <div v-else class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            <div v-else class="grid" :class="thumbGridClass">
               <article v-for="photo in similarResults" :key="`${photo.owner}:${photo.path}`"
-                class="group cursor-pointer rounded-xl border p-1.5 transition hover:shadow-md sm:p-2"
-                :class="isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
+                class="group min-w-0 self-start cursor-pointer rounded-xl app-surface app-card p-1.5 transition sm:p-2"
                 @click="openSimilarDetail(photo)">
                 <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                  <LazyImage img-class="h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
+                  <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
                 </div>
                 <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
                 <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -1519,7 +2540,7 @@ defineExpose({ openPhotoDetail });
             </div>
           </div>
 
-          <div v-else-if="inSimilarView" class="app-scrollbar absolute inset-0 overflow-y-auto p-2 md:p-3">
+          <div v-else-if="inSimilarView" class="app-scrollbar absolute inset-0 overflow-y-auto">
             <div class="mb-3 flex flex-wrap items-center gap-2 px-1">
               <button class="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium transition"
                 :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
@@ -1532,13 +2553,12 @@ defineExpose({ openPhotoDetail });
             </div>
             <div v-if="similarLoading" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
             <div v-else-if="similarResults.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noSimilarResults') }}</div>
-            <div v-else class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            <div v-else class="grid" :class="thumbGridClass">
               <article v-for="photo in similarResults" :key="`${photo.owner}:${photo.path}`"
-                class="group cursor-pointer rounded-xl border p-1.5 transition hover:shadow-md sm:p-2"
-                :class="isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'"
+                class="group min-w-0 self-start cursor-pointer rounded-xl app-surface app-card p-1.5 transition sm:p-2"
                 @click="openSimilarDetail(photo)">
                 <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                  <LazyImage img-class="h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
+                  <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
                 </div>
                 <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
                 <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -1549,77 +2569,72 @@ defineExpose({ openPhotoDetail });
           </div>
 
           <template v-else>
-          <div v-if="busyAlbums && albumPhotos.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</div>
-          <div v-else-if="!busyAlbums && albumPhotos.length === 0" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.noPhotosFiltered') }}</div>
+          <div v-if="desktopSearchLoading || (!showingDesktopSearch && (albumPhotoLoadHold || (busyAlbums && albumPhotos.length === 0)))" class="flex h-full flex-col items-center justify-center gap-3">
+            <div class="h-8 w-8 animate-spin rounded-full border-2 border-amber-500 border-t-transparent"></div>
+            <p class="text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</p>
+          </div>
+          <div v-else-if="gridPhotos.length === 0 && (showingDesktopSearch || !busyAlbums)" class="py-10 text-center text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ showingDesktopSearch ? (desktopSearchError || t('albums.noTextResults')) : (emptyLabel || t('albums.noPhotosFiltered')) }}</div>
 
           <VirtualGrid
             v-else
-            :items="albumPhotos"
+            ref="photoGridRef"
+            :items="gridPhotos"
             item-key="path"
             :grid-class="'grid ' + thumbGridClass"
+            :zoom-level="thumbnailSize"
+            :zoom-classes="thumbZoomClasses"
+            :zoom-gaps="thumbZoomGaps"
+            :image-src="getGridThumbnail"
+            :paused="gridPaused"
             class="absolute inset-0"
             @scroll-near-bottom="handlePhotosScrollNearBottom"
+            @zooming="onGridZooming"
           >
             <template #default="{ item: photo }">
-            <article :key="photo.path"
-              class="group cursor-pointer rounded-xl border p-1.5 transition hover:shadow-md sm:p-2"
-              :class="[
-                selectMode && selectedPhotoPaths.has(photo.path)
-                  ? (isDark ? 'border-sky-500 bg-sky-900/30 ring-1 ring-sky-500/50' : 'border-sky-400 bg-sky-50 ring-1 ring-sky-400/50')
-                  : (isDark ? 'border-stone-700 bg-stone-900/80 hover:border-stone-600' : 'border-stone-200 bg-white/80 hover:border-stone-300'),
-              ]"
-              @click="selectMode ? togglePhotoSelect(photo) : openDetail(photo)">
+            <article
+              v-if="showingDesktopSearch"
+              class="group min-w-0 cursor-pointer self-start rounded-xl app-surface app-card p-1.5 transition sm:p-2"
+              @click="onGridPhotoClick(photo)"
+            >
               <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                <LazyImage
-                  img-class="h-full w-full object-cover transition group-hover:scale-105"
-                  :src="getThumbnail(photo.path, 360)"
-                  alt="" />
-                <!-- Selection checkbox -->
-                <div v-if="selectMode"
-                  class="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full border-2 transition"
-                  :class="selectedPhotoPaths.has(photo.path)
-                    ? 'border-sky-400 bg-sky-500 text-white'
-                    : (isDark ? 'border-stone-400 bg-stone-900/60' : 'border-stone-400 bg-white/80')">
-                  <IconCheck v-if="selectedPhotoPaths.has(photo.path)" class="h-3 w-3" />
-                </div>
-                <template v-if="photo.color_label">
-                  <span
-                    v-for="(clKey, ci) in colorLabels(photo.color_label)"
-                    :key="clKey"
-                    class="absolute top-1.5 h-2.5 w-2.5 rounded-full ring-1 ring-white/50"
-                    :class="photoColorDot(clKey) ? photoColorDot(clKey).color : ''"
-                    :style="`left: ${0.375 + ci * 0.875}rem`"
-                  ></span>
-                </template>
-                <div v-if="photo.rating > 0" class="absolute bottom-1 left-1 flex">
-                  <IconStar v-for="s in photo.rating" :key="s" class="h-3 w-3 text-amber-400 drop-shadow" />
-                </div>
+                <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
               </div>
-              <p class="mt-1.5 truncate text-xs font-semibold" :title="photo.name">{{ photo.name }}</p>
-              <p class="truncate text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
-                {{ photo.datetime || photo.date }}
-                <template v-if="photo.camera_model"> &middot; {{ photo.camera_model }}</template>
+              <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
+              <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+                {{ t('albums.similarScore', { score: Number(photo.score || 0).toFixed(2) }) }}
               </p>
-              <div v-if="photo.tags && photo.tags.length > 0" class="mt-0.5 flex flex-wrap gap-0.5">
-                <span v-for="tag in photo.tags.slice(0, 3)" :key="tag"
-                  class="rounded px-1 py-0 text-[9px]"
-                  :class="isDark ? 'bg-sky-900/50 text-sky-200' : 'bg-sky-50 text-sky-600'">{{ tag }}</span>
-                <span v-if="photo.tags.length > 3" class="text-[9px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">+{{ photo.tags.length - 3 }}</span>
-              </div>
             </article>
+            <PhotoCard
+              v-else
+              :photo="photo"
+              :layout="viewLayout"
+              :compact="gridCompact"
+              :hide-overlays="gridHideOverlays"
+              :is-dark="isDark"
+              :thumb-src="getThumbnail(photo.path, 360)"
+              :format-size="formatSize"
+              :select-mode="selectMode"
+              :selected="selectMode && selectedPhotoPaths.has(photo.path)"
+              @pointerdown="onPhotoPointerDown(photo, $event)"
+              @contextmenu="onPhotoContextMenu(photo, $event)"
+              @click="onGridPhotoClick(photo)"
+            />
             </template>
           </VirtualGrid>
           </template>
         </div>
 
-        <!-- AI tools modal (replaces right sidebar) -->
-        <teleport to="body">
+        <!-- AI tools modal (desktop) -->
+        <teleport v-if="!embedded" to="body">
           <AlbumAiToolsModal
-            v-if="aiToolsPanelOpen"
+            :show="aiToolsPanelOpen"
             :is-dark="isDark"
+            :is-mobile="isMobile"
+            :initial-section="aiToolsInitialSection"
             :album-name="currentAlbum"
             :album-owner="albumFacesOwner || currentUser"
             :busy="albumPeopleLoading"
+            :hints-loading="albumFaceHintsLoading"
             :people="albumPeople"
             :suggestions="albumFaceSuggestions"
             :editable="albumFacesEditable"
@@ -1627,27 +2642,26 @@ defineExpose({ openPhotoDetail });
             :on-search-text="onSearchTextInModal"
             :on-load-duplicates="onLoadDuplicatesInModal"
             @close="aiToolsPanelOpen = false"
+            @back="aiToolsPanelOpen = false"
             @refresh="emit('refresh-album-people')"
             @adopt-cluster="(body) => emit('adopt-album-cluster', body)"
             @merge-cluster="(body) => emit('merge-album-cluster', body)"
             @patch-person="(id, updates) => emit('patch-album-person', id, updates)"
             @remove-center="(body) => emit('remove-album-center', body)"
             @delete-person="(id) => emit('delete-album-person', id)"
-            @filter-person="(person) => emit('filter-person', person)"
             @open-photo="onAiToolsOpenPhoto"
           />
         </teleport>
       </div>
     </div>
-    </Transition>
+    </component>
 
     <!-- ═══════════════════════════════════════════
          Album Create / Edit Dialog
          ═══════════════════════════════════════════ -->
-    <teleport to="body">
-      <div v-if="showAlbumDialog" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="showAlbumDialog = false">
-        <div class="w-full max-w-md rounded-2xl border p-5 shadow-2xl"
-          :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-stone-200 bg-white text-stone-900'">
+    <AppDialog :show="showAlbumDialog" :z-index="100" @close="showAlbumDialog = false">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-md rounded-2xl border p-5"
+          :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-4 text-base font-bold">{{ albumDialogMode === 'create' ? t('albums.createAlbum') : t('albums.editAlbum') }}</h3>
           <div class="flex flex-col gap-3">
             <div>
@@ -1679,111 +2693,286 @@ defineExpose({ openPhotoDetail });
               @click="submitAlbumDialog">{{ albumDialogMode === 'create' ? t('albums.createBtn') : t('albums.saveBtn') }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
+
+      <ViewSettingsDialog
+        v-if="!embedded"
+        :show="viewSettingsOpen"
+        v-model="viewLayout"
+        :is-dark="isDark"
+        :format-size="formatSize"
+        @close="viewSettingsOpen = false"
+      />
 
     <!-- ═══════════════════════════════════════════
          Share Dialog
          ═══════════════════════════════════════════ -->
-    <teleport to="body">
-      <div v-if="showShareDialog" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="showShareDialog = false">
-        <div class="w-full max-w-lg rounded-2xl border p-5 shadow-2xl"
-          :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-stone-200 bg-white text-stone-900'">
-          <h3 class="mb-4 text-base font-bold">{{ t('share.title', { name: shareDialogAlbum?.name || shareDialogAlbum?.dir_name }) }}</h3>
+    <AppDialog :show="showShareDialog" :z-index="100" @close="showShareDialog = false">
+        <div
+          class="app-dialog-panel app-dialog-panel-dense share-dialog flex w-full flex-col rounded-2xl border p-5"
+          :class="[isDark ? 'text-stone-100' : 'text-stone-900', isMobile ? 'max-w-md' : 'max-w-lg']"
+        >
+          <header class="mb-4 shrink-0">
+            <h3 class="text-base font-bold">{{ t('share.title') }}</h3>
+            <p class="mt-1 truncate text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
+              {{ shareDialogAlbum?.name || shareDialogAlbum?.dir_name }}
+            </p>
+          </header>
 
-          <!-- Shares table -->
-          <div v-if="shareDialogAlbum?.shares?.length" class="mb-4 overflow-hidden rounded-lg border"
-            :class="isDark ? 'border-stone-700' : 'border-stone-200'">
-            <table class="w-full text-sm">
-              <thead>
-                <tr :class="isDark ? 'bg-stone-800 text-stone-400' : 'bg-stone-50 text-stone-500'">
-                  <th class="px-3 py-2 text-left text-xs font-medium">{{ t('share.user') }}</th>
-                  <th class="px-3 py-2 text-center text-xs font-medium">{{ t('share.canEdit') }}</th>
-                  <th class="px-3 py-2 text-center text-xs font-medium">{{ t('share.canDelete') }}</th>
-                  <th class="w-10 px-3 py-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="s in shareDialogAlbum.shares" :key="s.username"
-                  class="border-t" :class="isDark ? 'border-stone-700' : 'border-stone-200'">
-                  <td class="px-3 py-2 font-medium">{{ s.username }}</td>
-                  <td class="px-3 py-2 text-center">
-                    <input type="checkbox" :checked="s.can_write"
-                      class="h-4 w-4 rounded border-stone-300"
-                      :disabled="shareMutationPending"
-                      @change="updateSharePermission(s, 'can_write', $event.target.checked)" />
-                  </td>
-                  <td class="px-3 py-2 text-center">
-                    <input type="checkbox" :checked="s.can_delete"
-                      class="h-4 w-4 rounded border-stone-300"
-                      :disabled="shareMutationPending"
-                      @change="updateSharePermission(s, 'can_delete', $event.target.checked)" />
-                  </td>
-                  <td class="px-3 py-2 text-center">
-                    <button class="rounded p-1 transition"
-                      :class="isDark ? 'text-rose-400 hover:bg-rose-900/30' : 'text-rose-500 hover:bg-rose-100'"
-                      :disabled="shareMutationPending"
-                      @click="removeShare(shareDialogAlbum, s.username)">
-                      <IconClose class="h-3.5 w-3.5" />
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div v-else class="mb-4 rounded-lg px-3 py-4 text-center text-sm"
-            :class="isDark ? 'bg-stone-800 text-stone-400' : 'bg-stone-50 text-stone-500'">
-            {{ t('share.noShares') }}
-          </div>
-
-          <!-- Add new share row -->
-          <div class="flex items-end gap-2">
-            <div class="flex-1">
-              <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('share.addUser') }}</label>
-              <input v-model="shareForm.username" type="text" :placeholder="t('share.usernamePlaceholder')"
-                class="w-full rounded-lg border px-3 py-2 text-sm"
-                :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"
+          <!-- Mobile: stacked cards -->
+          <template v-if="isMobile">
+            <section class="mb-5 shrink-0">
+              <h4 class="mb-2 text-[11px] font-semibold uppercase tracking-wide"
+                :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('share.addUser') }}</h4>
+              <input
+                v-model="shareForm.username"
+                type="text"
+                :placeholder="t('share.usernamePlaceholder')"
+                class="w-full rounded-xl border px-3.5 py-2.5 text-sm"
+                :class="isDark ? 'border-stone-700 bg-stone-800/80 text-stone-100 placeholder:text-stone-500' : 'border-stone-200 bg-white text-stone-900 placeholder:text-stone-400'"
                 :disabled="shareMutationPending"
-                @keyup.enter="submitShare" />
-            </div>
-            <label class="flex items-center gap-1 pb-2 text-xs">
-              <input type="checkbox" v-model="shareForm.canWrite" class="rounded border-stone-300" :disabled="shareMutationPending" />
-              <span :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('share.write') }}</span>
-            </label>
-            <label class="flex items-center gap-1 pb-2 text-xs">
-              <input type="checkbox" v-model="shareForm.canDelete" class="rounded border-stone-300" :disabled="shareMutationPending" />
-              <span :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('share.delete') }}</span>
-            </label>
-            <button class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium transition"
-              :class="isDark ? 'bg-blue-600 text-white hover:bg-blue-500' : 'bg-blue-600 text-white hover:bg-blue-700'"
-              :disabled="shareMutationPending"
-              @click="submitShare">
-              <IconPlus class="inline h-4 w-4" />
-            </button>
-          </div>
+                @keyup.enter="submitShare"
+              />
+              <div class="mt-2 overflow-hidden rounded-xl border"
+                :class="isDark ? 'border-stone-700/80' : 'border-stone-200'">
+                <label class="share-perm-row app-switch">
+                  <span class="app-switch-label">{{ t('share.canEdit') }}</span>
+                  <input
+                    type="checkbox"
+                    :checked="shareForm.canWrite"
+                    :disabled="shareMutationPending"
+                    @change="setShareFormWrite($event.target.checked)"
+                  />
+                  <span class="app-switch-track"></span>
+                </label>
+                <div class="mx-3.5" :class="isDark ? 'border-t border-stone-700/80' : 'border-t border-stone-200'"></div>
+                <label class="share-perm-row app-switch">
+                  <span class="app-switch-label">{{ t('share.canDelete') }}</span>
+                  <input
+                    type="checkbox"
+                    :checked="shareForm.canDelete"
+                    :disabled="shareMutationPending"
+                    @change="setShareFormDelete($event.target.checked)"
+                  />
+                  <span class="app-switch-track"></span>
+                </label>
+              </div>
+              <button
+                type="button"
+                class="app-btn app-btn-primary mt-3 w-full py-2.5 text-sm"
+                :disabled="shareMutationPending || !shareForm.username.trim()"
+                @click="submitShare"
+              >
+                <IconPlus class="h-4 w-4" />
+                {{ t('share.add') }}
+              </button>
+            </section>
 
-          <div class="mt-4 flex justify-end">
-            <button class="rounded-xl px-4 py-2 text-sm font-medium transition"
-              :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
-              @click="showShareDialog = false">{{ t('share.close') }}</button>
+            <section class="min-h-0 flex-1 overflow-y-auto">
+              <h4 class="mb-2 text-[11px] font-semibold uppercase tracking-wide"
+                :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('share.people') }}</h4>
+              <div v-if="shareDialogAlbum?.shares?.length" class="flex flex-col gap-2">
+                <article
+                  v-for="s in shareDialogAlbum.shares"
+                  :key="s.username"
+                  class="overflow-hidden rounded-xl border"
+                  :class="isDark ? 'border-stone-700/80' : 'border-stone-200'"
+                >
+                  <div class="flex items-center gap-2 px-3.5 pt-3 pb-1">
+                    <span class="min-w-0 flex-1 truncate text-sm font-semibold">{{ s.username }}</span>
+                    <button
+                      type="button"
+                      class="flex h-8 w-8 items-center justify-center rounded-lg transition"
+                      :class="isDark ? 'text-rose-400 hover:bg-rose-900/30' : 'text-rose-500 hover:bg-rose-100'"
+                      :title="t('share.remove')"
+                      :aria-label="t('share.remove')"
+                      :disabled="shareMutationPending"
+                      @click="removeShare(shareDialogAlbum, s.username)"
+                    >
+                      <IconTrash class="h-4 w-4" />
+                    </button>
+                  </div>
+                  <label class="share-perm-row app-switch">
+                    <span class="app-switch-label">{{ t('share.canEdit') }}</span>
+                    <input
+                      type="checkbox"
+                      :checked="s.can_write"
+                      :disabled="shareMutationPending"
+                      @change="updateSharePermission(s, 'can_write', $event.target.checked)"
+                    />
+                    <span class="app-switch-track"></span>
+                  </label>
+                  <div class="mx-3.5" :class="isDark ? 'border-t border-stone-700/80' : 'border-t border-stone-200'"></div>
+                  <label class="share-perm-row app-switch">
+                    <span class="app-switch-label">{{ t('share.canDelete') }}</span>
+                    <input
+                      type="checkbox"
+                      :checked="s.can_delete"
+                      :disabled="shareMutationPending"
+                      @change="updateSharePermission(s, 'can_delete', $event.target.checked)"
+                    />
+                    <span class="app-switch-track"></span>
+                  </label>
+                </article>
+              </div>
+              <div
+                v-else
+                class="rounded-xl px-3 py-6 text-center text-sm"
+                :class="isDark ? 'bg-stone-800/70 text-stone-400' : 'bg-stone-50 text-stone-500'"
+              >
+                {{ t('share.noShares') }}
+              </div>
+            </section>
+          </template>
+
+          <!-- Desktop: one person per table row -->
+          <template v-else>
+            <div
+              v-if="shareDialogAlbum?.shares?.length"
+              class="mb-4 min-h-0 flex-1 overflow-hidden rounded-xl border"
+              :class="isDark ? 'border-stone-700/80' : 'border-stone-200'"
+            >
+              <div class="max-h-[min(22rem,48vh)] overflow-y-auto">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0">
+                    <tr :class="isDark ? 'bg-stone-800 text-stone-400' : 'bg-stone-50 text-stone-500'">
+                      <th class="px-3 py-2 text-left text-xs font-medium">{{ t('share.user') }}</th>
+                      <th class="px-3 py-2 text-center text-xs font-medium">{{ t('share.canEdit') }}</th>
+                      <th class="px-3 py-2 text-center text-xs font-medium">{{ t('share.canDelete') }}</th>
+                      <th class="w-10 px-3 py-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="s in shareDialogAlbum.shares"
+                      :key="s.username"
+                      class="border-t"
+                      :class="isDark ? 'border-stone-700' : 'border-stone-200'"
+                    >
+                      <td class="px-3 py-2.5 font-medium">{{ s.username }}</td>
+                      <td class="px-3 py-2.5">
+                        <div class="flex justify-center">
+                          <label class="app-switch">
+                            <input
+                              type="checkbox"
+                              :checked="s.can_write"
+                              :disabled="shareMutationPending"
+                              @change="updateSharePermission(s, 'can_write', $event.target.checked)"
+                            />
+                            <span class="app-switch-track"></span>
+                          </label>
+                        </div>
+                      </td>
+                      <td class="px-3 py-2.5">
+                        <div class="flex justify-center">
+                          <label class="app-switch">
+                            <input
+                              type="checkbox"
+                              :checked="s.can_delete"
+                              :disabled="shareMutationPending"
+                              @change="updateSharePermission(s, 'can_delete', $event.target.checked)"
+                            />
+                            <span class="app-switch-track"></span>
+                          </label>
+                        </div>
+                      </td>
+                      <td class="px-3 py-2.5 text-center">
+                        <button
+                          type="button"
+                          class="rounded p-1 transition"
+                          :class="isDark ? 'text-rose-400 hover:bg-rose-900/30' : 'text-rose-500 hover:bg-rose-100'"
+                          :title="t('share.remove')"
+                          :aria-label="t('share.remove')"
+                          :disabled="shareMutationPending"
+                          @click="removeShare(shareDialogAlbum, s.username)"
+                        >
+                          <IconTrash class="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div
+              v-else
+              class="mb-4 rounded-xl px-3 py-6 text-center text-sm"
+              :class="isDark ? 'bg-stone-800/70 text-stone-400' : 'bg-stone-50 text-stone-500'"
+            >
+              {{ t('share.noShares') }}
+            </div>
+
+            <div class="flex items-end gap-3">
+              <div class="min-w-0 flex-1">
+                <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
+                  {{ t('share.addUser') }}
+                </label>
+                <input
+                  v-model="shareForm.username"
+                  type="text"
+                  :placeholder="t('share.usernamePlaceholder')"
+                  class="w-full rounded-xl border px-3 py-2 text-sm"
+                  :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-200 bg-white text-stone-900 placeholder:text-stone-400'"
+                  :disabled="shareMutationPending"
+                  @keyup.enter="submitShare"
+                />
+              </div>
+              <label class="app-switch shrink-0">
+                <span class="app-switch-label">{{ t('share.canEdit') }}</span>
+                <input
+                  type="checkbox"
+                  :checked="shareForm.canWrite"
+                  :disabled="shareMutationPending"
+                  @change="setShareFormWrite($event.target.checked)"
+                />
+                <span class="app-switch-track"></span>
+              </label>
+              <label class="app-switch shrink-0">
+                <span class="app-switch-label">{{ t('share.canDelete') }}</span>
+                <input
+                  type="checkbox"
+                  :checked="shareForm.canDelete"
+                  :disabled="shareMutationPending"
+                  @change="setShareFormDelete($event.target.checked)"
+                />
+                <span class="app-switch-track"></span>
+              </label>
+              <button
+                type="button"
+                class="app-btn app-btn-primary shrink-0 px-3 py-2 text-sm"
+                :disabled="shareMutationPending || !shareForm.username.trim()"
+                @click="submitShare"
+              >
+                <IconPlus class="h-4 w-4" />
+                {{ t('share.add') }}
+              </button>
+            </div>
+          </template>
+
+          <div class="mt-4 flex shrink-0 justify-end">
+            <button
+              type="button"
+              class="app-btn app-btn-secondary px-4 py-2 text-sm"
+              @click="showShareDialog = false"
+            >{{ t('share.close') }}</button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
 
     <!-- ═══════════════════════════════════════════
          Photo Detail / Edit overlay
          ═══════════════════════════════════════════ -->
-    <teleport to="body">
-      <div v-if="detailPhoto" class="fixed inset-0 z-[130] flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="closeDetail">
-        <div class="relative flex overflow-hidden border shadow-2xl"
+    <AppDialog :show="!embedded && !!detailPhoto && !detailClosing" :z-index="130" :center-class="detailFullscreen ? 'p-0' : 'p-0 md:p-4'" @close="closeDetail" @after-leave="finishCloseDetail">
+        <div ref="detailPanelRef" tabindex="-1" class="app-dialog-panel flex overflow-hidden outline-none"
           :class="[
             detailFullscreen
-              ? 'h-full w-full flex-col border-none bg-black text-white'
+              ? 'app-dialog-solid app-photo-fullscreen text-white'
               : [
-                  isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-stone-200 bg-white text-stone-900',
+                  'relative border',
+                  'app-dialog-panel-soft',
+                  isDark ? 'text-stone-100' : 'text-stone-900',
                   isMobile ? 'h-full w-full flex-col' : 'w-full flex-col rounded-2xl',
-                  detailExpanded && !isMobile ? 'md:mx-auto md:h-[80vh] md:w-[80vw] md:rounded-2xl' : 'md:mx-4 md:max-h-[90vh] md:max-w-3xl md:rounded-2xl'
+                  detailExpanded && !isMobile ? 'md:mx-auto md:h-[80vh] md:w-[80vw] md:rounded-2xl' : 'md:mx-4 md:max-h-[90vh] md:max-w-5xl md:rounded-2xl'
                 ],
           ]">
 
@@ -1814,8 +3003,8 @@ defineExpose({ openPhotoDetail });
                 ? (isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900')
                 : (isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300')"
               @click="toggleExpanded">
-              <IconExpand class="h-3.5 w-3.5" />
-              <span class="hidden sm:inline">{{ detailExpanded ? t('detail.collapse') : t('detail.viewOriginal') }}</span>
+              <IconViewOriginal class="h-3.5 w-3.5" />
+              <span class="hidden md:inline">{{ detailExpanded ? t('detail.collapse') : t('detail.viewOriginal') }}</span>
             </button>
             <button class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition"
               :class="darktablePreview
@@ -1827,7 +3016,7 @@ defineExpose({ openPhotoDetail });
               :title="!hasXmpSidecar ? t('detail.noXmp') : t('detail.darktablePreview')"
               @click="toggleDarktablePreview">
               <IconCamera class="h-3.5 w-3.5" />
-              <span class="hidden sm:inline">{{ t('detail.darktablePreview') }}</span>
+              <span class="hidden md:inline">{{ t('detail.darktablePreview') }}</span>
             </button>
             <button class="rounded-full p-1.5 transition"
               :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
@@ -1836,11 +3025,11 @@ defineExpose({ openPhotoDetail });
             </button>
           </div>
 
-          <div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-4 md:flex-row md:gap-5 md:overflow-hidden md:p-5"
-            :class="detailFullscreen ? '!overflow-hidden !p-0' : ''">
+          <div class="flex min-h-0 flex-1 flex-col p-4 md:flex-row md:gap-5 md:overflow-hidden md:p-5"
+            :class="detailFullscreen ? 'app-photo-fullscreen-body !overflow-hidden !p-0' : (isMobile ? 'overflow-hidden' : 'overflow-y-auto')">
             <!-- Preview -->
-            <div class="group relative flex min-w-0 flex-1 items-center justify-center"
-              :class="detailFullscreen ? 'h-full w-full' : ''"
+            <div class="group relative flex min-h-0 min-w-0 flex-1 items-center justify-center"
+              :class="detailFullscreen ? 'app-photo-fullscreen-stage' : ''"
               @mousemove="showFullscreenControls"
               @wheel.prevent="onDetailWheel">
               <!-- Loading spinner -->
@@ -1854,7 +3043,11 @@ defineExpose({ openPhotoDetail });
                 :src="detailImageSrc"
                 class="rounded-xl object-contain transition-opacity"
                 :class="[
-                  detailFullscreen ? 'h-full max-h-full w-full max-w-full rounded-none' : (detailExpanded ? 'max-h-64 sm:max-h-[60vh] md:max-h-full' : 'max-h-48 sm:max-h-72 md:max-h-[60vh]'),
+                  detailFullscreen
+                    ? 'app-photo-fullscreen-img'
+                    : isMobile
+                      ? 'absolute inset-0 h-full w-full'
+                      : (detailExpanded ? 'max-h-64 sm:max-h-[60vh] md:max-h-full' : 'max-h-56 sm:max-h-96 md:max-h-[72vh]'),
                   imageLoading ? 'opacity-40' : 'opacity-100'
                 ]"
                 alt="" @load="onDetailImageLoad" @error="onDetailImageError" />
@@ -1888,7 +3081,7 @@ defineExpose({ openPhotoDetail });
                   class="rounded-full bg-black/50 p-2.5 text-white transition hover:bg-black/75"
                   :title="t('detail.showDetails')"
                   @click="toggleDetailFullscreen">
-                  <IconExpand class="h-5 w-5" />
+                  <IconCollapse class="h-5 w-5" />
                 </button>
                 <button
                   class="rounded-full bg-black/50 p-2.5 text-white transition hover:bg-black/75"
@@ -1900,7 +3093,8 @@ defineExpose({ openPhotoDetail });
             </div>
 
             <!-- Meta & editor -->
-            <div v-if="!detailFullscreen" class="app-scrollbar mt-3 flex w-full shrink-0 flex-col gap-2.5 overflow-y-auto md:mt-0 md:w-72 md:gap-3 lg:w-80">
+            <div v-if="!detailFullscreen" class="app-scrollbar mt-3 flex w-full shrink-0 flex-col gap-2.5 overflow-y-auto md:mt-0 md:w-72 md:max-h-none md:gap-3 lg:w-80"
+              :class="isMobile ? 'max-h-[42%]' : ''">
               <h3 class="text-base font-bold">{{ detailPhoto.name }}</h3>
 
               <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
@@ -1943,7 +3137,7 @@ defineExpose({ openPhotoDetail });
                 <p class="mb-1 text-[10px] font-semibold uppercase tracking-wider" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.rating') }}</p>
                 <div class="flex gap-1">
                   <button v-for="star in 5" :key="star" class="p-0.5 transition"
-                    :class="star <= editRating ? 'text-amber-400' : (isDark ? 'text-stone-600 hover:text-stone-400' : 'text-stone-300 hover:text-stone-400')"
+                    :class="star <= editRating ? 'text-yellow-400' : (isDark ? 'text-stone-600 hover:text-stone-400' : 'text-stone-300 hover:text-stone-400')"
                     @click="setDetailRating(star)">
                     <IconStar class="h-5 w-5" />
                   </button>
@@ -1965,14 +3159,12 @@ defineExpose({ openPhotoDetail });
               <!-- Tags editor -->
               <div>
                 <p class="mb-1 text-[10px] font-semibold uppercase tracking-wider" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.tags') }}</p>
-                <input v-model="editTagsText" type="text" :placeholder="t('detail.tagsPlaceholder')"
-                  class="w-full rounded-lg border px-2.5 py-1.5 text-xs"
-                  :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                <TagChips v-model="editTags" :available="availableTags" editable :is-dark="isDark" />
               </div>
 
               <!-- Set as album cover + Add to album + Delete -->
               <div class="flex flex-wrap gap-2">
-                <button class="flex-1 rounded-xl px-4 py-2 text-xs font-medium transition"
+                <button v-if="currentAlbumCanWrite" class="flex-1 rounded-xl px-4 py-2 text-xs font-medium transition"
                   :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
                   @click="setCoverFromPhoto(detailPhoto)">
                   {{ t('detail.setAsCover') }}
@@ -2003,20 +3195,33 @@ defineExpose({ openPhotoDetail });
                 @click="savePhotoMeta">
                 {{ t('detail.save') }}
               </button>
-              <div class="h-[env(safe-area-inset-bottom,0px)] md:hidden"></div>
+              <div class="h-[var(--safe-bottom,0px)] md:hidden"></div>
             </div>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
 
     <!-- ═══════════════════════════════════════════
          Export Dialog
          ═══════════════════════════════════════════ -->
-    <teleport to="body">
-      <div v-if="showExportDialog" class="fixed inset-0 z-[145] flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showExportDialog = false">
-        <div class="w-full max-w-sm rounded-2xl border p-5 shadow-2xl"
-          :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-stone-200 bg-white text-stone-900'">
+    <ActionSheet
+      :show="photoMenuOpen"
+      :title="menuPhoto?.name"
+      :actions="photoMenuActions"
+      @close="photoMenuOpen = false"
+      @select="onPhotoMenuAction"
+    />
+    <ActionSheet
+      :show="photoAlbumOpen"
+      :title="t('detail.addToAlbum')"
+      :actions="photoMenuAlbumActions"
+      @close="closePhotoAlbumMenu"
+      @select="onPhotoMenuAlbum"
+    />
+
+    <AppDialog :show="showExportDialog" :z-index="145" @close="showExportDialog = false; menuPhoto = null">
+        <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-sm rounded-2xl border p-5"
+          :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <h3 class="mb-4 text-base font-bold">{{ t('detail.exportTitle') }}</h3>
 
           <!-- Format -->
@@ -2035,7 +3240,7 @@ defineExpose({ openPhotoDetail });
           <!-- Quality -->
           <div class="mb-3" v-if="exportForm.format === 'jpeg' || exportForm.format === 'webp'">
             <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.exportQuality') }}: {{ exportForm.quality }}</label>
-            <input type="range" v-model.number="exportForm.quality" min="1" max="100" class="w-full" />
+            <AppSlider v-model="exportForm.quality" :min="1" :max="100" :is-dark="isDark" />
           </div>
 
           <!-- Max width -->
@@ -2060,16 +3265,14 @@ defineExpose({ openPhotoDetail });
             </button>
           </div>
         </div>
-      </div>
-    </teleport>
+    </AppDialog>
 
     <!-- ═══════════════════════════════════════════
          Add to Album Modal
          ═══════════════════════════════════════════ -->
-    <teleport to="body">
-      <div v-if="showAddToAlbumModal" class="fixed inset-0 z-[145] flex items-center justify-center bg-black/50 backdrop-blur-sm" @click.self="showAddToAlbumModal = false">
-        <div class="flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border shadow-2xl"
-          :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-stone-200 bg-white text-stone-900'">
+    <AppDialog :show="!embedded && showAddToAlbumModal" :z-index="145" @close="showAddToAlbumModal = false">
+        <div class="app-dialog-panel app-dialog-panel-dense flex max-h-[80vh] w-full max-w-md flex-col rounded-2xl border"
+          :class="isDark ? 'text-stone-100' : 'text-stone-900'">
           <div class="flex items-center justify-between border-b px-5 py-4"
             :class="isDark ? 'border-stone-700' : 'border-stone-200'">
             <h3 class="text-base font-bold">{{ t('detail.addToAlbum') }}</h3>
@@ -2114,12 +3317,82 @@ defineExpose({ openPhotoDetail });
             </button>
           </div>
         </div>
+    </AppDialog>
+
+    <teleport to="body">
+      <div class="pointer-events-none fixed inset-x-0 z-[80] flex justify-center" :style="{ bottom: 'calc(var(--safe-bottom, 0px) + 2rem)' }">
+        <Transition name="thumb-size-toast">
+          <div
+            v-if="thumbSizeToastOpen"
+            class="pointer-events-auto flex items-center gap-2.5 rounded-full border px-3.5 py-2 shadow-lg backdrop-blur-xl"
+            :class="isDark
+              ? 'border-white/10 bg-stone-950/55 text-stone-200'
+              : 'border-white/50 bg-white/45 text-stone-700'"
+          >
+            <IconZoomOut class="h-3.5 w-3.5 shrink-0 opacity-50" />
+            <div class="w-44 shrink-0">
+              <AppSlider
+                v-model="thumbnailSize"
+                :min="0"
+                :max="thumbMaxIdx"
+                :tick="THUMB_DETAILS_MIN"
+                :tick-title="t('view.detailsMinTick')"
+                tone="ghost"
+                :aria-label="t('albums.thumbnailSize')"
+                @input="showThumbSizeToast"
+                @wheel.prevent.stop="onThumbToastWheel"
+              />
+            </div>
+            <IconZoomIn class="h-3.5 w-3.5 shrink-0 opacity-50" />
+          </div>
+        </Transition>
       </div>
     </teleport>
   </section>
 </template>
 
 <style scoped>
+.thumb-size-toast-enter-active,
+.thumb-size-toast-leave-active {
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.thumb-size-toast-enter-from,
+.thumb-size-toast-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.share-dialog {
+  max-height: min(88vh, 40rem);
+  overflow: hidden;
+}
+
+.share-perm-row {
+  width: 100%;
+  min-height: 2.75rem;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.15rem 0.9rem;
+}
+
+.share-perm-row .app-switch-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.share-perm-row :deep(.app-switch-track) {
+  width: 2.2rem;
+  height: 1.28rem;
+}
+
+.share-perm-row :deep(.app-switch-track::after) {
+  width: 0.98rem;
+  height: 0.98rem;
+}
+
+.share-perm-row :deep(input:checked + .app-switch-track::after) {
+  transform: translateX(0.92rem);
+}
+
 @media (max-width: 767px) {
   .album-view-enter-active,
   .album-view-leave-active {
@@ -2134,49 +3407,6 @@ defineExpose({ openPhotoDetail });
   .album-view-leave-to {
     opacity: 0;
     transform: translateX(-10px);
-  }
-
-  .drawer-backdrop-enter-active,
-  .drawer-backdrop-leave-active {
-    transition: opacity 180ms ease;
-  }
-
-  .drawer-backdrop-enter-from,
-  .drawer-backdrop-leave-to {
-    opacity: 0;
-  }
-
-  .mobile-drawer-enter-active,
-  .mobile-drawer-leave-active {
-    transition: transform 220ms ease-out;
-  }
-
-  .mobile-drawer-enter-from,
-  .mobile-drawer-leave-to {
-    transform: translateX(-100%);
-  }
-
-  .mobile-drawer-right-enter-active,
-  .mobile-drawer-right-leave-active {
-    transition: transform 220ms ease-out;
-  }
-
-  .mobile-drawer-right-enter-from,
-  .mobile-drawer-right-leave-to {
-    transform: translateX(100%);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .album-view-enter-active,
-  .album-view-leave-active,
-  .drawer-backdrop-enter-active,
-  .drawer-backdrop-leave-active,
-  .mobile-drawer-enter-active,
-  .mobile-drawer-leave-active,
-  .mobile-drawer-right-enter-active,
-  .mobile-drawer-right-leave-active {
-    transition: none;
   }
 }
 </style>

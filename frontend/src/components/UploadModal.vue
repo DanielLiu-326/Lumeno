@@ -2,8 +2,13 @@
 import { ref } from "vue";
 import { IconClose, IconCloudUpload } from "../utils/icons";
 import { t } from "../i18n/index.js";
+import AppDialog from "./AppDialog.vue";
 
 defineProps({
+  show: {
+    type: Boolean,
+    default: true,
+  },
   busyUpload: {
     type: Boolean,
     required: true,
@@ -60,14 +65,10 @@ function handleDrop(event) {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
-      @click.self="emit('close')"
-    >
+  <AppDialog :show="show" :z-index="50" @close="emit('close')">
       <div
-        class="w-full max-w-md rounded-[2rem] border p-6 shadow-2xl"
-        :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100' : 'border-white/70 bg-white'"
+        class="app-dialog-panel app-dialog-panel-dense w-full max-w-md rounded-[2rem] border p-6"
+        :class="isDark ? 'text-stone-100' : ''"
       >
         <div class="mb-5 flex items-center justify-between">
           <h3 class="text-lg font-semibold" :class="isDark ? 'text-stone-100' : 'text-stone-900'">{{ t('upload.title') }}</h3>
@@ -114,8 +115,7 @@ function handleDrop(event) {
           </button>
         </div>
       </div>
-    </div>
-  </Teleport>
+  </AppDialog>
 
   <input ref="fileInput" hidden multiple type="file" @change="handleFileSelection" />
   <input

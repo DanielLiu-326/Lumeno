@@ -1,5 +1,6 @@
 <script setup>
-import { t } from "../../i18n/index.js";
+import { computed } from "vue";
+import TagChips from "../TagChips.vue";
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -8,44 +9,31 @@ const props = defineProps({
 });
 const emit = defineEmits(["update:modelValue", "apply"]);
 
-// Update stored value without triggering a re-filter (wait for Enter)
-function onInput(tags) {
-  emit("update:modelValue", { ...props.modelValue, tags });
-}
+const selected = computed(() =>
+  String(props.modelValue.tags || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
 
-// Add a tag chip and immediately re-filter
-function addTag(tag) {
-  const existing = (props.modelValue.tags || "")
-    .split(",").map((s) => s.trim()).filter(Boolean);
-  if (!existing.includes(tag)) existing.push(tag);
-  emit("update:modelValue", { ...props.modelValue, tags: existing.join(", ") });
+function setTags(next) {
+  emit("update:modelValue", {
+    ...props.modelValue,
+    tags: (next || []).map((tag) => String(tag).trim()).filter(Boolean).join(", "),
+  });
   emit("apply");
 }
 </script>
 
 <template>
-  <div>
-    <input
-      :value="modelValue.tags"
-      type="text"
-      :placeholder="t('albums.tagsSeparator')"
-      class="mb-1.5 w-full rounded-lg border px-2 py-1.5 text-xs"
-      :class="isDark
-        ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500'
-        : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"
-      @input="onInput($event.target.value)"
-      @keyup.enter="emit('apply')"
+  <div class="filter-tags-list app-scrollbar">
+    <TagChips
+      variant="filter"
+      :model-value="selected"
+      :available="avail.availableTags || []"
+      editable
+      :is-dark="isDark"
+      @update:model-value="setTags"
     />
-    <div v-if="(avail.availableTags || []).length > 0" class="flex flex-wrap gap-1">
-      <button
-        v-for="tag in (avail.availableTags || [])"
-        :key="tag"
-        class="rounded-full px-2 py-0.5 text-[10px] font-medium"
-        :class="isDark ? 'bg-sky-900/60 text-sky-100 hover:bg-sky-800' : 'bg-sky-100 text-sky-700 hover:bg-sky-200'"
-        @click="addTag(tag)"
-      >
-        #{{ tag }}
-      </button>
-    </div>
   </div>
 </template>

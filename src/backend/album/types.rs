@@ -1,36 +1,5 @@
-use async_recursion::async_recursion;
-use async_trait::async_trait;
-use axum::body::Body;
-use axum::extract::{Path, Query};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::Response;
-use axum::{Extension, Json};
-use base64::Engine;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
-use function_name::named;
-use futures::future::BoxFuture;
-use quick_xml::Writer;
-use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256, Sha512};
-use std::collections::{HashMap, HashSet};
-use std::io::BufReader;
-use std::path::{Path as FsPath, PathBuf};
-use std::sync::Arc;
 use std::u8;
-use tokio::sync::Notify;
-use tokio_util::io::ReaderStream;
-use uuid::Uuid;
-
-use crate::backend::common::{
-    AppError, AppState, ConcurrencyLimiter, ConcurrencyPermit, Token, create_response,
-    into_host_path_safely, move_file_or_dir,
-};
-use crate::backend::i18n::{RequestLocale, tr, trf};
-use crate::backend::tasks::{Task, TaskBase, TaskStatus};
-
-use super::filters::FilterablePhoto;
 
 // ── Album types ──────────────────────────────────────────────────────────────
 
@@ -393,4 +362,3 @@ pub struct AlbumShare {
     #[serde(default)]
     pub can_delete: bool,
 }
-

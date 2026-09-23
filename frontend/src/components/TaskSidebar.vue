@@ -1,6 +1,6 @@
 <script setup>
 import { formatSize, progressPercent, statusLabel, statusTone } from "../utils/format";
-import { IconCheck } from "../utils/icons";
+import { IconClear } from "../utils/icons";
 import { t } from "../i18n/index.js";
 
 defineProps({
@@ -32,11 +32,12 @@ defineEmits(["clear-finished", "cancel-task", "pause-task", "resume-task"]);
       </div>
       <button
         v-if="loggedIn && tasks.length > 0"
-        class="inline-flex items-center gap-1.5 rounded-2xl bg-stone-200 px-4 py-2.5 text-sm font-medium text-stone-800 transition hover:-translate-y-0.5 hover:bg-stone-300"
+        class="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-stone-200 text-stone-800 transition hover:-translate-y-0.5 hover:bg-stone-300"
+        :title="t('tasks.clearFinished')"
+        :aria-label="t('tasks.clearFinished')"
         @click="$emit('clear-finished')"
       >
-        <IconCheck class="h-4 w-4" />
-        {{ t("tasks.clearFinished") }}
+        <IconClear class="h-4 w-4" />
       </button>
     </div>
 

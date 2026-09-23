@@ -1,14 +1,193 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="is-booting">
 
 <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Album Console</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, shrink-to-fit=no" />
+    <script src="/boot.js"></script>
+    <meta name="theme-color" content="#eef7f5" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Lumeno" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icons/lumeno-mark.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title>Lumeno</title>
+    <style>
+        html.is-booting,
+        html.is-booting body,
+        html.is-booting #app {
+            background: #eef7f5;
+            overflow: visible !important;
+            height: auto !important;
+            max-height: none !important;
+            min-height: 0 !important;
+        }
+
+        html.is-booting.dark,
+        html.is-booting.dark body,
+        html.is-booting.dark #app {
+            background: #0c1418;
+        }
+
+        html.is-booting[data-shell="mobile"],
+        html.is-booting[data-shell="mobile"] body,
+        html.is-booting[data-shell="mobile"] #app {
+            height: auto !important;
+            max-height: none !important;
+            overflow: visible !important;
+        }
+
+        .boot-splash {
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 2147483646;
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            height: 100lvh;
+            background: #eef7f5;
+            -webkit-user-select: none;
+            user-select: none;
+            pointer-events: auto;
+            touch-action: none;
+        }
+
+        html.is-ui-scaled .boot-splash {
+            width: calc(100lvw * var(--ui-zoom-inv, 1));
+            height: calc(100lvh * var(--ui-zoom-inv, 1));
+        }
+
+        html.dark .boot-splash {
+            background: #0c1418;
+        }
+
+        .boot-mark {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: min(42vw, 11.5rem);
+            transform: translate(-50%, -50%);
+            filter: drop-shadow(0 18px 36px rgb(46 160 168 / 0.22));
+        }
+
+        html.dark .boot-mark {
+            filter: drop-shadow(0 18px 36px rgb(0 0 0 / 0.45));
+        }
+
+        .boot-card,
+        .boot-word,
+        .boot-spark {
+            opacity: 0;
+        }
+
+        .boot-card {
+            transform-box: fill-box;
+            transform-origin: center;
+            transform: translate3d(10px, 16px, 0) scale(0.86);
+        }
+
+        .boot-word,
+        .boot-spark {
+            transform-box: fill-box;
+            transform-origin: center;
+            transform: translate3d(0, 6px, 0);
+        }
+
+        .boot-splash.is-entering .boot-card-1 {
+            animation: boot-stack 0.62s cubic-bezier(0.16, 1.28, 0.32, 1) 0.06s both;
+        }
+
+        .boot-splash.is-entering .boot-card-2 {
+            animation: boot-stack 0.62s cubic-bezier(0.16, 1.28, 0.32, 1) 0.2s both;
+        }
+
+        .boot-splash.is-entering .boot-card-3 {
+            animation: boot-stack 0.62s cubic-bezier(0.16, 1.28, 0.32, 1) 0.34s both;
+        }
+
+        .boot-splash.is-entering .boot-spark {
+            animation: boot-fade 0.5s cubic-bezier(0.22, 1, 0.36, 1) 0.48s both;
+        }
+
+        .boot-splash.is-entering .boot-word {
+            animation: boot-fade 0.48s cubic-bezier(0.22, 1, 0.36, 1) 0.42s both;
+        }
+
+        .boot-splash.is-leaving {
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.28s cubic-bezier(0.4, 0, 0.12, 1);
+        }
+
+        .boot-splash.is-leaving .boot-mark {
+            transform: translate(-50%, -50%) scale(0.96);
+            transition: transform 0.28s cubic-bezier(0.4, 0, 0.12, 1);
+        }
+
+        @keyframes boot-stack {
+            to {
+                opacity: 1;
+                transform: translate3d(0, 0, 0) scale(1);
+            }
+        }
+
+        @keyframes boot-fade {
+            to {
+                opacity: 1;
+                transform: translate3d(0, 0, 0);
+            }
+        }
+    </style>
     <script type="module" src="/src/main.js"></script>
 </head>
 
 <body>
+    <div id="boot-splash" class="boot-splash" aria-hidden="true">
+        <div class="boot-mark">
+            <svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Lumeno">
+                <defs>
+                    <linearGradient id="boot-bg" x1="8%" y1="0%" x2="96%" y2="100%">
+                        <stop offset="0%" stop-color="#3ec9ce" />
+                        <stop offset="48%" stop-color="#9fe3df" />
+                        <stop offset="100%" stop-color="#f4f7f2" />
+                    </linearGradient>
+                    <radialGradient id="boot-glow" cx="68%" cy="46%" r="46%">
+                        <stop offset="0%" stop-color="#fff6d6" stop-opacity="0.9" />
+                        <stop offset="55%" stop-color="#fff6d6" stop-opacity="0.18" />
+                        <stop offset="100%" stop-color="#fff6d6" stop-opacity="0" />
+                    </radialGradient>
+                </defs>
+                <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#boot-bg)" />
+                <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#boot-glow)" />
+                <g class="boot-spark">
+                    <circle cx="74" cy="68" r="2.1" fill="#fff" opacity="0.82" />
+                    <circle cx="96" cy="54" r="1.2" fill="#fff" opacity="0.7" />
+                    <circle cx="178" cy="92" r="1.6" fill="#fff8e7" opacity="0.8" />
+                </g>
+                <g class="boot-card boot-card-1">
+                    <g transform="rotate(18 138 118)">
+                        <rect x="72" y="78" width="124" height="86" rx="18" fill="#fff" fill-opacity="0.1" stroke="#fff" stroke-width="2.4" />
+                    </g>
+                </g>
+                <g class="boot-card boot-card-2">
+                    <g transform="rotate(6 128 116)">
+                        <rect x="64" y="76" width="128" height="88" rx="18" fill="#fff" fill-opacity="0.14" stroke="#fff" stroke-width="2.4" />
+                    </g>
+                </g>
+                <g class="boot-card boot-card-3">
+                    <g transform="rotate(-6 118 114)">
+                        <rect x="56" y="74" width="132" height="90" rx="18" fill="#fff" fill-opacity="0.2" stroke="#fff" stroke-width="2.5" />
+                    </g>
+                </g>
+                <text class="boot-word" x="128" y="208" text-anchor="middle" fill="#fff" font-size="23" font-weight="650" letter-spacing="0.8" font-family="ui-rounded, 'SF Pro Rounded', 'Segoe UI', system-ui, sans-serif">lumeno</text>
+            </svg>
+        </div>
+    </div>
     <div id="app"></div>
 </body>
 

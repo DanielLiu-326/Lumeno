@@ -2,16 +2,21 @@
 //!
 //! burn-onnx exported these graphs with **batch size fixed to 1**. Always run
 //! one sample per forward to avoid seq-len / position-embed mismatches.
+//!
+//! Vision runs on `selected_ai_device` (Vulkan/CUDA). Text — including the
+//! 256k×768 token embedding gather — always runs on CPU Flex (`cpu_flex_device`).
 
 use burn::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-use super::backend::{AiBackend, AiDevice, selected_ai_device};
+use super::backend::{AiBackend, AiDevice, cpu_flex_device, selected_ai_device};
 use super::manifest::ModelArtifactSpec;
 use super::preprocess::prepare_siglip_tensor;
-use crate::backend::ai::embedding::{SIGLIP2_EMBEDDING_DIM, l2_normalize};
+use crate::backend::ai::embedding::{
+    SIGLIP2_EMBEDDING_DIM, embedding_debug_fingerprint, embedding_debug_query_preview, l2_normalize,
+};
 
 pub const SIGLIP2_IMAGE_SIZE: u32 = 256;
 pub const SIGLIP2_MAX_TEXT_LEN: usize = 64;
@@ -23,7 +28,10 @@ pub struct Siglip2Runtime {
     #[cfg(ai_onnx_generated)]
     text: super::onnx_gen::siglip2_text::Model<AiBackend>,
     tokenizer: Option<Tokenizer>,
+    /// Vision preprocess + forward (Vulkan/CUDA when available).
     device: AiDevice,
+    /// Text tower + embedding table; always Flex CPU (wgpu cannot bind 750 MiB).
+    text_device: AiDevice,
     pub dimension: usize,
     pub revision: String,
     pub max_text_len: usize,
@@ -49,12 +57,21 @@ impl Siglip2Runtime {
         {
             let choice = selected_ai_device();
             let device = choice.device.clone();
+            // Token embedding gather must not run on Vulkan: the table is 750 MiB
+            // and exceeds `max_storage_buffer_binding_size` (128 MiB on Intel iGPU).
+            let text_device = cpu_flex_device();
             let vision_bpk = resolve_bpk(root, &["siglip2_vision.bpk"])?;
             let text_bpk = resolve_bpk(root, &["siglip2_text.bpk"])?;
             let vision =
                 super::onnx_gen::siglip2_vision::Model::<AiBackend>::from_file(vision_bpk, &device);
-            let text =
-                super::onnx_gen::siglip2_text::Model::<AiBackend>::from_file(text_bpk, &device);
+            let text = super::onnx_gen::siglip2_text::Model::<AiBackend>::from_file(
+                text_bpk,
+                &text_device,
+            );
+            eprintln!(
+                "[ai] siglip2 vision on {} ({device:?}); text tower on cpu Flex (embedding gather)",
+                choice.label
+            );
             let tokenizer = match tokenizer_path {
                 Some(path) => Some(
                     Tokenizer::from_file(path)
@@ -72,6 +89,7 @@ impl Siglip2Runtime {
                 text,
                 tokenizer,
                 device,
+                text_device,
                 dimension,
                 revision: image_text.revision.clone(),
                 max_text_len: max_text_len.clamp(8, SIGLIP2_MAX_TEXT_LEN),
@@ -79,19 +97,21 @@ impl Siglip2Runtime {
         }
     }
 
-    pub fn embed_images(&self, images: &[image::DynamicImage]) -> Result<Vec<Vec<f32>>, String> {
+    pub fn embed_images(&self, images: &[image::DynamicImage]) -> Vec<Result<Vec<f32>, String>> {
         #[cfg(not(ai_onnx_generated))]
         {
             let _ = images;
-            return Err("siglip2 onnx model unavailable".to_string());
+            return images
+                .iter()
+                .map(|_| Err("siglip2 onnx model unavailable".to_string()))
+                .collect();
         }
         #[cfg(ai_onnx_generated)]
         {
-            let mut out = Vec::with_capacity(images.len());
-            for image in images {
-                out.push(self.embed_image_one(image)?);
-            }
-            Ok(out)
+            images
+                .iter()
+                .map(|image| self.embed_image_one(image))
+                .collect()
         }
     }
 
@@ -140,14 +160,25 @@ impl Siglip2Runtime {
         while token_ids.len() < self.max_text_len {
             token_ids.push(pad_id);
         }
+        let head_ids: Vec<u32> = token_ids.iter().copied().take(8).collect();
         let ids: Vec<i32> = token_ids.into_iter().map(|v| v as i32).collect();
-        let token_tensor = Tensor::<AiBackend, 1, Int>::from_ints(ids.as_slice(), &self.device)
-            .reshape([1, self.max_text_len]);
+        // `text_device` is Flex CPU so gather hits host RAM, not a 750 MiB Vulkan bind.
+        let token_tensor =
+            Tensor::<AiBackend, 1, Int>::from_ints(ids.as_slice(), &self.text_device)
+                .reshape([1, self.max_text_len]);
         let output = catch_unwind(AssertUnwindSafe(|| self.text.forward(token_tensor)))
             .map_err(|_| "siglip2 text forward panicked".to_string())?;
         let mut rows = tensor_rows_to_normalized_vectors(output, self.dimension)?;
-        rows.pop()
-            .ok_or_else(|| "siglip2 text empty output".to_string())
+        let vector = rows
+            .pop()
+            .ok_or_else(|| "siglip2 text empty output".to_string())?;
+        eprintln!(
+            "[ai] text embed device=cpu q={:?} tokens={} pad_id={pad_id} head_ids={head_ids:?} {}",
+            embedding_debug_query_preview(text),
+            ids.len(),
+            embedding_debug_fingerprint(&vector),
+        );
+        Ok(vector)
     }
 }
 

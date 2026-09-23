@@ -17,7 +17,10 @@ services:
       LUMENO_AI_DEVICE: vulkan
       TRUST_PROXY: "1"
       # BOOTSTRAP_ADMIN_USER: admin
-      # BOOTSTRAP_ADMIN_PASSWORD: changeme
+      # BOOTSTRAP_ADMIN_PASSWORD: set-on-first-boot
+    # Match host owner of bind-mounted ./dist/data (see `id <user>` on the NAS).
+    # PUID/PGID env vars are ignored unless the image entrypoint implements them.
+    user: "1000:10"
     devices:
       - /dev/dri:/dev/dri
     group_add:

@@ -3,6 +3,9 @@ name = "lumeno"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+dead_code = "allow"
+
 [dependencies]
 axum= { version = "0.8", features = ["default", "multipart"] }
 tokio = { version= "1.47.1",features = ["full"] }

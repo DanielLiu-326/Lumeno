@@ -16,10 +16,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use super::accent::{default_accent, normalize_accent};
 use super::common::{
     AppError, AppState, RateLimiter, Token, create_response, should_use_secure_cookie,
 };
 use super::i18n::{RequestLocale, default_locale, normalize_locale, tr, trf};
+use super::wallpaper::WallpaperPrefs;
 
 const SESSION_TTL_LONG_DAYS: i64 = 7;
 const SESSION_TTL_SHORT_HOURS: i64 = 24;
@@ -58,6 +60,10 @@ pub struct UserInfo {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    #[serde(default)]
+    pub wallpaper: WallpaperPrefs,
+    #[serde(default = "default_accent")]
+    pub accent: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,6 +154,8 @@ impl UserManager {
                 locale: normalize_locale(preferred_locale),
                 role,
                 avatar: None,
+                wallpaper: WallpaperPrefs::default(),
+                accent: default_accent(),
             },
         );
         self.save_to_disk(&users_locked);
@@ -273,12 +281,58 @@ impl UserManager {
             .and_then(|u| u.avatar.clone())
     }
 
+    pub async fn is_current_avatar(&self, filename: &str) -> bool {
+        self.users
+            .lock()
+            .await
+            .values()
+            .any(|user| user.avatar.as_deref() == Some(filename))
+    }
+
     pub async fn set_avatar(&self, username: &str, avatar: Option<&str>) -> bool {
         let mut users_locked = self.users.lock().await;
         let Some(user) = users_locked.get_mut(username) else {
             return false;
         };
         user.avatar = avatar.map(|s| s.to_owned());
+        self.save_to_disk(&users_locked);
+        true
+    }
+
+    pub async fn get_wallpaper(&self, username: &str) -> WallpaperPrefs {
+        self.users
+            .lock()
+            .await
+            .get(username)
+            .map(|user| user.wallpaper.clone().normalize())
+            .unwrap_or_default()
+    }
+
+    pub async fn set_wallpaper(&self, username: &str, wallpaper: WallpaperPrefs) -> bool {
+        let mut users_locked = self.users.lock().await;
+        let Some(user) = users_locked.get_mut(username) else {
+            return false;
+        };
+        user.wallpaper = wallpaper.normalize();
+        self.save_to_disk(&users_locked);
+        true
+    }
+
+    pub async fn get_accent(&self, username: &str) -> String {
+        self.users
+            .lock()
+            .await
+            .get(username)
+            .map(|user| normalize_accent(&user.accent))
+            .unwrap_or_else(default_accent)
+    }
+
+    pub async fn set_accent(&self, username: &str, accent: &str) -> bool {
+        let mut users_locked = self.users.lock().await;
+        let Some(user) = users_locked.get_mut(username) else {
+            return false;
+        };
+        user.accent = normalize_accent(accent);
         self.save_to_disk(&users_locked);
         true
     }
@@ -696,6 +750,8 @@ pub async fn api_whoami(
     };
     let user_locale = cfg.user_manager.get_locale(&session.username).await;
     let user_avatar = cfg.user_manager.get_avatar(&session.username).await;
+    let wallpaper = cfg.user_manager.get_wallpaper(&session.username).await;
+    let accent = cfg.user_manager.get_accent(&session.username).await;
     let message = tr(&user_locale, "response.ok");
     Ok(create_response(
         true,
@@ -706,6 +762,8 @@ pub async fn api_whoami(
             "role": session.role,
             "locale": user_locale,
             "avatar": user_avatar,
+            "wallpaper": wallpaper,
+            "accent": accent,
         })),
     ))
 }

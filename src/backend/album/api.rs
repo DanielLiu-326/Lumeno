@@ -1,39 +1,25 @@
 use async_recursion::async_recursion;
-use async_trait::async_trait;
-use axum::body::Body;
-use axum::extract::{Path, Query};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::Response;
+use axum::extract::Query;
 use axum::{Extension, Json};
-use base64::Engine;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
+use chrono::{Datelike, NaiveDate};
 use function_name::named;
 use futures::future::BoxFuture;
-use quick_xml::Writer;
-use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use percent_encoding::percent_decode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::io::BufReader;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::u8;
-use tokio::sync::Notify;
-use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::backend::common::{
-    AppError, AppState, ConcurrencyLimiter, ConcurrencyPermit, Token, create_response,
-    into_host_path_safely, move_file_or_dir,
-};
+use crate::backend::common::{AppError, AppState, Token, create_response, into_host_path_safely};
 use crate::backend::i18n::{RequestLocale, tr, trf};
-use crate::backend::tasks::{Task, TaskBase, TaskStatus};
+use crate::backend::tasks::{Task, TaskStatus};
 
 use super::helpers::*;
-use super::media::{
-    ensure_thumbnail_cached, find_xmp_sidecar, is_image_path, is_raw_path, resolve_photo_owner_root,
-};
+use super::media::is_image_path;
 use super::types::*;
 
 // ── Album API handlers ───────────────────────────────────────────────────────
@@ -161,19 +147,28 @@ pub async fn api_albums_update(
     let Some((username, root_path)) = cfg.get_session_and_root(&token).await else {
         return Err(AppError::unauthorized(locale.as_str()));
     };
-    let Some(dir_name) = sanitize_album_name(&payload.dir_name) else {
-        return Err(AppError::BadRequest(tr(
+    let resolved = resolve_album_access(
+        &cfg,
+        &username,
+        root_path.as_path(),
+        &payload.dir_name,
+        locale.as_str(),
+    )
+    .await?;
+    if !resolved.can_write {
+        return Err(AppError::Forbidden(tr(
             locale.as_str(),
-            "error.invalid_album_identifier",
+            "error.no_write_permission_album",
         )));
-    };
-    let albums = albums_root(root_path.as_path());
+    }
+    let albums = albums_root(&resolved.root_path);
+    let dir_name = resolved.album_name.clone();
     let mut album_dir = albums.join(&dir_name);
     if !album_dir.exists() {
         return Err(AppError::NotFound(trf(
             locale.as_str(),
             "error.resource_not_found",
-            &[("value", dir_name.clone())],
+            &[("value", payload.dir_name.clone())],
         )));
     }
 
@@ -188,44 +183,47 @@ pub async fn api_albums_update(
 
     // Changing the album name also renames the folder; cache pointer stays.
     if let Some(raw_name) = payload.name.as_ref() {
-        let trimmed = raw_name.trim().to_string();
-        let Some(new_dir) = sanitize_album_name(&trimmed) else {
-            return Err(AppError::BadRequest(tr(
-                locale.as_str(),
-                "error.invalid_album_name",
-            )));
-        };
-        meta.name = trimmed;
-        if new_dir != dir_name {
-            let dest = albums.join(&new_dir);
-            if dest.exists() {
-                return Err(AppError::BadRequest(trf(
+        if resolved.is_owner {
+            let trimmed = raw_name.trim().to_string();
+            let Some(new_dir) = sanitize_album_name(&trimmed) else {
+                return Err(AppError::BadRequest(tr(
                     locale.as_str(),
-                    "error.album_dir_exists",
-                    &[("value", new_dir.clone())],
+                    "error.invalid_album_name",
                 )));
-            }
-            tokio::fs::rename(&album_dir, &dest)
-                .await
-                .map_err(|e| AppError::Unknown(format!("rename album dir failed: {e}")))?;
-            album_dir = dest;
-            effective_dir = new_dir;
-            let old_prefix = format!("albums/{dir_name}/");
-            let new_prefix = format!("albums/{effective_dir}/");
-            if let Some(rest) = meta.cover.strip_prefix(&old_prefix) {
-                meta.cover = format!("{new_prefix}{rest}");
-            }
-            let index_path = album_index_path(cfg.data_path.as_path(), &username, &meta.cache);
-            if index_path.exists() {
-                if let Ok(raw) = tokio::fs::read_to_string(&index_path).await {
-                    if let Ok(mut index) = serde_json::from_str::<AlbumIndex>(&raw) {
-                        for entry in &mut index.entries {
-                            if let Some(rest) = entry.path.strip_prefix(&old_prefix) {
-                                entry.path = format!("{new_prefix}{rest}");
+            };
+            meta.name = trimmed;
+            if new_dir != dir_name {
+                let dest = albums.join(&new_dir);
+                if dest.exists() {
+                    return Err(AppError::BadRequest(trf(
+                        locale.as_str(),
+                        "error.album_dir_exists",
+                        &[("value", new_dir.clone())],
+                    )));
+                }
+                tokio::fs::rename(&album_dir, &dest)
+                    .await
+                    .map_err(|e| AppError::Unknown(format!("rename album dir failed: {e}")))?;
+                album_dir = dest;
+                effective_dir = new_dir;
+                let old_prefix = format!("albums/{dir_name}/");
+                let new_prefix = format!("albums/{effective_dir}/");
+                if let Some(rest) = meta.cover.strip_prefix(&old_prefix) {
+                    meta.cover = format!("{new_prefix}{rest}");
+                }
+                let index_path =
+                    album_index_path(cfg.data_path.as_path(), &resolved.owner, &meta.cache);
+                if index_path.exists() {
+                    if let Ok(raw) = tokio::fs::read_to_string(&index_path).await {
+                        if let Ok(mut index) = serde_json::from_str::<AlbumIndex>(&raw) {
+                            for entry in &mut index.entries {
+                                if let Some(rest) = entry.path.strip_prefix(&old_prefix) {
+                                    entry.path = format!("{new_prefix}{rest}");
+                                }
                             }
-                        }
-                        if let Ok(data) = serde_json::to_string(&index) {
-                            let _ = tokio::fs::write(&index_path, data).await;
+                            if let Ok(data) = serde_json::to_string(&index) {
+                                let _ = tokio::fs::write(&index_path, data).await;
+                            }
                         }
                     }
                 }
@@ -234,17 +232,23 @@ pub async fn api_albums_update(
     }
 
     if let Some(cover) = &payload.cover {
-        let cover = cover.trim().to_string();
-        meta.cover = if effective_dir != dir_name {
-            let old_prefix = format!("albums/{dir_name}/");
-            let new_prefix = format!("albums/{effective_dir}/");
-            cover
-                .strip_prefix(&old_prefix)
-                .map(|rest| format!("{new_prefix}{rest}"))
-                .unwrap_or(cover)
-        } else {
-            cover
+        let Some(normalized) = normalize_album_cover_path(cover, &effective_dir, &dir_name) else {
+            return Err(AppError::BadRequest(tr(
+                locale.as_str(),
+                "error.invalid_image_path",
+            )));
         };
+        if !normalized.is_empty() {
+            let source = into_host_path_safely(resolved.root_path.as_path(), &normalized)?;
+            if !source.is_file() || !is_image_path(source.as_path()) {
+                return Err(AppError::NotFound(trf(
+                    locale.as_str(),
+                    "error.resource_not_found",
+                    &[("value", normalized)],
+                )));
+            }
+        }
+        meta.cover = normalized;
     }
     if let Some(desc) = &payload.description {
         meta.description = desc.clone();
@@ -256,9 +260,11 @@ pub async fn api_albums_update(
         &message,
         0,
         Some(json!({
-            "dir_name": effective_dir,
+            "dir_name": album_access_key(&username, &resolved.owner, &effective_dir),
             "cache": meta.cache,
             "name": meta.name,
+            "cover": meta.cover,
+            "owner": resolved.owner,
         })),
     ))
 }
@@ -977,7 +983,10 @@ pub(crate) async fn list_album_photos_with_filters(
     });
 
     let offset = offset.unwrap_or(0) as usize;
-    let requested_limit = limit.unwrap_or(100);
+    let requested_limit = match limit {
+        Some(n) => n,
+        None => cfg.settings_manager.photos_per_page().await,
+    };
     let limit = if requested_limit == 0 {
         usize::MAX
     } else {
@@ -1112,13 +1121,26 @@ pub(crate) async fn list_album_photos_with_filters(
         (paginated_photos, total_count)
     };
 
+    let album_key = album_access_key(&username, &owner, &album_name);
+    let photos: Vec<Value> = paginated_photos
+        .iter()
+        .map(|photo| {
+            let mut value = serde_json::to_value(photo).unwrap_or_else(|_| json!({}));
+            if let Some(object) = value.as_object_mut() {
+                object.insert("owner".to_string(), json!(&owner));
+                object.insert("album".to_string(), json!(&album_key));
+            }
+            value
+        })
+        .collect();
+
     let message = tr(locale.as_str(), "response.success");
     Ok(create_response(
         true,
         &message,
         0,
         Some(json!({
-            "photos": paginated_photos,
+            "photos": photos,
             "available_tags": available_tags,
             "available_cameras": available_cameras,
             "available_lenses": available_lenses,
@@ -1142,7 +1164,7 @@ pub async fn api_albums_photo_meta(
     };
 
     // Determine the effective root path and owner for the photo
-    let (root_path, index_owner) = if let Some(album_ref) = &payload.album {
+    let (root_path, index_owner, album_name) = if let Some(album_ref) = &payload.album {
         let resolved =
             resolve_album_access(&cfg, &username, &user_root, album_ref, locale.as_str()).await?;
         if !resolved.can_write {
@@ -1151,12 +1173,25 @@ pub async fn api_albums_photo_meta(
                 "error.no_write_permission_album",
             )));
         }
-        (resolved.root_path, resolved.owner)
+        (
+            resolved.root_path,
+            resolved.owner,
+            Some(resolved.album_name),
+        )
     } else {
-        (user_root, username.clone())
+        (user_root, username.clone(), None)
     };
 
     let photo = into_host_path_safely(root_path.as_path(), &payload.path)?;
+    if let Some(album_name) = album_name.as_ref() {
+        let album_dir = albums_root(root_path.as_path()).join(album_name);
+        if !photo.starts_with(&album_dir) {
+            return Err(AppError::Forbidden(tr(
+                locale.as_str(),
+                "error.invalid_shared_path",
+            )));
+        }
+    }
     if !photo.exists() || !photo.is_file() || !is_image_path(photo.as_path()) {
         return Err(AppError::BadRequest(tr(
             locale.as_str(),
@@ -1259,14 +1294,21 @@ pub async fn api_albums_rebuild_index(
         resolved.album_name,
         locale.as_str().to_string(),
     ));
-    let (task_id, _) = cfg.task_mgr.add_task_if_absent(task).await;
+    let (task_id, created) = cfg.task_mgr.add_task_if_absent(task).await;
 
-    let message = tr(locale.as_str(), "response.rebuild_index_task_created");
+    let message = if created {
+        tr(locale.as_str(), "response.rebuild_index_task_created")
+    } else {
+        tr(
+            locale.as_str(),
+            "response.rebuild_index_task_already_running",
+        )
+    };
     Ok(create_response(
         true,
         &message,
         0,
-        Some(json!({ "task_id": task_id.to_string() })),
+        Some(json!({ "task_id": task_id.to_string(), "created": created })),
     ))
 }
 
@@ -1321,25 +1363,24 @@ pub async fn api_albums_delete_photos(
     // Clean up empty directories inside the album
     cleanup_empty_dirs(&album_dir).await;
 
-    // Rebuild the index
-    let Some(index) = rebuild_album_index(
+    let remaining = load_existing_album_index(
         cfg.data_path.as_path(),
         resolved.root_path.as_path(),
         &resolved.owner,
         &resolved.album_name,
-        None,
-        None,
-        None,
     )
-    .await?
-    else {
-        return Err(AppError::Unknown("album index rebuild cancelled".into()));
-    };
+    .await
+    .ok()
+    .flatten()
+    .map(|index| index.entries.len().saturating_sub(deleted))
+    .unwrap_or(0);
 
-    let _ = crate::backend::ai::queue_owner_ai_index(
+    queue_rebuild_album_index(
         cfg.clone(),
+        username.clone(),
+        resolved.root_path.clone(),
         resolved.owner.clone(),
-        Some(resolved.album_name.clone()),
+        resolved.album_name.clone(),
         locale.as_str(),
     )
     .await;
@@ -1355,7 +1396,7 @@ pub async fn api_albums_delete_photos(
         0,
         Some(json!({
             "deleted": deleted,
-            "remaining": index.entries.len(),
+            "remaining": remaining,
         })),
     ))
 }
@@ -1466,22 +1507,12 @@ pub async fn api_albums_copy_photo(
         .await
         .map_err(|e| AppError::Unknown(format!("copy photo failed: {e}")))?;
 
-    // Rebuild target album index
-    rebuild_album_index(
-        cfg.data_path.as_path(),
-        target.root_path.as_path(),
-        &target.owner,
-        &target.album_name,
-        None,
-        None,
-        None,
-    )
-    .await?;
-
-    let _ = crate::backend::ai::queue_owner_ai_index(
+    queue_rebuild_album_index(
         cfg.clone(),
+        username.clone(),
+        target.root_path.clone(),
         target.owner.clone(),
-        Some(target.album_name.clone()),
+        target.album_name.clone(),
         locale.as_str(),
     )
     .await;
@@ -1521,15 +1552,19 @@ pub async fn verify_shared_photo_access(
     path: &str,
     locale: &str,
 ) -> Result<(), AppError> {
-    let album_name = path
+    let decoded = percent_decode(path.as_bytes())
+        .decode_utf8()
+        .unwrap_or(std::borrow::Cow::Borrowed(path));
+    let path = decoded.trim_start_matches('/');
+    let Some(album_name) = path
         .strip_prefix("albums/")
         .and_then(|rest| rest.split('/').next())
-        .unwrap_or("");
-    if album_name.is_empty() {
+        .and_then(sanitize_album_name)
+    else {
         return Err(AppError::Forbidden(tr(locale, "error.invalid_shared_path")));
-    }
+    };
     let owner_root = cfg.user_root_path(owner);
-    let album_dir = albums_root(&owner_root).join(album_name);
+    let album_dir = albums_root(&owner_root).join(&album_name);
     if !album_dir.exists() {
         return Err(AppError::NotFound(trf(
             locale,
@@ -1540,6 +1575,10 @@ pub async fn verify_shared_photo_access(
     let meta = read_album_meta(&album_dir).await;
     if !meta.shares.iter().any(|s| s.username == username) {
         return Err(AppError::Forbidden(tr(locale, "error.no_album_access")));
+    }
+    let source = into_host_path_safely(owner_root.as_path(), path)?;
+    if !source.starts_with(&album_dir) {
+        return Err(AppError::Forbidden(tr(locale, "error.invalid_shared_path")));
     }
     Ok(())
 }
@@ -1937,7 +1976,7 @@ pub async fn api_dashboard(
             "user_count": cfg.user_manager.list_usernames().await.len(),
             "webdav_share_count": crate::backend::settings::webdav_share_count(&cfg.data_path).await,
             "settings": {
-                "allow_registration": settings.get("allow_registration").cloned().unwrap_or(json!(true)),
+                "allow_registration": settings.get("allow_registration").cloned().unwrap_or(json!(false)),
                 "thumbnail_generation_mode": settings.get("thumbnail_generation_mode").cloned().unwrap_or(json!("on_demand")),
                 "thumbnail_concurrency": settings.get("thumbnail_concurrency").cloned().unwrap_or(json!(3)),
                 "darktable_concurrency": settings.get("darktable_concurrency").cloned().unwrap_or(json!(1)),
@@ -2284,16 +2323,6 @@ pub struct AlbumUploadPayload {
     conflict: crate::backend::files::ConflictAction,
 }
 
-/// Returns the two canonical XMP sidecar names for an image file:
-/// `{stem}.xmp` (Lightroom style) and `{filename}.xmp` (Darktable style).
-pub(crate) fn possible_xmp_names(image_name: &str) -> [String; 2] {
-    let stem = FsPath::new(image_name)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    [format!("{stem}.xmp"), format!("{image_name}.xmp")]
-}
-
 #[named]
 pub async fn api_albums_upload(
     locale: RequestLocale,
@@ -2324,25 +2353,6 @@ pub async fn api_albums_upload(
         .join("__uploading")
         .join(staging_uuid.to_string());
 
-    // Build XMP pairing:
-    //   image_to_xmp: image name -> Option<xmp name that is also in the batch>
-    //   xmp_to_image: xmp name  -> image name it belongs to
-    let all_names: HashSet<&str> = payload.files.iter().map(|f| f.name.as_str()).collect();
-    let mut image_to_xmp: HashMap<String, Option<String>> = HashMap::new();
-    let mut xmp_to_image: HashMap<String, String> = HashMap::new();
-    for f in &payload.files {
-        if f.name.to_ascii_lowercase().ends_with(".xmp") {
-            continue;
-        }
-        let matched = possible_xmp_names(&f.name)
-            .into_iter()
-            .find(|x| all_names.contains(x.as_str()));
-        if let Some(ref xmp_name) = matched {
-            xmp_to_image.insert(xmp_name.clone(), f.name.clone());
-        }
-        image_to_xmp.insert(f.name.clone(), matched);
-    }
-
     // Build UploadFileMeta list — absolute host paths inside the staging dir.
     let metas: Vec<crate::backend::files::UploadFileMeta> = payload
         .files
@@ -2368,73 +2378,43 @@ pub async fn api_albums_upload(
         &[("album", album_name.clone())],
     );
 
-    // Capture everything the callback needs.
-    let cfg_cb = cfg.clone();
-    let root_path_cb = root_path.clone();
-    let staging_dir_cb = staging_dir.clone();
-    let username_cb = username.clone();
-    let album_name_cb = album_name.clone();
-    let conflict_cb = conflict;
-    let image_to_xmp = Arc::new(image_to_xmp);
-    let xmp_to_image = Arc::new(xmp_to_image);
-
-    let on_single_finished = move |finished_path: PathBuf| -> BoxFuture<'static, ()> {
-        let cfg = cfg_cb.clone();
-        let root_path = root_path_cb.clone();
-        let staging_dir = staging_dir_cb.clone();
-        let username = username_cb.clone();
-        let album_name = album_name_cb.clone();
-        let conflict_action = conflict_cb;
-        let image_to_xmp = image_to_xmp.clone();
-        let xmp_to_image = xmp_to_image.clone();
-
+    // Receive every byte into staging first. Import (EXIF + move) starts only
+    // after the upload task finishes, so a slow RAW decode cannot stall the
+    // chunk channel and trip the idle timeout.
+    let import_key = crate::backend::album::helpers::import_album_task_key(&username, &album_name);
+    let cfg_done = cfg.clone();
+    let root_done = root_path.clone();
+    let user_done = username.clone();
+    let album_done = album_name.clone();
+    let locale_done = locale.as_str().to_string();
+    let staging_rel = format!("albums/__uploading/{}", staging_uuid);
+    let conflict_done = conflict;
+    let on_finished = move || {
+        let cfg = cfg_done.clone();
+        let root_path = root_done.clone();
+        let username = user_done.clone();
+        let album_name = album_done.clone();
+        let locale = locale_done.clone();
+        let staging_rel = staging_rel.clone();
+        let conflict = conflict_done;
         Box::pin(async move {
-            let filename = finished_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            // Determine which image is ready to import.
-            let image_path: Option<PathBuf> = if filename.to_ascii_lowercase().ends_with(".xmp") {
-                // XMP finished — import its paired image if it is already on disk.
-                xmp_to_image
-                    .get(&filename)
-                    .map(|img_name| staging_dir.join(img_name))
-                    .filter(|p| p.exists())
-            } else {
-                // Image finished — import now unless we're waiting for its XMP.
-                match image_to_xmp.get(&filename) {
-                    Some(Some(xmp_name)) if !staging_dir.join(xmp_name).exists() => {
-                        None // XMP expected but not yet uploaded
-                    }
-                    _ => Some(finished_path.clone()),
-                }
-            };
-
-            if let Some(img) = image_path {
-                if let Ok(rel) = img.strip_prefix(&root_path) {
-                    let _ = import_album_files(
-                        &cfg,
-                        root_path.as_path(),
-                        &username,
-                        &album_name,
-                        &[rel.to_string_lossy().to_string()],
-                        true,
-                        conflict_action,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
-
-                // Remove staging dir once it is fully drained.
-                if let Ok(mut rd) = tokio::fs::read_dir(&staging_dir).await {
-                    if rd.next_entry().await.ok().flatten().is_none() {
-                        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
-                    }
-                }
-            }
-        })
+            let task = Arc::new(ImportAlbumTask::new(
+                trf(
+                    locale.as_str(),
+                    "task.import_album",
+                    &[("album", album_name.clone())],
+                ),
+                username.clone(),
+                cfg.clone(),
+                root_path,
+                album_name,
+                vec![staging_rel],
+                true,
+                conflict,
+                locale,
+            ));
+            cfg.task_mgr.add_task(task).await;
+        }) as BoxFuture<'static, ()>
     };
 
     let task = Arc::new(
@@ -2445,7 +2425,8 @@ pub async fn api_albums_upload(
             metas,
             conflict,
         )
-        .with_on_single_finished(on_single_finished),
+        .with_on_finished(on_finished)
+        .with_dedup_key(import_key),
     );
     cfg.task_mgr.add_task(task.clone()).await;
 

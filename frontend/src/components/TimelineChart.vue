@@ -7,32 +7,39 @@
  *   quarter – each block = 3 months,  bars = days
  *   month   – each block = 1 month,   bars = days
  *
- * Native scrollbar for horizontal panning (app-scrollbar style).
+ * Native scrollbar for panning (horizontal on desktop, vertical on mobile).
  * Click-drag to select a date range; selection edges can be resized.
  * Right-click clears the selection. Defaults to showing the latest dates.
+ *
+ * Mobile (`vertical`): time runs top → bottom, each count bar grows left → right.
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
 import { t } from "../i18n/index.js";
+import { isMobileShell } from "../utils/device.js";
 
 const props = defineProps({
   buckets: { type: Array, default: () => [] },
   isDark: { type: Boolean, default: false },
   from: { type: String, default: "" },
   to: { type: String, default: "" },
+  vertical: { type: Boolean, default: () => isMobileShell() },
 });
 
 const emit = defineEmits(["select-range"]);
+
+const BLOCK_GAP = 3;
+const LABEL_H = 14;
+const LABEL_W = 52;
+const PAD_T = 2;
+const PAD_L = 2;
+const VERTICAL_H = 360;
 
 // ── Refs ──────────────────────────────────────────────────────────────────
 const wrapperRef = ref(null);
 const canvasRef = ref(null);
 const viewWidth = ref(400);
-const scrollPx = ref(0); // current scrollLeft of wrapper
-
-// ── Constants ─────────────────────────────────────────────────────────────
-const BLOCK_GAP = 3;
-const LABEL_H = 14;
-const PAD_T = 2;
+const viewHeight = ref(props.vertical ? VERTICAL_H : 96);
+const scrollPx = ref(0); // scroll along the time axis
 
 // ── Zoom table ────────────────────────────────────────────────────────────
 // [blockType, barWidth]. "year" bars=months, "quarter" bars=days, "month" bars=days.
@@ -54,7 +61,7 @@ const ZOOM_LEVELS = [
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────
-const zoomIdx = ref(2);
+const zoomIdx = ref(props.vertical ? 3 : 2);
 const zoomLevel = computed(() => ZOOM_LEVELS[zoomIdx.value][0]);
 
 const mouseX = ref(-1);
@@ -165,7 +172,15 @@ function blockWidth(block) {
   return block.bars.length * barW.value;
 }
 
-// Total content width in pixels.
+function viewExtent() {
+  return props.vertical ? viewHeight.value : viewWidth.value;
+}
+
+function edgeThreshold() {
+  return props.vertical ? 12 : 6;
+}
+
+// Total content length along the time axis.
 const stripWidth = computed(() => {
   const bl = blocks.value;
   if (bl.length === 0) return 0;
@@ -207,9 +222,12 @@ function dateAbsX(date) {
 }
 
 // Convert canvas x → absolute strip x.
-function canvasToAbs(cx) { return cx + scrollPx.value; }
-// Convert absolute strip x → canvas x.
-function absToCanvas(ax) { return ax - scrollPx.value; }
+function canvasToAbs(cx) {
+  return props.vertical ? cx : cx + scrollPx.value;
+}
+function absToCanvas(ax) {
+  return props.vertical ? ax : ax - scrollPx.value;
+}
 
 // ── Bar-height function (darktable: sqrt scaling) ─────────────────────────
 function barHeight(count, maxH) {
@@ -282,9 +300,12 @@ function draw() {
   ctx.scale(dpr, dpr);
 
   const isDark = props.isDark;
+  const vertical = props.vertical;
   const chartH = h - LABEL_H - PAD_T;
+  const chartW = w - LABEL_W - PAD_L;
   const bl = blocks.value;
-  const sp = scrollPx.value;
+  const sp = props.vertical ? 0 : scrollPx.value;
+  const viewLen = vertical ? h : w;
 
   // Background
   ctx.fillStyle = isDark ? "#1c1917" : "#fafaf9";
@@ -298,63 +319,74 @@ function draw() {
     return;
   }
 
-  let globalMax = 1;
-  for (const b of bl) {
-    for (const bar of b.bars) {
-      if (bar.count > globalMax) globalMax = bar.count;
-    }
-  }
-
   const bw = barW.value;
-  const maxBarH = chartH - 2;
+  const maxBarLen = (vertical ? chartW : chartH) - 2;
+  const gap = bw > 3 ? 1 : 0;
 
   ctx.save();
   ctx.beginPath();
   ctx.rect(0, 0, w, h);
   ctx.clip();
 
-  const propSel = getSelectionPixels(w);
+  const propSel = getSelectionPixels();
   let absPx = 0;
 
   for (let bi = 0; bi < bl.length; bi++) {
     const block = bl[bi];
-    const bWidth = blockWidth(block);
-    const screenX = absPx - sp;
+    const bLen = blockWidth(block);
+    const screenPos = absPx - sp;
 
-    // Skip off-screen blocks
-    if (screenX + bWidth < 0) { absPx += bWidth + BLOCK_GAP; continue; }
-    if (screenX > w) break;
+    if (screenPos + bLen < 0) { absPx += bLen + BLOCK_GAP; continue; }
+    if (screenPos > viewLen) break;
 
-    // Block background
     ctx.fillStyle = isDark ? "#292524" : "#f5f5f4";
-    ctx.fillRect(screenX, PAD_T, bWidth, chartH);
+    if (vertical) {
+      ctx.fillRect(LABEL_W, screenPos, chartW, bLen);
+    } else {
+      ctx.fillRect(screenPos, PAD_T, bLen, chartH);
+    }
 
-    // Bars
     for (let i = 0; i < block.bars.length; i++) {
       const bar = block.bars[i];
       if (bar.count === 0) continue;
-      const bh = barHeight(bar.count, maxBarH);
-      const x = screenX + i * bw;
-      const y = PAD_T + chartH - bh;
-
-      const inSel = isDateInSelection(bar.key);
-      const inDrag = selecting.value && isDragSelected(x, bw);
-
-      if (inSel || inDrag) {
-        ctx.fillStyle = isDark ? "#a78bfa" : "#6d28d9";
+      const blen = barHeight(bar.count, maxBarLen);
+      let barPos;
+      if (vertical) {
+        const y = screenPos + i * bw;
+        barPos = y;
+        const inSel = isDateInSelection(bar.key);
+        const inDrag = selecting.value && isDragSelected(barPos, bw);
+        ctx.fillStyle = (inSel || inDrag)
+          ? (isDark ? "#a78bfa" : "#6d28d9")
+          : (isDark ? "rgba(168,162,158,0.55)" : "rgba(120,113,108,0.55)");
+        ctx.fillRect(LABEL_W, y, blen, bw - gap);
       } else {
-        ctx.fillStyle = isDark ? "rgba(168,162,158,0.55)" : "rgba(120,113,108,0.55)";
+        const x = screenPos + i * bw;
+        barPos = x;
+        const y = PAD_T + chartH - blen;
+        const inSel = isDateInSelection(bar.key);
+        const inDrag = selecting.value && isDragSelected(barPos, bw);
+        ctx.fillStyle = (inSel || inDrag)
+          ? (isDark ? "#a78bfa" : "#6d28d9")
+          : (isDark ? "rgba(168,162,158,0.55)" : "rgba(120,113,108,0.55)");
+        ctx.fillRect(x, y, bw - gap, blen);
       }
-      ctx.fillRect(x, y, bw - (bw > 3 ? 1 : 0), bh);
     }
 
-    // Block label
     ctx.fillStyle = isDark ? "#a8a29e" : "#78716c";
     ctx.font = "9px system-ui, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(block.label, screenX + bWidth / 2, h - 2);
+    if (vertical) {
+      if (bLen >= 11) {
+        ctx.textBaseline = "middle";
+        ctx.fillText(block.label, LABEL_W / 2, screenPos + bLen / 2, LABEL_W - 4);
+        ctx.textBaseline = "alphabetic";
+      }
+    } else {
+      ctx.fillText(block.label, screenPos + bLen / 2, h - 2);
+    }
 
-    absPx += bWidth + BLOCK_GAP;
+    absPx += bLen + BLOCK_GAP;
   }
 
   // Selection overlay
@@ -362,13 +394,21 @@ function draw() {
   if (selPx) {
     const { x1, x2 } = selPx;
     ctx.fillStyle = isDark ? "rgba(139,92,246,0.18)" : "rgba(124,58,237,0.12)";
-    ctx.fillRect(x1, 0, x2 - x1, h);
     ctx.strokeStyle = isDark ? "rgba(167,139,250,0.7)" : "rgba(109,40,217,0.6)";
     ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(x1, 0); ctx.lineTo(x1, h);
-    ctx.moveTo(x2, 0); ctx.lineTo(x2, h);
-    ctx.stroke();
+    if (vertical) {
+      ctx.fillRect(0, x1, w, x2 - x1);
+      ctx.beginPath();
+      ctx.moveTo(0, x1); ctx.lineTo(w, x1);
+      ctx.moveTo(0, x2); ctx.lineTo(w, x2);
+      ctx.stroke();
+    } else {
+      ctx.fillRect(x1, 0, x2 - x1, h);
+      ctx.beginPath();
+      ctx.moveTo(x1, 0); ctx.lineTo(x1, h);
+      ctx.moveTo(x2, 0); ctx.lineTo(x2, h);
+      ctx.stroke();
+    }
   }
 
   // Cursor line + tooltip
@@ -379,8 +419,13 @@ function draw() {
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
-      ctx.moveTo(mouseX.value, 0);
-      ctx.lineTo(mouseX.value, h);
+      if (vertical) {
+        ctx.moveTo(0, mouseX.value);
+        ctx.lineTo(w, mouseX.value);
+      } else {
+        ctx.moveTo(mouseX.value, 0);
+        ctx.lineTo(mouseX.value, h);
+      }
       ctx.stroke();
       ctx.setLineDash([]);
 
@@ -393,8 +438,14 @@ function draw() {
 
       ctx.font = "10px system-ui, sans-serif";
       const tw = ctx.measureText(text).width;
-      const tx = Math.min(mouseX.value + 6, w - tw - 10);
-      const ty = 6;
+      let tx, ty;
+      if (vertical) {
+        tx = Math.min(LABEL_W + 8, w - tw - 10);
+        ty = Math.min(mouseX.value + 8, h - 22);
+      } else {
+        tx = Math.min(mouseX.value + 6, w - tw - 10);
+        ty = 6;
+      }
       ctx.fillStyle = isDark ? "rgba(41,37,36,0.92)" : "rgba(250,250,249,0.92)";
       const rr = 3;
       roundRect(ctx, tx, ty, tw + 10, 18, rr);
@@ -456,16 +507,17 @@ function getDragPixels() {
   };
 }
 
-function getSelectionPixels(canvasW) {
+function getSelectionPixels() {
   if (!props.from && !props.to) return null;
   const x1 = findPixelForDate(props.from, true);
   const x2 = findPixelForDate(props.to, false);
   if (x1 < 0 && x2 < 0) return null;
-  return { x1: Math.max(0, x1), x2: Math.min(canvasW, x2) };
+  const len = props.vertical ? Math.max(stripWidth.value, viewHeight.value) : viewWidth.value;
+  return { x1: Math.max(0, x1), x2: Math.min(len, x2) };
 }
 
 function findPixelForDate(date, isStart) {
-  if (!date) return isStart ? 0 : viewWidth.value;
+  if (!date) return isStart ? 0 : (props.vertical ? stripWidth.value : viewExtent());
   const bl = blocks.value;
   const bw = barW.value;
   const sp = scrollPx.value;
@@ -483,21 +535,20 @@ function findPixelForDate(date, isStart) {
         barFrom = barDate;
         barTo = barDate;
       }
-      const screenX = absPx + i * bw - sp;
+      const screenX = absPx + i * bw - (props.vertical ? 0 : sp);
       if (isStart && barTo >= date) return screenX;
       if (!isStart && barFrom > date) return screenX;
     }
     absPx += blockWidth(bl[bi]) + BLOCK_GAP;
   }
-  return isStart ? 0 : viewWidth.value;
+  return isStart ? 0 : (props.vertical ? stripWidth.value : viewExtent());
 }
 
 // ── Mouse handlers ────────────────────────────────────────────────────────
-const EDGE_THRESHOLD = 6;
-
-function getCanvasX(e) {
+function getCanvasPos(e) {
   const rect = canvasRef.value?.getBoundingClientRect();
-  return rect ? e.clientX - rect.left : 0;
+  if (!rect) return 0;
+  return props.vertical ? e.clientY - rect.top : e.clientX - rect.left;
 }
 
 function onMouseDown(e) {
@@ -507,18 +558,19 @@ function onMouseDown(e) {
     return;
   }
   if (e.button !== 0) return;
-  const x = getCanvasX(e);
+  const x = getCanvasPos(e);
+  const edge = edgeThreshold();
 
-  const sel = getSelectionPixels(viewWidth.value);
+  const sel = getSelectionPixels();
   if (sel) {
-    if (Math.abs(x - sel.x1) <= EDGE_THRESHOLD) {
+    if (Math.abs(x - sel.x1) <= edge) {
       selStartX.value = sel.x2;
       selEndX.value = x;
       selecting.value = true;
       e.preventDefault();
       return;
     }
-    if (Math.abs(x - sel.x2) <= EDGE_THRESHOLD) {
+    if (Math.abs(x - sel.x2) <= edge) {
       selStartX.value = sel.x1;
       selEndX.value = x;
       selecting.value = true;
@@ -534,7 +586,7 @@ function onMouseDown(e) {
 }
 
 function onMouseMove(e) {
-  const x = getCanvasX(e);
+  const x = getCanvasPos(e);
   mouseX.value = x;
   mouseIn.value = true;
 
@@ -543,9 +595,10 @@ function onMouseMove(e) {
   }
 
   if (!selecting.value && canvasRef.value) {
-    const sel = getSelectionPixels(viewWidth.value);
-    if (sel && (Math.abs(x - sel.x1) <= EDGE_THRESHOLD || Math.abs(x - sel.x2) <= EDGE_THRESHOLD)) {
-      canvasRef.value.style.cursor = "col-resize";
+    const sel = getSelectionPixels();
+    const edge = edgeThreshold();
+    if (sel && (Math.abs(x - sel.x1) <= edge || Math.abs(x - sel.x2) <= edge)) {
+      canvasRef.value.style.cursor = props.vertical ? "row-resize" : "col-resize";
     } else {
       canvasRef.value.style.cursor = "crosshair";
     }
@@ -556,7 +609,7 @@ function onMouseMove(e) {
 
 function onMouseUp(e) {
   if (!selecting.value) return;
-  selEndX.value = getCanvasX(e);
+  selEndX.value = getCanvasPos(e);
   selecting.value = false;
 
   if (Math.abs(selEndX.value - selStartX.value) < 3) {
@@ -586,34 +639,44 @@ function onContextMenu(e) {
   e.preventDefault();
 }
 
-// ── Wheel: Ctrl+wheel = zoom, plain wheel = horizontal pan ────────────────
-function onWheel(e) {
-  e.preventDefault();
+// ── Wheel: Ctrl+wheel = zoom; otherwise pan (native when vertical) ────────
+function viewportAxisPos(clientX, clientY) {
+  const wrap = wrapperRef.value?.getBoundingClientRect();
+  if (!wrap) return 0;
+  return props.vertical ? clientY - wrap.top : clientX - wrap.left;
+}
 
+function onWheel(e) {
   if (e.ctrlKey || e.metaKey) {
-    const mx = mouseX.value >= 0 ? mouseX.value : viewWidth.value / 2;
-    const date = hitToDate(mx);
-    setZoomIndex(zoomIdx.value + (e.deltaY < 0 ? 1 : -1), date, mx);
-  } else {
-    // Translate vertical wheel into horizontal scroll
-    const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-    setScrollLeft(scrollPx.value + delta);
+    e.preventDefault();
+    const date = hitToDate(getCanvasPos(e));
+    setZoomIndex(
+      zoomIdx.value + (e.deltaY < 0 ? 1 : -1),
+      date,
+      viewportAxisPos(e.clientX, e.clientY),
+    );
+    return;
   }
+  if (props.vertical) return;
+  e.preventDefault();
+  const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+  setScrollLeft(scrollPx.value + delta);
 }
 
 // ── Scroll sync ───────────────────────────────────────────────────────────
 function onScroll() {
-  if (wrapperRef.value) {
-    scrollPx.value = wrapperRef.value.scrollLeft;
-    requestDraw();
-  }
+  if (!wrapperRef.value) return;
+  scrollPx.value = props.vertical ? wrapperRef.value.scrollTop : wrapperRef.value.scrollLeft;
+  requestDraw();
 }
 
 function setScrollLeft(px) {
-  if (wrapperRef.value) {
-    wrapperRef.value.scrollLeft = Math.max(0, Math.min(px, stripWidth.value - viewWidth.value));
-    scrollPx.value = wrapperRef.value.scrollLeft;
-  }
+  if (!wrapperRef.value) return;
+  const max = Math.max(0, stripWidth.value - viewExtent());
+  const next = Math.max(0, Math.min(px, max));
+  if (props.vertical) wrapperRef.value.scrollTop = next;
+  else wrapperRef.value.scrollLeft = next;
+  scrollPx.value = props.vertical ? wrapperRef.value.scrollTop : wrapperRef.value.scrollLeft;
 }
 
 function scrollToEnd() {
@@ -638,6 +701,17 @@ function setZoomIndex(index, date, targetX) {
 let pinchStartDistance = 0;
 let pinchStartZoom = 0;
 let pinchDate = null;
+let pressTimer = 0;
+let pressPos = 0;
+let pressClientX = 0;
+let pressClientY = 0;
+
+function clearPressTimer() {
+  if (pressTimer) {
+    clearTimeout(pressTimer);
+    pressTimer = 0;
+  }
+}
 
 function touchDistance(touches) {
   return Math.hypot(
@@ -646,18 +720,43 @@ function touchDistance(touches) {
   );
 }
 
-function touchCenterX(touches, rect) {
+function touchCenterPos(touches, rect) {
+  if (props.vertical) {
+    return (touches[0].clientY + touches[1].clientY) / 2 - rect.top;
+  }
   return (touches[0].clientX + touches[1].clientX) / 2 - rect.left;
+}
+
+function touchAxisPos(touch, rect) {
+  return props.vertical ? touch.clientY - rect.top : touch.clientX - rect.left;
+}
+
+function emitTapOrRange() {
+  if (Math.abs(selEndX.value - selStartX.value) < 3) {
+    const date = hitToDate(selStartX.value);
+    if (props.vertical && date) {
+      selEndX.value = selStartX.value;
+      const dates = selectionDates();
+      if (dates) emit("select-range", dates.from, dates.to);
+      else emit("select-range", "", "");
+    } else {
+      emit("select-range", "", "");
+    }
+  } else {
+    const dates = selectionDates();
+    if (dates) emit("select-range", dates.from, dates.to);
+  }
 }
 
 function onTouchStart(e) {
   if (e.touches.length === 2) {
     e.preventDefault();
+    clearPressTimer();
     const rect = canvasRef.value.getBoundingClientRect();
-    const centerX = touchCenterX(e.touches, rect);
+    const center = touchCenterPos(e.touches, rect);
     pinchStartDistance = touchDistance(e.touches);
     pinchStartZoom = zoomIdx.value;
-    pinchDate = hitToDate(centerX);
+    pinchDate = hitToDate(center);
     selecting.value = false;
     selStartX.value = -1;
     selEndX.value = -1;
@@ -665,10 +764,33 @@ function onTouchStart(e) {
   }
   if (e.touches.length !== 1 || pinchStartDistance > 0) return;
   const rect = canvasRef.value.getBoundingClientRect();
-  const x = e.touches[0].clientX - rect.left;
-  selStartX.value = x;
-  selEndX.value = x;
-  selecting.value = true;
+  const x = touchAxisPos(e.touches[0], rect);
+  const edge = edgeThreshold();
+  const sel = getSelectionPixels();
+  if (sel && (Math.abs(x - sel.x1) <= edge || Math.abs(x - sel.x2) <= edge)) {
+    selStartX.value = Math.abs(x - sel.x1) <= edge ? sel.x2 : sel.x1;
+    selEndX.value = x;
+    selecting.value = true;
+    e.preventDefault();
+    return;
+  }
+  if (!props.vertical) {
+    selStartX.value = x;
+    selEndX.value = x;
+    selecting.value = true;
+    return;
+  }
+  pressPos = x;
+  pressClientX = e.touches[0].clientX;
+  pressClientY = e.touches[0].clientY;
+  clearPressTimer();
+  pressTimer = window.setTimeout(() => {
+    pressTimer = 0;
+    selStartX.value = pressPos;
+    selEndX.value = pressPos;
+    selecting.value = true;
+    requestDraw();
+  }, 380);
 }
 
 function onTouchMove(e) {
@@ -676,15 +798,25 @@ function onTouchMove(e) {
     e.preventDefault();
     const scale = touchDistance(e.touches) / pinchStartDistance;
     const indexDelta = Math.round(Math.log2(scale) * 4);
-    const rect = canvasRef.value.getBoundingClientRect();
-    setZoomIndex(pinchStartZoom + indexDelta, pinchDate, touchCenterX(e.touches, rect));
+    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+    setZoomIndex(pinchStartZoom + indexDelta, pinchDate, viewportAxisPos(cx, cy));
     return;
   }
-  if (!selecting.value || e.touches.length !== 1) return;
+  if (e.touches.length !== 1) return;
   const rect = canvasRef.value.getBoundingClientRect();
-  selEndX.value = e.touches[0].clientX - rect.left;
-  e.preventDefault();
-  requestDraw();
+  const x = touchAxisPos(e.touches[0], rect);
+  if (selecting.value) {
+    selEndX.value = x;
+    e.preventDefault();
+    requestDraw();
+    return;
+  }
+  if (pressTimer) {
+    const dx = e.touches[0].clientX - pressClientX;
+    const dy = e.touches[0].clientY - pressClientY;
+    if (Math.hypot(dx, dy) > 12) clearPressTimer();
+  }
 }
 
 function onTouchEnd(e) {
@@ -695,14 +827,19 @@ function onTouchEnd(e) {
     }
     return;
   }
+  if (pressTimer) {
+    clearPressTimer();
+    selStartX.value = pressPos;
+    selEndX.value = pressPos;
+    emitTapOrRange();
+    selStartX.value = -1;
+    selEndX.value = -1;
+    requestDraw();
+    return;
+  }
   if (!selecting.value) return;
   selecting.value = false;
-  if (Math.abs(selEndX.value - selStartX.value) < 3) {
-    emit("select-range", "", "");
-  } else {
-    const dates = selectionDates();
-    if (dates) emit("select-range", dates.from, dates.to);
-  }
+  emitTapOrRange();
   selStartX.value = -1;
   selEndX.value = -1;
   requestDraw();
@@ -718,14 +855,16 @@ function requestDraw() {
 // ── Resize observer ───────────────────────────────────────────────────────
 let resizeObs = null;
 function measure() {
-  if (wrapperRef.value) {
-    viewWidth.value = wrapperRef.value.clientWidth;
-    requestDraw();
-  }
+  if (!wrapperRef.value) return;
+  viewWidth.value = wrapperRef.value.clientWidth;
+  viewHeight.value = props.vertical
+    ? (wrapperRef.value.clientHeight || VERTICAL_H)
+    : 96;
+  requestDraw();
 }
 
 watch(() => props.buckets, () => {
-  zoomIdx.value = 2;
+  zoomIdx.value = props.vertical ? 3 : 2;
   nextTick(() => { scrollToEnd(); requestDraw(); });
 });
 
@@ -735,11 +874,11 @@ onMounted(() => {
   measure();
   resizeObs = new ResizeObserver(measure);
   if (wrapperRef.value) resizeObs.observe(wrapperRef.value);
-  // Default: show latest dates (scroll to end)
   nextTick(scrollToEnd);
 });
 
 onBeforeUnmount(() => {
+  clearPressTimer();
   if (resizeObs) resizeObs.disconnect();
   if (drawRaf) cancelAnimationFrame(drawRaf);
 });
@@ -748,19 +887,29 @@ onBeforeUnmount(() => {
 <template>
   <div
     ref="wrapperRef"
-    class="app-scrollbar w-full overflow-x-auto"
+    class="app-scrollbar w-full"
+    :class="vertical
+      ? 'timeline-chart-vertical overflow-x-hidden overflow-y-auto'
+      : 'overflow-x-auto'"
     @scroll.passive="onScroll"
   >
-    <div :style="{ width: Math.max(stripWidth, viewWidth) + 'px', position: 'relative' }">
+    <div
+      :style="vertical
+        ? { minHeight: viewHeight + 'px', position: 'relative' }
+        : { width: Math.max(stripWidth, viewWidth) + 'px', position: 'relative' }"
+    >
       <canvas
         ref="canvasRef"
-        class="block select-none sticky left-0"
-        :style="{ width: viewWidth + 'px', height: '96px', touchAction: 'pan-y' }"
+        class="block select-none"
+        :class="vertical ? '' : 'sticky left-0'"
+        :style="vertical
+          ? { width: '100%', height: Math.max(stripWidth, viewHeight) + 'px', touchAction: 'pan-y' }
+          : { width: viewWidth + 'px', height: '96px', touchAction: 'pan-y' }"
         @mousedown="onMouseDown"
         @mousemove="onMouseMove"
         @mouseup="onMouseUp"
         @mouseleave="onMouseLeave"
-        @wheel.prevent="onWheel"
+        @wheel="onWheel"
         @contextmenu="onContextMenu"
         @touchstart="onTouchStart"
         @touchmove="onTouchMove"
@@ -770,3 +919,13 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.timeline-chart-vertical {
+  height: min(52dvh, 22.5rem);
+  max-height: min(52dvh, 22.5rem);
+  border-radius: 0.65rem;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+</style>

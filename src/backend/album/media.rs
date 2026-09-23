@@ -6,45 +6,36 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::{Extension, Json};
 use base64::Engine;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc};
 use function_name::named;
-use futures::future::BoxFuture;
 use image::GenericImageView;
-use quick_xml::Writer;
-use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256, Sha512};
-use std::collections::{HashMap, HashSet};
-use std::io::BufReader;
+use sha2::{Digest, Sha512};
+use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::u8;
 use tokio::sync::Notify;
 use tokio_util::io::ReaderStream;
-use uuid::Uuid;
 
 use crate::backend::common::{
-    AppError, AppState, ConcurrencyLimiter, Token, create_response, into_host_path_safely,
-    move_file_or_dir,
+    AppError, AppState, ConcurrencyLimiter, Token, into_host_path_safely,
 };
 use crate::backend::constants::{
     DARKTABLE_PREVIEW_DEFAULT_SIZE, DARKTABLE_PREVIEW_SIZE_MAX, DARKTABLE_PREVIEW_SIZE_MIN,
-    FACE_AVATAR_PAD, FACE_CROP_SIZE, FACE_THUMBNAIL_SIZE_MAX, FACE_THUMBNAIL_SIZE_MIN,
-    PREVIEW_THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN,
+    FACE_AVATAR_PAD, PREVIEW_THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE_MAX,
+    THUMBNAIL_SIZE_MIN,
 };
 use crate::backend::i18n::{RequestLocale, tr, trf};
 use crate::backend::tasks::{
     Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused,
 };
 
-use super::decoder::{create_decoder, darktable_export, decode_bytes_with_path, DecodeOptions, DecoderCreateOptions};
-use super::helpers::{
-    albums_root, ensure_exif_cached, is_user_visible_album_dir, read_album_meta,
-    relative_display_path,
+use super::decoder::{
+    DecodeOptions, DecoderCreateOptions, apply_max_edge, create_decoder, darktable_export,
 };
-use super::types::*;
+use super::helpers::{albums_root, is_user_visible_album_dir};
 
 #[derive(Debug, Deserialize)]
 pub struct ThumbnailQuery {
@@ -52,14 +43,6 @@ pub struct ThumbnailQuery {
     owner: Option<String>,
     /// Thumbnail generator: `lumeno` (default) or `darktable`.
     generator: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FaceThumbnailQuery {
-    /// Normalized face box `x,y,w,h` in `[0, 1]`.
-    r#box: String,
-    size: Option<u32>,
-    owner: Option<String>,
 }
 
 /// How a thumbnail is produced. Encoded into the cache key so lumeno and
@@ -102,13 +85,34 @@ pub fn is_image_path(path: &std::path::Path) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "heic" | "heif"
-            | "hif"
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "heic" | "heif" | "hif"
     ) || is_raw_path(path)
+}
+
+/// Path component of cache keys: relative to the app data root so bind-mount
+/// prefixes (`/root/lumeno` vs `/app`) do not invalidate thumbnails / EXIF.
+pub(crate) fn cache_relative_path(data_path: &std::path::Path, source: &std::path::Path) -> String {
+    fn to_rel(data: &std::path::Path, source: &std::path::Path) -> Option<String> {
+        source
+            .strip_prefix(data)
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .filter(|rel| !rel.is_empty())
+    }
+    if let Some(rel) = to_rel(data_path, source) {
+        return rel;
+    }
+    if let (Ok(data), Ok(src)) = (data_path.canonicalize(), source.canonicalize())
+        && let Some(rel) = to_rel(&data, &src)
+    {
+        return rel;
+    }
+    source.to_string_lossy().replace('\\', "/")
 }
 
 pub fn thumbnail_cache_key(
     username: &str,
+    data_path: &std::path::Path,
     source: &std::path::Path,
     size: u32,
     metadata: &std::fs::Metadata,
@@ -123,19 +127,21 @@ pub fn thumbnail_cache_key(
     let mut hasher = Sha512::new();
     hasher.update(username.as_bytes());
     hasher.update(b"|");
-    hasher.update(source.to_string_lossy().as_bytes());
+    hasher.update(cache_relative_path(data_path, source).as_bytes());
     hasher.update(b"|");
     hasher.update(size.to_string().as_bytes());
     hasher.update(b"|");
     hasher.update(metadata.len().to_string().as_bytes());
     hasher.update(b"|");
     hasher.update(modified.to_string().as_bytes());
-    hasher.update(b"|v3|");
+    hasher.update(b"|v4|");
     hasher.update(generator.as_str().as_bytes());
     let digest = hasher.finalize();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
+
 /// Resolve the current thumbnail cache path for the selected generator.
+/// Files live under `cache/thumbnails/{owner}/` and cannot leave that directory.
 pub(crate) fn thumbnail_cache_file(
     data_path: &std::path::Path,
     username: &str,
@@ -143,17 +149,81 @@ pub(crate) fn thumbnail_cache_file(
     size: u32,
     metadata: &std::fs::Metadata,
     generator: ThumbnailGenerator,
-) -> PathBuf {
-    let dir = data_path.join("cache").join("thumbnails");
-    dir.join(format!(
+) -> Result<PathBuf, AppError> {
+    let dir = owner_cache_dir(data_path, "thumbnails", username)?;
+    Ok(dir.join(format!(
         "{}.webp",
-        thumbnail_cache_key(username, source, size, metadata, generator)
-    ))
+        thumbnail_cache_key(username, data_path, source, size, metadata, generator)
+    )))
+}
+
+/// Longest edge to send to darktable-cli when the same decode also feeds the
+/// album-grid thumb. `request_size == 0` means full resolution (already larger).
+fn darktable_combined_max_edge(request_size: u32) -> u32 {
+    if request_size == 0 {
+        0
+    } else {
+        request_size.max(THUMBNAIL_SIZE)
+    }
+}
+
+fn album_browse_thumbnail_path(
+    data_path: &std::path::Path,
+    cache_owner: &str,
+    source: &std::path::Path,
+    metadata: &std::fs::Metadata,
+) -> Option<PathBuf> {
+    thumbnail_cache_file(
+        data_path,
+        cache_owner,
+        source,
+        THUMBNAIL_SIZE,
+        metadata,
+        ThumbnailGenerator::Lumeno,
+    )
+    .ok()
+}
+
+/// Write the requested output and, when `browse_path` is set, a 360px lumeno
+/// grid thumb from the same bitmap so darktable-cli is not invoked twice.
+fn save_decoded_outputs(
+    image: image::DynamicImage,
+    request_path: PathBuf,
+    request_size: u32,
+    request_format: image::ImageFormat,
+    browse_path: Option<PathBuf>,
+) -> Result<(), String> {
+    let browse = browse_path
+        .as_ref()
+        .map(|_| image.thumbnail(THUMBNAIL_SIZE, THUMBNAIL_SIZE));
+    let requested = apply_max_edge(image, request_size);
+    if let Some(parent) = request_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create output dir failed: {e}"))?;
+    }
+    requested
+        .save_with_format(&request_path, request_format)
+        .map_err(|e| format!("save decoded output failed: {e}"))?;
+    if let (Some(browse_img), Some(path)) = (browse, browse_path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(error) = browse_img.save_with_format(&path, image::ImageFormat::WebP) {
+            eprintln!(
+                "[thumbnail] overwrite browse thumb failed: {error} ({})",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Cache key for EXIF metadata, keyed on file path, size, and mtime.
 /// Separate from `thumbnail_cache_key` since EXIF has no user or size dimension.
-pub(crate) fn exif_cache_key(source: &std::path::Path, metadata: &std::fs::Metadata) -> String {
+pub(crate) fn exif_cache_key(
+    data_path: &std::path::Path,
+    source: &std::path::Path,
+    metadata: &std::fs::Metadata,
+) -> String {
     let modified = metadata
         .modified()
         .ok()
@@ -162,12 +232,12 @@ pub(crate) fn exif_cache_key(source: &std::path::Path, metadata: &std::fs::Metad
         .unwrap_or(0);
     let mut hasher = Sha512::new();
     hasher.update(b"exif|");
-    hasher.update(source.to_string_lossy().as_bytes());
+    hasher.update(cache_relative_path(data_path, source).as_bytes());
     hasher.update(b"|");
     hasher.update(metadata.len().to_string().as_bytes());
     hasher.update(b"|");
     hasher.update(modified.to_string().as_bytes());
-    hasher.update(b"|v2");
+    hasher.update(b"|v3");
     let digest = hasher.finalize();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
@@ -179,6 +249,7 @@ pub(crate) async fn ensure_thumbnail_cached(
     generator: ThumbnailGenerator,
     thumbnail_limiter: &Arc<ConcurrencyLimiter>,
     darktable_limiter: &Arc<ConcurrencyLimiter>,
+    overwrite_browse: Option<PathBuf>,
 ) -> Result<(), AppError> {
     if output.exists() {
         return Ok(());
@@ -206,9 +277,22 @@ pub(crate) async fn ensure_thumbnail_cached(
     } else {
         DecoderCreateOptions::auto()
     };
-    let decode_opts = DecodeOptions::for_path(&source)
+    let decode_edge = if use_darktable {
+        darktable_combined_max_edge(size)
+    } else {
+        size
+    };
+    let mut decode_opts = DecodeOptions::for_path(&source)
         .map_err(|error| AppError::Unknown(error.message))?
-        .with_max_edge(size);
+        .with_max_edge(decode_edge);
+    if use_darktable {
+        decode_opts = decode_opts.with_xmp();
+    }
+    let browse_path = if use_darktable {
+        overwrite_browse
+    } else {
+        None
+    };
     let source_for_decode = source.clone();
     let output_blocking = output.clone();
     let result = async {
@@ -218,9 +302,13 @@ pub(crate) async fn ensure_thumbnail_cached(
             .await
             .map_err(|error| error.message)?;
         tokio::task::spawn_blocking(move || {
-            image
-                .save_with_format(&output_blocking, image::ImageFormat::WebP)
-                .map_err(|e| format!("save webp thumbnail failed: {e}"))
+            save_decoded_outputs(
+                image,
+                output_blocking,
+                size,
+                image::ImageFormat::WebP,
+                browse_path,
+            )
         })
         .await
         .map_err(|e| format!("thumbnail save join failed: {e}"))?
@@ -230,68 +318,10 @@ pub(crate) async fn ensure_thumbnail_cached(
     result.map_err(AppError::Unknown)
 }
 
-fn load_oriented_image_from_bytes(
-    source: &std::path::Path,
-    bytes: &[u8],
+pub(crate) fn crop_face_avatar(
+    image: &image::DynamicImage,
+    box_xywh: [f32; 4],
 ) -> Result<image::DynamicImage, String> {
-    let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|error| error.message)?;
-    decode_bytes_with_path(decoder.as_ref(), source, bytes, DecodeOptions::new())
-        .map_err(|error| error.message)
-}
-
-fn write_webp_thumbnail_from_bytes(
-    source: &std::path::Path,
-    bytes: &[u8],
-    output: &std::path::Path,
-    size: u32,
-) -> Result<(), String> {
-    let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|error| error.message)?;
-    let img = decode_bytes_with_path(
-        decoder.as_ref(),
-        source,
-        bytes,
-        DecodeOptions::for_path(source)
-            .map_err(|error| error.message)?
-            .with_max_edge(size),
-    )
-    .map_err(|error| error.message)?;
-    img.save_with_format(output, image::ImageFormat::WebP)
-        .map_err(|e| format!("save webp thumbnail failed: {e}"))?;
-    Ok(())
-}
-
-fn parse_face_box_query(raw: &str, locale: &str) -> Result<[f32; 4], AppError> {
-    let mut values = [0_f32; 4];
-    for (index, part) in raw.split(',').take(4).enumerate() {
-        values[index] = part.trim().parse::<f32>().map_err(|_| {
-            AppError::BadRequest(tr(
-                locale,
-                "error.invalid_face_box",
-            ))
-        })?;
-    }
-    if raw.split(',').count() != 4 {
-        return Err(AppError::BadRequest(tr(
-            locale,
-            "error.invalid_face_box",
-        )));
-    }
-    let [x, y, w, h] = values;
-    if w <= 0.0 || h <= 0.0 || x < 0.0 || y < 0.0 || x + w > 1.01 || y + h > 1.01 {
-        return Err(AppError::BadRequest(tr(
-            locale,
-            "error.invalid_face_box",
-        )));
-    }
-    Ok([
-        x.clamp(0.0, 1.0),
-        y.clamp(0.0, 1.0),
-        w.clamp(0.0, 1.0),
-        h.clamp(0.0, 1.0),
-    ])
-}
-
-pub(crate) fn crop_face_avatar(image: &image::DynamicImage, box_xywh: [f32; 4]) -> Result<image::DynamicImage, String> {
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         return Err("empty image".to_string());
@@ -315,55 +345,29 @@ pub(crate) fn crop_face_avatar(image: &image::DynamicImage, box_xywh: [f32; 4]) 
     Ok(image.crop_imm(left_px, top_px, crop_w_px, crop_h_px))
 }
 
-fn face_thumbnail_cache_key(
-    username: &str,
-    source: &std::path::Path,
-    size: u32,
-    metadata: &std::fs::Metadata,
-    box_xywh: [f32; 4],
-) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut hasher = Sha512::new();
-    hasher.update(b"face|");
-    hasher.update(username.as_bytes());
-    hasher.update(b"|");
-    hasher.update(source.to_string_lossy().as_bytes());
-    hasher.update(b"|");
-    hasher.update(size.to_string().as_bytes());
-    hasher.update(b"|");
-    for value in box_xywh {
-        hasher.update(format!("{value:.4}").as_bytes());
-        hasher.update(b",");
+fn owner_cache_dir(
+    data_path: &std::path::Path,
+    kind: &str,
+    owner: &str,
+) -> Result<PathBuf, AppError> {
+    if !crate::backend::album::helpers::is_safe_cache_owner(owner) {
+        return Err(AppError::NotFound(owner.to_string()));
     }
-    hasher.update(b"|");
-    hasher.update(metadata.len().to_string().as_bytes());
-    hasher.update(b"|");
-    hasher.update(modified.to_string().as_bytes());
-    hasher.update(b"|v1");
-    let digest = hasher.finalize();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    let root = data_path.join("cache").join(kind);
+    let dir = into_host_path_safely(root.as_path(), owner)?;
+    if !dir.starts_with(&root) {
+        return Err(AppError::NotFound(owner.to_string()));
+    }
+    Ok(dir)
 }
 
-fn face_thumbnail_cache_file(
-    data_path: &std::path::Path,
-    username: &str,
-    source: &std::path::Path,
-    size: u32,
-    metadata: &std::fs::Metadata,
-    box_xywh: [f32; 4],
-) -> PathBuf {
-    data_path
-        .join("cache")
-        .join("face-thumbnails")
-        .join(format!(
-            "{}.webp",
-            face_thumbnail_cache_key(username, source, size, metadata, box_xywh)
-        ))
+pub(crate) fn purge_owner_thumbnail_cache(data_path: &std::path::Path, owner: &str) {
+    if !crate::backend::album::helpers::is_safe_cache_owner(owner) {
+        return;
+    }
+    if let Ok(dir) = owner_cache_dir(data_path, "thumbnails", owner) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 pub(crate) fn write_face_webp_thumbnail_from_image(
@@ -401,9 +405,7 @@ pub(crate) async fn is_readable_face_crop(path: &FsPath) -> bool {
 }
 
 async fn clear_unusable_face_crop(path: &FsPath) {
-    if tokio::fs::try_exists(path).await.unwrap_or(false)
-        && !is_readable_face_crop(path).await
-    {
+    if tokio::fs::try_exists(path).await.unwrap_or(false) && !is_readable_face_crop(path).await {
         let _ = tokio::fs::remove_file(path).await;
     }
 }
@@ -422,8 +424,7 @@ pub(crate) fn write_cached_face_crop_from_image(
         let _ = std::fs::remove_file(crop_output);
     }
     if let Some(parent) = crop_output.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create face-crops dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create face-crops dir: {e}"))?;
     }
     write_face_webp_thumbnail_from_image(image, crop_output, size, box_xywh)
 }
@@ -494,67 +495,16 @@ pub(crate) async fn ensure_cached_face_crop(
     result
 }
 
-fn write_face_webp_thumbnail_from_bytes(
-    source: &std::path::Path,
-    bytes: &[u8],
-    output: &std::path::Path,
-    size: u32,
-    box_xywh: [f32; 4],
-) -> Result<(), String> {
-    let img = load_oriented_image_from_bytes(source, bytes)?;
-    write_face_webp_thumbnail_from_image(&img, output, size, box_xywh)
-}
-
-async fn ensure_face_thumbnail_cached(
-    source: PathBuf,
-    output: PathBuf,
-    size: u32,
-    box_xywh: [f32; 4],
-    thumbnail_limiter: &Arc<ConcurrencyLimiter>,
-) -> Result<(), AppError> {
-    if output.exists() {
-        return Ok(());
-    }
-
-    let permit = thumbnail_limiter.acquire().await;
-    if output.exists() {
-        return Ok(());
-    }
-
-    if let Some(parent) = output.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| AppError::Unknown(format!("create face thumbnail cache dir failed: {e}")))?;
-    }
-
-    let source_for_decode = source.clone();
-    let output_blocking = output.clone();
-    let result = async {
-        let decoder = create_decoder(DecoderCreateOptions::auto()).map_err(|error| error.message)?;
-        let image = decoder
-            .decode_path(
-                &source_for_decode,
-                DecodeOptions::for_path(&source_for_decode).map_err(|error| error.message)?,
-            )
-            .await
-            .map_err(|error| error.message)?;
-        tokio::task::spawn_blocking(move || {
-            write_face_webp_thumbnail_from_image(&image, &output_blocking, size, box_xywh)
-        })
-        .await
-        .map_err(|e| format!("face thumbnail save join failed: {e}"))?
-    }
-    .await;
-    drop(permit);
-    result.map_err(AppError::Unknown)
-}
-
+/// 360px lumeno preview used by AI scan / pHash.
+///
+/// Returns the cache path for a valid owner even if the file does not exist
+/// yet. `None` only if `username` is not a safe cache-owner segment.
 pub(crate) fn preview_thumbnail_cache_path(
     data_path: &std::path::Path,
     username: &str,
     source: &std::path::Path,
     metadata: &std::fs::Metadata,
-) -> PathBuf {
+) -> Option<PathBuf> {
     thumbnail_cache_file(
         data_path,
         username,
@@ -563,6 +513,7 @@ pub(crate) fn preview_thumbnail_cache_path(
         metadata,
         ThumbnailGenerator::Lumeno,
     )
+    .ok()
 }
 
 pub(crate) async fn generate_thumbnail_batch(
@@ -605,6 +556,7 @@ pub(crate) async fn generate_thumbnail_batch(
                 ThumbnailGenerator::Lumeno,
                 &cfg.thumbnail_limiter,
                 &cfg.darktable_limiter,
+                None,
             )
             .await
             .err()
@@ -726,20 +678,22 @@ impl Task for BackgroundThumbnailTask {
             }
             let cache_key = thumbnail_cache_key(
                 &self.base.owner,
+                self.cfg.data_path.as_path(),
                 &source,
                 THUMBNAIL_SIZE,
                 &metadata,
                 ThumbnailGenerator::Lumeno,
             );
-            // Adopt pre-v3 cache files so background warm does not regenerate everything.
-            let output = thumbnail_cache_file(
+            let Ok(output) = thumbnail_cache_file(
                 self.cfg.data_path.as_path(),
                 &self.base.owner,
                 &source,
                 THUMBNAIL_SIZE,
                 &metadata,
                 ThumbnailGenerator::Lumeno,
-            );
+            ) else {
+                continue;
+            };
             current_manifest.insert(cache_key, source.to_string_lossy().into_owned());
             thumbnails.push((source, output));
         }
@@ -789,12 +743,14 @@ impl Task for BackgroundThumbnailTask {
             self.base
                 .set_cur_task(format!("Removing {cache_key}.webp"))
                 .await;
-            let cache_path = self
-                .cfg
-                .data_path
-                .join("cache")
-                .join("thumbnails")
-                .join(format!("{cache_key}.webp"));
+            let cache_path = match owner_cache_dir(
+                self.cfg.data_path.as_path(),
+                "thumbnails",
+                self.base.owner.as_str(),
+            ) {
+                Ok(dir) => dir.join(format!("{cache_key}.webp")),
+                Err(_) => continue,
+            };
             if let Err(error) = tokio::fs::remove_file(&cache_path).await
                 && error.kind() != std::io::ErrorKind::NotFound
             {
@@ -820,9 +776,9 @@ impl Task for BackgroundThumbnailTask {
             self.base.set_status(TaskStatus::Finished).await;
         } else {
             self.base
-                .set_error_msg(format!("{} thumbnail(s) failed", errors.len()))
+                .set_cur_task(format!("Finished ({} thumbnail(s) failed)", errors.len()))
                 .await;
-            self.base.set_status(TaskStatus::Failed).await;
+            self.base.set_status(TaskStatus::Finished).await;
             for error in errors {
                 eprintln!("[thumbnail-prewarm] {error}");
             }
@@ -903,7 +859,8 @@ pub(crate) async fn resolve_photo_owner_root(
 ) -> Result<PathBuf, AppError> {
     match owner {
         Some(o) if o != username => {
-            crate::backend::album::api::verify_shared_photo_access(cfg, username, o, path, locale).await?;
+            crate::backend::album::api::verify_shared_photo_access(cfg, username, o, path, locale)
+                .await?;
             Ok(cfg.user_root_path(o))
         }
         _ => Ok(user_root),
@@ -955,10 +912,7 @@ pub async fn api_thumbnail(
         None => THUMBNAIL_SIZE,
     };
     let generator = ThumbnailGenerator::parse(query.generator.as_deref()).ok_or_else(|| {
-        AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.invalid_thumbnail_generator",
-        ))
+        AppError::BadRequest(tr(locale.as_str(), "error.invalid_thumbnail_generator"))
     })?;
     let metadata = tokio::fs::metadata(&source)
         .await
@@ -971,7 +925,21 @@ pub async fn api_thumbnail(
         size,
         &metadata,
         generator,
-    );
+    )?;
+    let owner_dir = owner_cache_dir(cfg.data_path.as_path(), "thumbnails", cache_owner)?;
+    if !cache_path.starts_with(&owner_dir) {
+        return Err(AppError::NotFound(path.clone()));
+    }
+    let overwrite_browse = (generator == ThumbnailGenerator::Darktable)
+        .then(|| {
+            album_browse_thumbnail_path(
+                cfg.data_path.as_path(),
+                cache_owner,
+                source.as_path(),
+                &metadata,
+            )
+        })
+        .flatten();
 
     // Cache hits bypass the limiter inside ensure_thumbnail_cached().
     ensure_thumbnail_cached(
@@ -981,6 +949,7 @@ pub async fn api_thumbnail(
         generator,
         &cfg.thumbnail_limiter,
         &cfg.darktable_limiter,
+        overwrite_browse,
     )
     .await?;
 
@@ -1009,99 +978,6 @@ pub async fn api_thumbnail(
         .status(StatusCode::OK)
         .body(Body::from_stream(ReaderStream::new(file)))
         .map_err(|e| AppError::Unknown(format!("build thumbnail response failed: {e}")))?;
-    *(ret.headers_mut()) = headers;
-    Ok(ret)
-}
-
-#[named]
-pub async fn api_face_thumbnail(
-    locale: RequestLocale,
-    token: Token,
-    Path(path): Path<String>,
-    query: Query<FaceThumbnailQuery>,
-    Extension(cfg): Extension<Arc<AppState>>,
-) -> Result<Response<Body>, AppError> {
-    let Some((username, root_path)) = cfg.get_session_and_root(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-
-    let effective_root = resolve_photo_owner_root(
-        &cfg,
-        &username,
-        root_path,
-        query.owner.as_deref(),
-        &path,
-        locale.as_str(),
-    )
-    .await?;
-
-    let source = into_host_path_safely(effective_root.as_path(), &path)?;
-    if !source.exists() || !source.is_file() {
-        return Err(AppError::NotFound(trf(
-            locale.as_str(),
-            "error.resource_not_found",
-            &[("value", path.clone())],
-        )));
-    }
-    if !is_image_path(source.as_path()) {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.not_previewable_image",
-        )));
-    }
-
-    let box_xywh = parse_face_box_query(query.r#box.as_str(), locale.as_str())?;
-    let size = query
-        .size
-        .unwrap_or(FACE_CROP_SIZE)
-        .clamp(FACE_THUMBNAIL_SIZE_MIN, FACE_THUMBNAIL_SIZE_MAX);
-    let metadata = tokio::fs::metadata(&source)
-        .await
-        .map_err(|_| AppError::NotFound(source.display().to_string()))?;
-    let cache_owner = query.owner.as_deref().unwrap_or(&username);
-    let cache_path = face_thumbnail_cache_file(
-        cfg.data_path.as_path(),
-        cache_owner,
-        source.as_path(),
-        size,
-        &metadata,
-        box_xywh,
-    );
-
-    ensure_face_thumbnail_cached(
-        source,
-        cache_path.clone(),
-        size,
-        box_xywh,
-        &cfg.thumbnail_limiter,
-    )
-    .await?;
-
-    let file = tokio::fs::File::open(&cache_path)
-        .await
-        .map_err(|e| AppError::Unknown(format!("open face thumbnail failed: {e}")))?;
-    let file_size = file
-        .metadata()
-        .await
-        .map_err(|e| AppError::Unknown(format!("stat face thumbnail failed: {e}")))?
-        .len();
-
-    let mut headers = HeaderMap::new();
-    headers.insert("Content-Type", HeaderValue::from_static("image/webp"));
-    headers.insert(
-        "Cache-Control",
-        HeaderValue::from_static("private, max-age=31536000, immutable"),
-    );
-    headers.insert(
-        "Content-Length",
-        HeaderValue::from_str(file_size.to_string().as_str())
-            .map_err(|e| AppError::Unknown(format!("invalid content length header: {e}")))?,
-    );
-
-    let mut ret = Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from_stream(ReaderStream::new(file)))
-        .map_err(|e| AppError::Unknown(format!("build face thumbnail response failed: {e}")))?;
     *(ret.headers_mut()) = headers;
     Ok(ret)
 }
@@ -1191,8 +1067,8 @@ pub async fn api_darktable_preview(
     let mut hasher = Sha512::new();
     hasher.update(username.as_bytes());
     hasher.update(b"|dt|");
-    hasher.update(source.to_string_lossy().as_bytes());
-    hasher.update(b"|");
+    hasher.update(cache_relative_path(cfg.data_path.as_path(), source.as_path()).as_bytes());
+    hasher.update(b"|v2|");
     hasher.update(size.to_string().as_bytes());
 
     hasher.update(b"|");
@@ -1214,6 +1090,14 @@ pub async fn api_darktable_preview(
         .join("darktable")
         .join(format!("{cache_key}.jpg"));
 
+    let cache_owner = query.owner.as_deref().unwrap_or(&username);
+    let browse_path = album_browse_thumbnail_path(
+        cfg.data_path.as_path(),
+        cache_owner,
+        source.as_path(),
+        &src_meta,
+    );
+
     if !cache_path.exists() {
         let permit = cfg.darktable_limiter.acquire().await;
         if cache_path.exists() {
@@ -1229,7 +1113,7 @@ pub async fn api_darktable_preview(
             let decode_opts = DecodeOptions::for_path(&source_for_decode)
                 .map_err(|error| AppError::Unknown(error.message))?
                 .with_xmp()
-                .with_max_edge(size);
+                .with_max_edge(darktable_combined_max_edge(size));
             let result = async {
                 let decoder = create_decoder(DecoderCreateOptions::darktable())
                     .map_err(|error| error.message)?;
@@ -1238,9 +1122,14 @@ pub async fn api_darktable_preview(
                     .await
                     .map_err(|error| error.message)?;
                 tokio::task::spawn_blocking(move || {
-                    image
-                        .save_with_format(&cache_blocking, image::ImageFormat::Jpeg)
-                        .map_err(|e| format!("save darktable preview failed: {e}"))
+                    save_decoded_outputs(
+                        image,
+                        cache_blocking,
+                        size,
+                        image::ImageFormat::Jpeg,
+                        browse_path,
+                    )
+                    .map_err(|e| format!("save darktable preview failed: {e}"))
                 })
                 .await
                 .map_err(|e| format!("darktable preview join failed: {e}"))?
@@ -1437,7 +1326,6 @@ pub async fn api_has_xmp(
     Ok(Json(json!({ "has_xmp": has_xmp })))
 }
 
-
 #[async_recursion]
 pub(crate) async fn collect_album_images(path: &FsPath, out: &mut Vec<PathBuf>) {
     if path.is_file() {
@@ -1462,4 +1350,76 @@ pub(crate) async fn collect_album_image_paths(path: &FsPath) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_album_images(path, &mut out).await;
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_relative_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn owner_cache_dir_rejects_path_escape() {
+        let data = PathBuf::from("/app/dist/data");
+        assert!(super::owner_cache_dir(&data, "thumbnails", "daniel").is_ok());
+        assert!(super::owner_cache_dir(&data, "thumbnails", "../exif").is_err());
+        assert!(super::owner_cache_dir(&data, "thumbnails", "a/b").is_err());
+        assert!(super::owner_cache_dir(&data, "thumbnails", "").is_err());
+        assert!(super::owner_cache_dir(&data, "thumbnails", ".hidden").is_err());
+    }
+
+    #[test]
+    fn cache_key_uses_path_relative_to_data_root() {
+        let data = PathBuf::from("/app/dist/data");
+        let under_root = PathBuf::from("/root/lumeno/dist/data");
+        let photo_app = data.join("daniel/albums/raw/a.jpg");
+        let photo_root = under_root.join("daniel/albums/raw/a.jpg");
+        assert_eq!(
+            cache_relative_path(&data, &photo_app),
+            "daniel/albums/raw/a.jpg"
+        );
+        assert_eq!(
+            cache_relative_path(&under_root, &photo_root),
+            "daniel/albums/raw/a.jpg"
+        );
+        assert_ne!(
+            photo_app.to_string_lossy().as_ref(),
+            photo_root.to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn darktable_combined_max_edge_picks_the_larger_side() {
+        assert_eq!(super::darktable_combined_max_edge(0), 0);
+        assert_eq!(
+            super::darktable_combined_max_edge(64),
+            crate::backend::constants::THUMBNAIL_SIZE
+        );
+        assert_eq!(
+            super::darktable_combined_max_edge(crate::backend::constants::THUMBNAIL_SIZE),
+            crate::backend::constants::THUMBNAIL_SIZE
+        );
+        assert_eq!(super::darktable_combined_max_edge(1600), 1600);
+    }
+
+    #[test]
+    fn save_decoded_outputs_writes_request_and_browse_thumbs() {
+        let dir = std::env::temp_dir().join(format!("lumeno-thumb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = dir.join("request.jpg");
+        let browse = dir.join("browse.webp");
+        let image = image::DynamicImage::new_rgb8(800, 600);
+        super::save_decoded_outputs(
+            image,
+            request.clone(),
+            400,
+            image::ImageFormat::Jpeg,
+            Some(browse.clone()),
+        )
+        .unwrap();
+        let requested = image::open(&request).unwrap();
+        assert!(requested.width().max(requested.height()) <= 400);
+        let grid = image::open(&browse).unwrap();
+        assert!(grid.width().max(grid.height()) <= crate::backend::constants::THUMBNAIL_SIZE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

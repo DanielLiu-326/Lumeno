@@ -8,20 +8,18 @@ use std::sync::{Arc, Mutex};
 use crate::backend::album::decoder::{DecoderCreateOptions, ImageDecoder, create_decoder};
 use crate::backend::album::{ensure_cached_face_crop, write_cached_face_crop_from_image};
 use crate::backend::common::AppState;
-use crate::backend::constants::{
-    AI_FACE_COST, FACE_CROP_SIZE,
-};
+use crate::backend::constants::{AI_FACE_COST, FACE_CROP_SIZE};
 use crate::backend::tasks::{TaskBase, format_subtask, task_file_name, wait_while_paused};
 
 use super::super::album_cache::{
-    AlbumAiCache, FaceCacheEntry, FaceIndexEntry, FacePhotoCacheFile, appearance_identity_key,
+    AlbumAiCache, FaceCacheEntry, FaceIndexEntry, FacePhotoCacheFile,
     build_clusters_cache_with_matches, decode_f32_vector_b64, encode_f32_vector_b64, face_id,
     face_photo_cache_key,
 };
 use super::super::faces::FACE_DETECTOR_REVISION;
 use super::super::models::{AiFaceRecord, AiIndexedPhotoRecord, LoadedOwnerIndex};
 use super::super::people::ClusterFace;
-use super::super::pipeline::{ImageJob, PipelineConfig, progress_channel, run_image_pipeline};
+use super::super::pipeline::{ImageJob, ImagePipeline, PipelineConfig, progress_channel};
 use super::super::provider::AiInferenceProvider;
 
 struct FaceMeta {
@@ -54,7 +52,7 @@ fn resolve_photo_path(cfg: &AppState, record: &AiIndexedPhotoRecord) -> Option<P
     path.exists().then_some(path)
 }
 
-pub(crate) async fn run_face_pipeline(
+pub(crate) async fn run(
     cfg: &AppState,
     provider: Arc<dyn AiInferenceProvider>,
     faces_requested: bool,
@@ -225,12 +223,14 @@ pub(crate) async fn run_face_pipeline(
         let thumbnail_limiter = Arc::clone(&cfg.thumbnail_limiter);
         let darktable_limiter = Arc::clone(&cfg.darktable_limiter);
 
-        let pipeline = run_image_pipeline(
-            detect_jobs,
+        let pipeline = ImagePipeline::new(
             config,
             decoder,
             Some(Arc::clone(&cancel)),
             Some(progress_tx),
+        )
+        .run(
+            detect_jobs,
             move |images| {
                 let provider = Arc::clone(&provider_infer);
                 async move {
@@ -410,7 +410,9 @@ pub(crate) async fn run_face_pipeline(
         .map(|item| (item.record, Some(item.embedding)))
         .unzip();
 
-    progress.set_cur_task("building face indexes".to_string()).await;
+    progress
+        .set_cur_task("building face indexes".to_string())
+        .await;
     *previous_index = None;
 
     write_face_indexes(
@@ -424,6 +426,45 @@ pub(crate) async fn run_face_pipeline(
     .await;
 
     Ok(FacePipelineOutput { face_records })
+}
+
+/// Collect every unassigned face in the album cache for a full DBSCAN rebuild.
+async fn collect_unassigned_faces_for_clustering(
+    cache: &AlbumAiCache,
+    assigned: &super::super::faces_config::AssignedFaceFilter,
+) -> (Vec<ClusterFace>, Vec<FaceIndexEntry>) {
+    let mut cluster_faces = Vec::new();
+    let mut face_metas = Vec::new();
+    let Ok(listed) = cache.list_face_photos_async().await else {
+        return (cluster_faces, face_metas);
+    };
+    for (photo_key, file) in listed {
+        for entry in file.faces {
+            if assigned.is_assigned(
+                file.source.as_str(),
+                &entry.box_xywh,
+                Some(entry.face_id.as_str()),
+            ) {
+                continue;
+            }
+            let Ok(embedding) = entry.decode_embedding() else {
+                continue;
+            };
+            cluster_faces.push(ClusterFace {
+                face_id: entry.face_id.clone(),
+                embedding,
+            });
+            face_metas.push(FaceIndexEntry {
+                face_id: entry.face_id,
+                stable_key: file.stable_key.clone(),
+                source: file.source.clone(),
+                box_xywh: entry.box_xywh,
+                quality_score: entry.quality_score,
+                photo_key: photo_key.clone(),
+            });
+        }
+    }
+    (cluster_faces, face_metas)
 }
 
 async fn write_face_indexes(
@@ -455,53 +496,59 @@ async fn write_face_indexes(
         let owner = photos[0].owner.as_str();
         let album_name = photos[0].album.as_str();
         let album_dir = cfg.user_root_path(owner).join("albums").join(album_name);
-        let faces_config = super::super::faces_config::load_faces_config_async(&album_dir).await;
-        let named = faces_config.assigned_appearance_keys();
-        let named_catalog =
-            super::super::faces_config::collect_named_person_centers(&faces_config);
+        let mut faces_config =
+            super::super::faces_config::load_faces_config_async(&album_dir).await;
 
-        let cache = AlbumAiCache::new(ai_root, owner, &cache_id);
-        let mut expected = HashSet::new();
-        let mut cluster_faces = Vec::new();
-        let mut face_metas = Vec::new();
-        let mut faces_by_photo: HashMap<&str, Vec<&AiFaceRecord>> = HashMap::new();
+        let stable_to_source: HashMap<&str, String> = photos
+            .iter()
+            .map(|p| (p.stable_key.as_str(), p.album_relative_path()))
+            .collect();
+        let mut detections_by_source: HashMap<
+            String,
+            Vec<super::super::faces_config::ReconcileDetection>,
+        > = HashMap::new();
         for face in face_records {
-            if photos.iter().any(|p| p.stable_key == face.stable_key) {
-                faces_by_photo
-                    .entry(face.stable_key.as_str())
-                    .or_default()
-                    .push(face);
+            if !photos.iter().any(|p| p.stable_key == face.stable_key) {
+                continue;
+            }
+            let Some(source) = stable_to_source.get(face.stable_key.as_str()) else {
+                continue;
+            };
+            let Some(vector) = emb_by_face.get(face.face_id.as_str()) else {
+                continue;
+            };
+            let norm = super::super::faces_config::normalize_source_path(source);
+            detections_by_source.entry(norm).or_default().push(
+                super::super::faces_config::ReconcileDetection {
+                    face_id: face.face_id.clone(),
+                    box_xywh: face.box_xywh,
+                    embedding: (*vector).clone(),
+                },
+            );
+        }
+        let reconcile_stats = super::super::faces_config::reconcile_faces_config(
+            &mut faces_config,
+            &detections_by_source,
+        );
+        if reconcile_stats.updated > 0 {
+            if let Err(error) =
+                super::super::faces_config::save_faces_config_async(&album_dir, &faces_config).await
+            {
+                eprintln!("faces.json reconcile save failed for {owner}/{album_name}: {error}");
             }
         }
 
+        let assigned = super::super::faces_config::AssignedFaceFilter::from_config(&faces_config);
+        let named_catalog = super::super::faces_config::collect_named_person_centers(&faces_config);
+
+        let cache = AlbumAiCache::new(ai_root, owner, &cache_id);
+        let mut expected = HashSet::new();
         for photo in &photos {
-            let key =
-                face_photo_cache_key(&photo.stable_key, &photo.content_signature, face_revision);
-            expected.insert(key.clone());
-            if let Some(faces) = faces_by_photo.get(photo.stable_key.as_str()) {
-                let source = photo.album_relative_path();
-                for face in faces {
-                    let Some(vector) = emb_by_face.get(face.face_id.as_str()) else {
-                        continue;
-                    };
-                    let appearance = appearance_identity_key(&source, &face.box_xywh);
-                    if !named.contains(&appearance) {
-                        let fid = face_id(&photo.stable_key, &face.box_xywh);
-                        cluster_faces.push(ClusterFace {
-                            face_id: fid.clone(),
-                            embedding: (*vector).clone(),
-                        });
-                        face_metas.push(FaceIndexEntry {
-                            face_id: fid,
-                            stable_key: photo.stable_key.clone(),
-                            source: source.clone(),
-                            box_xywh: face.box_xywh,
-                            quality_score: face.quality_score,
-                            photo_key: key.clone(),
-                        });
-                    }
-                }
-            }
+            expected.insert(face_photo_cache_key(
+                &photo.stable_key,
+                &photo.content_signature,
+                face_revision,
+            ));
         }
 
         if let Ok(listed) = cache.list_face_photos_async().await {
@@ -511,6 +558,10 @@ async fn write_face_indexes(
                 }
             }
         }
+
+        let (cluster_faces, face_metas) =
+            collect_unassigned_faces_for_clustering(&cache, &assigned).await;
+
         let clusters =
             build_clusters_cache_with_matches(&cluster_faces, &face_metas, &named_catalog);
         let hints = super::super::album_cache::hints_from_clusters(&clusters);

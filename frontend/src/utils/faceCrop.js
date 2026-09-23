@@ -53,6 +53,17 @@ export function resolveFaceCropAlbum(albumName = "") {
   return String(albumName || "").trim();
 }
 
+/**
+ * Folder under the owner's `albums/` directory.
+ * Shared albums are addressed as `owner/album`; photo files live at `albums/album/…`.
+ */
+export function albumStorageName(albumKey = "") {
+  const key = String(albumKey || "").replace(/\\/g, "/").trim().replace(/^\/+|\/+$/g, "");
+  const slash = key.indexOf("/");
+  if (slash > 0 && slash < key.length - 1) return key.slice(slash + 1);
+  return key;
+}
+
 /** Parse `albums/{album}/{relative}` photo API paths. */
 export function parseAlbumPhotoPath(path) {
   const normalized = String(path || "").replace(/\\/g, "/").replace(/^\/+/, "");
@@ -112,8 +123,24 @@ export function albumPhotoApiPath(albumName, relativeSource) {
   const rel = String(relativeSource).replace(/\\/g, "/").replace(/^\/+/, "");
   if (!rel) return "";
   if (rel.startsWith("albums/")) return rel;
-  if (!albumName) return rel;
-  return `albums/${albumName}/${rel}`;
+  const folder = albumStorageName(albumName);
+  if (!folder) return rel;
+  return `albums/${folder}/${rel}`;
+}
+
+/** Distinct photos a person appears in (filter / list “N photos”). */
+export function personPhotoCount(person) {
+  if (!person || typeof person !== "object") return 0;
+  const visible = Number(person.visible_photo_count);
+  if (Number.isFinite(visible) && visible >= 0 && person.visible_photo_count != null) {
+    return visible;
+  }
+  const appearances = Array.isArray(person.appearances) ? person.appearances : [];
+  if (appearances.length) {
+    return new Set(appearances.map((row) => row?.source).filter(Boolean)).size;
+  }
+  const n = Number(person.appearance_count);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 /** Cover for UI lists: explicit cover, else first appearance fallback. */

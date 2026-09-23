@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use sha2::Sha512;
 use std::collections::HashMap;
 use std::net;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
@@ -505,28 +505,22 @@ pub fn spawn_cache_gc(state: Arc<AppState>) {
 
             for dir_name in &cache_dirs {
                 let dir = cache_root.join(dir_name);
-                let Ok(mut rd) = tokio::fs::read_dir(&dir).await else {
-                    continue;
-                };
-                while let Ok(Some(entry)) = rd.next_entry().await {
-                    let Ok(meta) = entry.metadata().await else {
+                if *dir_name == "thumbnails" {
+                    // `cache/thumbnails/{owner}/*.webp` — do not treat the
+                    // thumbnails root as a flat file dump (old layout).
+                    let Ok(mut rd) = tokio::fs::read_dir(&dir).await else {
                         continue;
                     };
-                    if !meta.is_file() {
-                        continue;
-                    }
-                    let last_used = meta
-                        .accessed()
-                        .ok()
-                        .into_iter()
-                        .chain(meta.modified().ok())
-                        .max();
-                    if let Some(t) = last_used {
-                        if t < cutoff {
-                            let _ = tokio::fs::remove_file(entry.path()).await;
-                            removed += 1;
+                    while let Ok(Some(entry)) = rd.next_entry().await {
+                        let Ok(meta) = entry.metadata().await else {
+                            continue;
+                        };
+                        if meta.is_dir() {
+                            removed += gc_cache_dir_files(&entry.path(), cutoff).await;
                         }
                     }
+                } else {
+                    removed += gc_cache_dir_files(&dir, cutoff).await;
                 }
             }
 
@@ -535,4 +529,48 @@ pub fn spawn_cache_gc(state: Arc<AppState>) {
             }
         }
     });
+}
+
+async fn gc_cache_dir_files(dir: &std::path::Path, cutoff: std::time::SystemTime) -> u64 {
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
+        return 0;
+    };
+    let mut removed = 0u64;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let last_used = meta
+            .accessed()
+            .ok()
+            .into_iter()
+            .chain(meta.modified().ok())
+            .max();
+        if let Some(t) = last_used
+            && t < cutoff
+        {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Ensure `data/cache/*` exists (permissions follow host umask / ownership).
+pub fn ensure_data_cache_layout(data_path: &Path) {
+    let cache_root = data_path.join("cache");
+    let _ = std::fs::create_dir_all(&cache_root);
+    for name in [
+        "ai",
+        "thumbnails",
+        "exif",
+        "exports",
+        "thumbnail-manifests",
+        "index",
+    ] {
+        let _ = std::fs::create_dir_all(cache_root.join(name));
+    }
 }

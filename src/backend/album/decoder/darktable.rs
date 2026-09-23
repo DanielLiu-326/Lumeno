@@ -4,16 +4,15 @@ use async_trait::async_trait;
 use image::DynamicImage;
 
 use super::exif::apply_exif_from_bytes;
-use super::formats::{format_from_hint_or_path, require_format, ImageFormat, ImageFormatSet};
-use super::{apply_max_edge, DecodeError, DecodeOptions, DecoderBackendKind, ImageDecoder};
+use super::formats::{ImageFormat, ImageFormatSet, format_from_hint_or_path, require_format};
+use super::{DecodeError, DecodeOptions, DecoderBackendKind, ImageDecoder, apply_max_edge};
 
 /// Full demosaic / XMP grading via `darktable-cli`. Requires darktable-cli on PATH.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DarktableImageDecoder;
 
 impl DarktableImageDecoder {
-    pub const SUPPORTED: ImageFormatSet =
-        ImageFormatSet::CAMERA_RAW.union(ImageFormatSet::RASTER);
+    pub const SUPPORTED: ImageFormatSet = ImageFormatSet::CAMERA_RAW.union(ImageFormatSet::RASTER);
 
     pub fn is_supported(format: super::formats::ImageFormat) -> bool {
         Self::SUPPORTED.contains(format)
@@ -172,10 +171,12 @@ async fn run_darktable_cli(path: &Path, options: DecodeOptions) -> Result<Vec<u8
         });
     }
 
-    let bytes = tokio::fs::read(&temp_jpg).await.map_err(|error| DecodeError {
-        code: "darktable_read_failed",
-        message: error.to_string(),
-    })?;
+    let bytes = tokio::fs::read(&temp_jpg)
+        .await
+        .map_err(|error| DecodeError {
+            code: "darktable_read_failed",
+            message: error.to_string(),
+        })?;
     let _ = tokio::fs::remove_file(&temp_jpg).await;
     Ok(bytes)
 }
@@ -253,7 +254,11 @@ impl ImageDecoder for DarktableImageDecoder {
         Self::SUPPORTED
     }
 
-    fn decode_bytes(&self, bytes: &[u8], options: DecodeOptions) -> Result<DynamicImage, DecodeError> {
+    fn decode_bytes(
+        &self,
+        bytes: &[u8],
+        options: DecodeOptions,
+    ) -> Result<DynamicImage, DecodeError> {
         let format = require_format(options.format)?;
         if format == ImageFormat::Jpeg {
             let img = Self::decode_jpeg_bytes(bytes, options.apply_exif)?;

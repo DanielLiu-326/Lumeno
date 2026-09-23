@@ -1,14 +1,11 @@
-use axum::{
-    Extension, Json,
-    extract::Query,
-};
+use axum::{Extension, Json, extract::Query};
 use function_name::named;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use super::super::album::{collect_accessible_ai_scan_targets, AiAlbumScanTarget};
+use super::super::album::{AiAlbumScanTarget, collect_accessible_ai_scan_targets};
 use super::super::auth::Role;
 use super::super::common::{AppError, AppState, Token, create_response};
 use super::super::i18n::{RequestLocale, tr, trf};
@@ -276,7 +273,7 @@ impl AiTextSearchRequest {
                 )],
             )));
         }
-        let limit = self.limit.unwrap_or(60).clamp(1, 200);
+        let limit = self.limit.unwrap_or(60).clamp(1, 10_000);
         // SigLIP2 text↔image scores are calibrated into ~[0,1]; default is top-k
         // (no hard floor) because absolute cosines are far below CLIP-era thresholds.
         let min_score = self.min_score.unwrap_or(0.0).clamp(0.0, 1.0);
@@ -377,6 +374,7 @@ async fn load_similar_search_candidates(
     loaded
 }
 
+#[named]
 pub async fn api_ai_duplicates(
     locale: RequestLocale,
     token: Token,
@@ -461,6 +459,7 @@ pub async fn api_ai_duplicates(
     ))
 }
 
+#[named]
 pub async fn api_ai_status(
     locale: RequestLocale,
     token: Token,
@@ -559,7 +558,11 @@ pub async fn api_ai_index(
         request,
     ));
     let (task_id, created) = cfg.task_mgr.add_task_if_absent(task).await;
-    let message = tr(locale.as_str(), "response.ai_index_task_created");
+    let message = if created {
+        tr(locale.as_str(), "response.ai_index_task_created")
+    } else {
+        tr(locale.as_str(), "response.ai_index_task_already_running")
+    };
 
     Ok(create_response(
         true,
@@ -572,6 +575,7 @@ pub async fn api_ai_index(
     ))
 }
 
+#[named]
 pub async fn api_ai_search_similar(
     locale: RequestLocale,
     token: Token,
@@ -669,13 +673,14 @@ pub async fn api_ai_search_similar(
         .map(|(record, embedding)| (record, embedding.unwrap_or_default()))
         .collect::<Vec<_>>();
 
-    let results = AiService::search_similar_in_records(
+    let mut results = AiService::search_similar_in_records(
         &query_vector,
         &candidates,
         source_record.stable_id.as_str(),
         request.min_score,
         request.limit,
     );
+    super::attach_album_index_metadata(cfg.as_ref(), &mut results).await;
     let message = tr(locale.as_str(), "response.success");
 
     Ok(create_response(
@@ -788,13 +793,14 @@ pub async fn api_ai_search_text(
         )));
     }
 
-    let results = AiService::search_text_in_records(
+    let mut results = AiService::search_text_in_records(
         request.text.as_str(),
         &query_vector,
         &loaded.candidates,
         request.min_score,
         request.limit,
     );
+    super::attach_album_index_metadata(cfg.as_ref(), &mut results).await;
     let message = tr(locale.as_str(), "response.success");
 
     Ok(create_response(

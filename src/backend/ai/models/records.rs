@@ -39,6 +39,31 @@ pub(crate) struct NormalizedAiIndexRequest {
     pub(crate) features: Vec<String>,
 }
 
+impl NormalizedAiIndexRequest {
+    pub(crate) fn has_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|value| value == feature)
+    }
+
+    pub(crate) fn default_incremental_features() -> Vec<String> {
+        vec![
+            "duplicates".to_string(),
+            "faces".to_string(),
+            "image".to_string(),
+        ]
+    }
+
+    pub(crate) fn deduplication_key(&self, owner: &str) -> String {
+        let album = self.album.as_deref().unwrap_or("all");
+        let mut features = self.features.clone();
+        features.sort();
+        format!(
+            "ai-index:{owner}:{album}:{}:{}",
+            self.mode,
+            features.join("+")
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AiIndexedAlbumSummary {
     pub(crate) owner: String,
@@ -62,6 +87,59 @@ pub(crate) struct AiSimilarSearchResult {
     pub(crate) height: u32,
     pub(crate) score: f32,
     pub(crate) reason: String,
+    /// Album-index metadata, filled on the search response so the client does
+    /// not need a second photos request. Empty when the index has no row.
+    #[serde(default)]
+    pub(crate) datetime: String,
+    #[serde(default)]
+    pub(crate) camera_make: String,
+    #[serde(default)]
+    pub(crate) camera_model: String,
+    #[serde(default)]
+    pub(crate) lens: String,
+    #[serde(default)]
+    pub(crate) focal_length: String,
+    #[serde(default)]
+    pub(crate) aperture: String,
+    #[serde(default)]
+    pub(crate) shutter_speed: String,
+    #[serde(default)]
+    pub(crate) iso: Option<u32>,
+    #[serde(default)]
+    pub(crate) rating: u8,
+    #[serde(default)]
+    pub(crate) color_label: Vec<String>,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
+}
+
+impl AiSimilarSearchResult {
+    /// Placeholder metadata fields for struct-update construction.
+    pub(crate) fn empty_meta() -> Self {
+        Self {
+            owner: String::new(),
+            album: String::new(),
+            path: String::new(),
+            name: String::new(),
+            date: String::new(),
+            size: 0,
+            width: 0,
+            height: 0,
+            score: 0.0,
+            reason: String::new(),
+            datetime: String::new(),
+            camera_make: String::new(),
+            camera_model: String::new(),
+            lens: String::new(),
+            focal_length: String::new(),
+            aperture: String::new(),
+            shutter_speed: String::new(),
+            iso: None,
+            rating: 0,
+            color_label: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
 }
 
 pub(crate) struct LoadedOwnerIndex {

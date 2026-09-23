@@ -14,6 +14,17 @@ export function prettyPath(path) {
     return path ? `/${path}` : "/";
 }
 
+export function normalizeBrowsePath(input) {
+    const text = String(input ?? "").trim().replace(/\\/g, "/");
+    const stack = [];
+    for (const part of text.split("/")) {
+        if (!part || part === ".") continue;
+        if (part === "..") stack.pop();
+        else stack.push(part);
+    }
+    return stack.join("/");
+}
+
 export function compareRelativePaths(leftPath, rightPath) {
     const leftDepth = leftPath.split("/").filter(Boolean).length;
     const rightDepth = rightPath.split("/").filter(Boolean).length;

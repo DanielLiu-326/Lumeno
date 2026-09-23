@@ -11,10 +11,14 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use super::accent::normalize_accent;
 use super::auth::Role;
 use super::common::{AppError, AppState, RateLimiter, Token, create_response};
+use super::constants::{USER_AVATAR_SIZE, USER_WALLPAPER_MAX_EDGE};
 use super::i18n::{RequestLocale, SUPPORTED_LOCALES, normalize_locale, tr, trf};
-use super::constants::USER_AVATAR_SIZE;
+use super::wallpaper::{
+    WallpaperPrefs, WallpaperSource, is_safe_wallpaper_filename, wallpaper_filename_owner,
+};
 
 pub struct SettingsChange {
     pub changed_keys: Vec<String>,
@@ -103,6 +107,24 @@ impl SettingsManager {
     }
 
     // ── Typed getters ────────────────────────────────────────────────────────
+
+    /// Album / file-list page size when the client omits `limit` (default 100).
+    pub async fn photos_per_page(&self) -> u32 {
+        Self::photos_per_page_from(&*self.settings.lock().await)
+    }
+
+    pub fn photos_per_page_from(settings: &Value) -> u32 {
+        settings
+            .get("photos_per_page")
+            .and_then(|v| v.as_u64())
+            .map(|n| {
+                (n as u32).clamp(
+                    super::constants::PHOTOS_PER_PAGE_MIN,
+                    super::constants::PHOTOS_PER_PAGE_MAX,
+                )
+            })
+            .unwrap_or(super::constants::DEFAULT_PHOTOS_PER_PAGE)
+    }
 
     /// Days after which cache files are deleted. 0 = GC disabled (default).
     pub async fn cache_retention_days(&self) -> u64 {
@@ -249,14 +271,24 @@ impl SettingsManager {
         std::time::Duration::from_secs(hours * 60 * 60)
     }
 
-    /// Whether public user registration is allowed (default true).
+    /// Whether public user registration is allowed (default false).
     pub async fn allow_registration(&self) -> bool {
         self.settings
             .lock()
             .await
             .get("allow_registration")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true)
+            .unwrap_or(false)
+    }
+
+    fn public_view(settings: &Value) -> Value {
+        json!({
+            "photos_per_page": Self::photos_per_page_from(settings),
+            "allow_registration": settings
+                .get("allow_registration")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
     }
 
     fn save_to_disk(&self, settings: &Value) {
@@ -307,6 +339,14 @@ impl SettingsManager {
                 *value = json!(raw.trim());
             }
         }
+        if let Some(value) = obj.get_mut("photos_per_page") {
+            if let Some(n) = value.as_u64() {
+                *value = json!((n as u32).clamp(
+                    super::constants::PHOTOS_PER_PAGE_MIN,
+                    super::constants::PHOTOS_PER_PAGE_MAX,
+                ));
+            }
+        }
         if let Some(value) = obj.get_mut("ai_fallback_interim") {
             if let Some(flag) = value.as_bool() {
                 *value = json!(flag);
@@ -321,12 +361,20 @@ impl SettingsManager {
 
 pub async fn api_settings_get(
     locale: RequestLocale,
-    _token: Token,
+    token: Token,
     Extension(cfg): Extension<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
+    let Some(session) = cfg.get_session_info(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
     let settings = cfg.settings_manager.get_all().await;
+    let body = if session.role == Role::Admin {
+        settings
+    } else {
+        SettingsManager::public_view(&settings)
+    };
     let message = tr(locale.as_str(), "response.ok");
-    Ok(create_response(true, &message, 0, Some(settings)))
+    Ok(create_response(true, &message, 0, Some(body)))
 }
 
 // ── API: Update settings (admin only) ────────────────────────────────────────
@@ -392,6 +440,10 @@ pub async fn api_thumbnail_scan_now(
 #[derive(Debug, Deserialize)]
 pub struct UpdatePreferencesPayload {
     locale: String,
+    #[serde(default)]
+    wallpaper: Option<WallpaperPrefs>,
+    #[serde(default)]
+    accent: Option<String>,
 }
 
 pub async fn api_preferences_get(
@@ -403,6 +455,8 @@ pub async fn api_preferences_get(
         return Err(AppError::unauthorized(locale.as_str()));
     };
     let user_locale = cfg.user_manager.get_locale(&username).await;
+    let wallpaper = cfg.user_manager.get_wallpaper(&username).await;
+    let accent = cfg.user_manager.get_accent(&username).await;
     let message = tr(&user_locale, "response.ok");
     Ok(create_response(
         true,
@@ -410,6 +464,8 @@ pub async fn api_preferences_get(
         0,
         Some(json!({
             "locale": user_locale,
+            "wallpaper": wallpaper,
+            "accent": accent,
             "supported_locales": SUPPORTED_LOCALES,
         })),
     ))
@@ -428,6 +484,30 @@ pub async fn api_preferences_update(
     if !cfg.user_manager.set_locale(&username, &next_locale).await {
         return Err(AppError::unauthorized(locale.as_str()));
     }
+    let wallpaper = if let Some(next) = payload.wallpaper {
+        let previous = cfg.user_manager.get_wallpaper(&username).await;
+        let next = next.normalize();
+        if !cfg
+            .user_manager
+            .set_wallpaper(&username, next.clone())
+            .await
+        {
+            return Err(AppError::unauthorized(locale.as_str()));
+        }
+        delete_unused_wallpaper_files(&cfg, &previous, &next).await;
+        next
+    } else {
+        cfg.user_manager.get_wallpaper(&username).await
+    };
+    let accent = if let Some(next) = payload.accent {
+        let next = normalize_accent(&next);
+        if !cfg.user_manager.set_accent(&username, &next).await {
+            return Err(AppError::unauthorized(locale.as_str()));
+        }
+        next
+    } else {
+        cfg.user_manager.get_accent(&username).await
+    };
     let message = tr(&next_locale, "response.preferences_saved");
     Ok(create_response(
         true,
@@ -435,6 +515,8 @@ pub async fn api_preferences_update(
         0,
         Some(json!({
             "locale": next_locale,
+            "wallpaper": wallpaper,
+            "accent": accent,
             "supported_locales": SUPPORTED_LOCALES,
         })),
     ))
@@ -553,6 +635,7 @@ pub async fn api_admin_users_update(
         )));
     }
 
+    let previous_role = cfg.user_manager.get_role(&target_username).await;
     let next_locale = payload.locale.as_deref().map(normalize_locale);
     let updated_user = cfg
         .user_manager
@@ -565,6 +648,12 @@ pub async fn api_admin_users_update(
                 &[("username", target_username.clone())],
             ))
         })?;
+
+    if payload.role.is_some() && updated_user.role != previous_role {
+        cfg.session_manager
+            .remove_sessions_for_user(&target_username)
+            .await;
+    }
 
     let message = tr(locale.as_str(), "response.member_updated");
     Ok(create_response(
@@ -621,8 +710,9 @@ pub async fn api_admin_users_delete(
         )));
     }
 
-    // Fetch avatar before deleting user
+    // Fetch avatar and wallpaper before deleting user
     let avatar = cfg.user_manager.get_avatar(&target).await;
+    let wallpaper = cfg.user_manager.get_wallpaper(&target).await;
 
     cfg.user_manager.delete_user(&target).await;
     cfg.session_manager.remove_sessions_for_user(&target).await;
@@ -630,11 +720,16 @@ pub async fn api_admin_users_delete(
     if let Err(error) = cfg.ai_service.store().purge_owner(&target) {
         eprintln!("failed to purge ai index for deleted user {target}: {error}");
     }
+    crate::backend::album::purge_owner_thumbnail_cache(cfg.data_path.as_path(), &target);
 
     // Delete avatar file if present
     if let Some(avatar) = avatar {
         let avatar_path = cfg.data_path.join(AVATAR_DIR).join(&avatar);
         let _ = tokio::fs::remove_file(&avatar_path).await;
+    }
+    for file in wallpaper.image_files() {
+        let path = cfg.data_path.join(WALLPAPER_DIR).join(&file);
+        let _ = tokio::fs::remove_file(&path).await;
     }
 
     let message = trf(
@@ -697,6 +792,7 @@ pub async fn api_admin_reset_password(
 // ── Avatar constants ─────────────────────────────────────────────────────────
 
 const AVATAR_DIR: &str = "config/avatars";
+const WALLPAPER_DIR: &str = "config/wallpapers";
 
 // ── API: Upload avatar ───────────────────────────────────────────────────────
 
@@ -790,6 +886,14 @@ pub async fn api_avatar_get(
         )));
     }
 
+    if !cfg.user_manager.is_current_avatar(&filename).await {
+        return Err(AppError::NotFound(trf(
+            locale.as_str(),
+            "error.resource_not_found",
+            &[("value", filename.clone())],
+        )));
+    }
+
     let avatars_dir = cfg.data_path.join(AVATAR_DIR);
     let file_path = avatars_dir.join(&filename);
 
@@ -808,7 +912,175 @@ pub async fn api_avatar_get(
     Ok((
         [
             (header::CONTENT_TYPE, "image/webp"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::CACHE_CONTROL, "private, max-age=86400"),
+        ],
+        data,
+    ))
+}
+
+async fn delete_unused_wallpaper_files(
+    cfg: &AppState,
+    previous: &WallpaperPrefs,
+    next: &WallpaperPrefs,
+) {
+    let keep = next.image_files();
+    let dir = cfg.data_path.join(WALLPAPER_DIR);
+    for file in previous.image_files() {
+        if keep.iter().any(|kept| kept == &file) {
+            continue;
+        }
+        let _ = tokio::fs::remove_file(dir.join(&file)).await;
+    }
+}
+
+// ── API: Upload wallpaper ────────────────────────────────────────────────────
+
+pub async fn api_wallpaper_upload(
+    locale: RequestLocale,
+    token: Token,
+    Extension(cfg): Extension<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<Json<Value>, AppError> {
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+
+    let mut file_data: Option<Vec<u8>> = None;
+    let mut slot = "source".to_owned();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("{e}")))?
+    {
+        let name = field.name().unwrap_or("").to_owned();
+        if name == "slot" {
+            slot = field
+                .text()
+                .await
+                .map_err(|e| AppError::BadRequest(format!("{e}")))?;
+            continue;
+        }
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("{e}")))?;
+        if !data.is_empty() {
+            file_data = Some(data.to_vec());
+        }
+    }
+
+    let Some(data) = file_data else {
+        return Err(AppError::BadRequest(tr(
+            locale.as_str(),
+            "error.no_files_upload",
+        )));
+    };
+
+    let slot = if slot.trim() == "dark_source" {
+        "dark_source"
+    } else {
+        "source"
+    };
+
+    let wallpapers_dir = cfg.data_path.join(WALLPAPER_DIR);
+    tokio::fs::create_dir_all(&wallpapers_dir)
+        .await
+        .map_err(|e| AppError::Unknown(format!("create wallpaper dir failed: {e}")))?;
+
+    let filename = format!("{}_{}.webp", username, Uuid::new_v4());
+    let output_path = wallpapers_dir.join(&filename);
+    let output_blocking = output_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let img = image::load_from_memory(&data).map_err(|e| format!("open image failed: {e}"))?;
+        let sized = img.thumbnail(USER_WALLPAPER_MAX_EDGE, USER_WALLPAPER_MAX_EDGE);
+        sized
+            .save_with_format(&output_blocking, image::ImageFormat::WebP)
+            .map_err(|e| format!("save webp wallpaper failed: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Unknown(format!("wallpaper task join failed: {e}")))?
+    .map_err(AppError::Unknown)?;
+
+    let previous = cfg.user_manager.get_wallpaper(&username).await;
+    let next = previous
+        .clone()
+        .with_slot(slot, WallpaperSource::image(&filename));
+    if !cfg
+        .user_manager
+        .set_wallpaper(&username, next.clone())
+        .await
+    {
+        let _ = tokio::fs::remove_file(&output_path).await;
+        return Err(AppError::unauthorized(locale.as_str()));
+    }
+    delete_unused_wallpaper_files(&cfg, &previous, &next).await;
+
+    let message = tr(locale.as_str(), "response.wallpaper_updated");
+    Ok(create_response(
+        true,
+        &message,
+        0,
+        Some(json!({
+            "file": filename,
+            "slot": slot,
+            "wallpaper": next,
+        })),
+    ))
+}
+
+// ── API: Serve wallpaper ─────────────────────────────────────────────────────
+
+pub async fn api_wallpaper_get(
+    locale: RequestLocale,
+    token: Token,
+    Extension(cfg): Extension<Arc<AppState>>,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    if !is_safe_wallpaper_filename(&filename) {
+        return Err(AppError::BadRequest(trf(
+            locale.as_str(),
+            "error.bad_request",
+            &[("value", filename.clone())],
+        )));
+    }
+
+    let Some(username) = cfg.get_username(&token).await else {
+        return Err(AppError::unauthorized(locale.as_str()));
+    };
+    if wallpaper_filename_owner(&filename) != Some(username.as_str()) {
+        return Err(AppError::NotFound(trf(
+            locale.as_str(),
+            "error.resource_not_found",
+            &[("value", filename.clone())],
+        )));
+    }
+    let wallpaper = cfg.user_manager.get_wallpaper(&username).await;
+    if !wallpaper.image_files().iter().any(|file| file == &filename) {
+        return Err(AppError::NotFound(trf(
+            locale.as_str(),
+            "error.resource_not_found",
+            &[("value", filename.clone())],
+        )));
+    }
+
+    let file_path = cfg.data_path.join(WALLPAPER_DIR).join(&filename);
+    if !file_path.exists() {
+        return Err(AppError::NotFound(trf(
+            locale.as_str(),
+            "error.resource_not_found",
+            &[("value", filename.clone())],
+        )));
+    }
+
+    let data = tokio::fs::read(&file_path)
+        .await
+        .map_err(|e| AppError::Unknown(format!("read wallpaper failed: {e}")))?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/webp"),
+            (header::CACHE_CONTROL, "private, max-age=86400"),
         ],
         data,
     ))

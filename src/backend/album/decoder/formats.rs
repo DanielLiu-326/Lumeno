@@ -296,7 +296,9 @@ fn detect_tiff_based_raw(bytes: &[u8]) -> Option<ImageFormat> {
     if contains_ascii_insensitive(scan, b"PENTAX") {
         return Some(ImageFormat::Pef);
     }
-    if contains_ascii_insensitive(scan, b"OLYMPUS") || contains_ascii_insensitive(scan, b"OM DIGITAL") {
+    if contains_ascii_insensitive(scan, b"OLYMPUS")
+        || contains_ascii_insensitive(scan, b"OM DIGITAL")
+    {
         return Some(ImageFormat::Orf);
     }
     if contains_ascii_insensitive(scan, b"SONY") {
@@ -317,7 +319,9 @@ fn detect_tiff_based_raw(bytes: &[u8]) -> Option<ImageFormat> {
     if contains_ascii_insensitive(scan, b"HASSELBLAD") {
         return Some(ImageFormat::Fff);
     }
-    if contains_ascii_insensitive(scan, b"Phase One") || contains_ascii_insensitive(scan, b"PHASEONE") {
+    if contains_ascii_insensitive(scan, b"Phase One")
+        || contains_ascii_insensitive(scan, b"PHASEONE")
+    {
         return Some(ImageFormat::Iiq);
     }
     if contains_ascii_insensitive(scan, b"DNG") {
@@ -343,7 +347,10 @@ fn is_heic_bytes(bytes: &[u8]) -> bool {
         return false;
     }
     let brand = &bytes[8..12];
-    matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" | b"avif")
+    matches!(
+        brand,
+        b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" | b"avif"
+    )
 }
 
 #[cfg(test)]

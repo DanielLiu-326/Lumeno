@@ -3,6 +3,7 @@ use burn::prelude::*;
 #[cfg(test)]
 use half::f16;
 use image::imageops::FilterType;
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::path::Path;
 use std::sync::OnceLock;
@@ -122,6 +123,37 @@ pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
         .zip(right.iter())
         .map(|(a, b)| a * b)
         .sum::<f32>()
+}
+
+/// Compact log line for comparing text embeddings across queries (no full vector).
+pub fn embedding_debug_fingerprint(vector: &[f32]) -> String {
+    let l2 = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    let mut hasher = Sha256::new();
+    for value in vector {
+        hasher.update(value.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    format!(
+        "dim={} l2={l2:.4} head=[{:.4},{:.4},{:.4},{:.4}] sha={:02x}{:02x}{:02x}{:02x}",
+        vector.len(),
+        vector.first().copied().unwrap_or(0.0),
+        vector.get(1).copied().unwrap_or(0.0),
+        vector.get(2).copied().unwrap_or(0.0),
+        vector.get(3).copied().unwrap_or(0.0),
+        digest[0],
+        digest[1],
+        digest[2],
+        digest[3],
+    )
+}
+
+pub fn embedding_debug_query_preview(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut out: String = chars.by_ref().take(48).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// SigLIP2 text↔image cosines for true matches are typically ~0.04–0.15 (not CLIP-scale).

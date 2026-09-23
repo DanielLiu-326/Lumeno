@@ -11,7 +11,7 @@ use crate::backend::tasks::{TaskBase, format_subtask, task_file_name};
 
 use super::super::album_cache::{AlbumAiCache, EmbeddingCacheFile, embedding_cache_key};
 use super::super::models::AiIndexedPhotoRecord;
-use super::super::pipeline::{ImageJob, PipelineConfig, progress_channel, run_image_pipeline};
+use super::super::pipeline::{ImageJob, ImagePipeline, PipelineConfig, progress_channel};
 use super::super::provider::{AiInferenceProvider, AiItemError};
 
 struct EmbedMeta {
@@ -27,7 +27,7 @@ struct EmbedMeta {
     height: Option<u32>,
 }
 
-pub(crate) async fn run_embedding_pipeline(
+pub(crate) async fn run(
     ai_root: &Path,
     provider: Arc<dyn AiInferenceProvider>,
     pending: &[(String, PathBuf, PathBuf)],
@@ -117,12 +117,8 @@ pub(crate) async fn run_embedding_pipeline(
     let results_save = Arc::clone(&results);
     let provider_infer = Arc::clone(&provider);
 
-    let pipeline = run_image_pipeline(
+    let pipeline = ImagePipeline::new(config, decoder, Some(cancel), Some(progress_tx)).run(
         jobs,
-        config,
-        decoder,
-        Some(cancel),
-        Some(progress_tx),
         move |images| {
             let provider = Arc::clone(&provider_infer);
             async move {
