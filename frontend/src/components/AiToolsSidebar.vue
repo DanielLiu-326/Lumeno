@@ -205,6 +205,7 @@ function confirmSplit() {
         <textarea
           v-model="query"
           rows="3"
+          autocomplete="off"
           :placeholder="t('albums.textSearchPlaceholder')"
           class="w-full resize-none rounded-xl border px-2.5 py-2 text-xs"
           :class="isDark ? 'border-stone-700 bg-stone-950 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"

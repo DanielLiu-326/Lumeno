@@ -13,7 +13,7 @@ use function_name::named;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use headers::{ContentType, HeaderMapExt};
-use percent_encoding::percent_decode_str;
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::any::Any;
@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
@@ -878,8 +879,29 @@ pub async fn send_file(full_path: PathBuf, disposition: bool) -> Result<Response
     headers.typed_insert(ContentType::from(mime_type));
 
     if disposition {
-        let content_disposition = format!("attachment; filename=\"{}\"", file_name);
-        headers.insert("Content-Disposition", content_disposition.parse().unwrap());
+        // ASCII fallback plus filename* so non-ASCII (e.g. Chinese) names survive
+        // instead of panicking on HeaderValue::from_str.
+        let fallback: String = file_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii() && !c.is_control() && c != '"' && c != '\\' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let fallback = if fallback.trim_matches('_').is_empty() {
+            "file"
+        } else {
+            fallback.as_str()
+        };
+        let encoded_name = utf8_percent_encode(file_name, NON_ALPHANUMERIC).to_string();
+        let content_disposition =
+            format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded_name}");
+        if let Ok(value) = HeaderValue::from_str(&content_disposition) {
+            headers.insert("Content-Disposition", value);
+        }
     }
     headers.insert(
         "Content-Length",
@@ -892,6 +914,157 @@ pub async fn send_file(full_path: PathBuf, disposition: bool) -> Result<Response
     let mut ret = Response::builder()
         .status(StatusCode::OK)
         .body(body)
+        .unwrap();
+    *(ret.headers_mut()) = headers;
+    Ok(ret)
+}
+
+struct ByteRange {
+    start: u64,
+    end_inclusive: u64,
+}
+
+fn parse_byte_range(header: &str, len: u64) -> Result<ByteRange, ()> {
+    if len == 0 {
+        return Err(());
+    }
+    let Some(rest) = header.trim().strip_prefix("bytes=") else {
+        return Err(());
+    };
+    let spec = rest.split(',').next().unwrap_or("").trim();
+    if spec.is_empty() {
+        return Err(());
+    }
+    if let Some(suffix) = spec.strip_prefix('-') {
+        if suffix.is_empty() {
+            return Err(());
+        }
+        let n: u64 = suffix.parse().map_err(|_| ())?;
+        if n == 0 {
+            return Err(());
+        }
+        let n = n.min(len);
+        return Ok(ByteRange {
+            start: len - n,
+            end_inclusive: len - 1,
+        });
+    }
+    let Some((start_s, end_s)) = spec.split_once('-') else {
+        return Err(());
+    };
+    if start_s.is_empty() {
+        return Err(());
+    }
+    let start: u64 = start_s.parse().map_err(|_| ())?;
+    if start >= len {
+        return Err(());
+    }
+    let end_inclusive = if end_s.is_empty() {
+        len - 1
+    } else {
+        let end: u64 = end_s.parse().map_err(|_| ())?;
+        if end < start {
+            return Err(());
+        }
+        end.min(len - 1)
+    };
+    Ok(ByteRange {
+        start,
+        end_inclusive,
+    })
+}
+
+fn range_not_satisfiable(len: u64) -> Result<Response<Body>, AppError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_RANGE,
+        format!("bytes */{len}")
+            .parse()
+            .unwrap_or_else(|_| HeaderValue::from_static("bytes */0")),
+    );
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    let mut ret = Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .body(Body::empty())
+        .unwrap();
+    *(ret.headers_mut()) = headers;
+    Ok(ret)
+}
+
+fn media_response_headers(path: &FsPath, content_length: u64) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.typed_insert(ContentType::from(mime_for_path(path)));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        header::CONTENT_LENGTH,
+        content_length.to_string().parse().unwrap(),
+    );
+    headers
+}
+
+/// Inline playback with `Accept-Ranges`. Photos keep `send_file(..., true)`.
+pub async fn send_media_range(
+    full_path: PathBuf,
+    request_headers: &HeaderMap,
+) -> Result<Response<Body>, AppError> {
+    if !full_path.exists() || full_path.is_dir() {
+        return Err(AppError::NotFound(trf(
+            "en",
+            "error.resource_not_found",
+            &[("value", full_path.display().to_string())],
+        )));
+    }
+    let metadata = tokio::fs::metadata(&full_path).await.map_err(|_| {
+        AppError::NotFound(trf(
+            "en",
+            "error.resource_not_found",
+            &[("value", full_path.display().to_string())],
+        ))
+    })?;
+    let len = metadata.len();
+    let range_header = request_headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    let file = tokio::fs::File::open(&full_path).await.map_err(|_| {
+        AppError::NotFound(trf(
+            "en",
+            "error.resource_not_found",
+            &[("value", full_path.display().to_string())],
+        ))
+    })?;
+
+    if let Some(spec) = range_header {
+        let range = match parse_byte_range(&spec, len) {
+            Ok(range) => range,
+            Err(()) => return range_not_satisfiable(len),
+        };
+        let mut file = file;
+        file.seek(std::io::SeekFrom::Start(range.start))
+            .await
+            .map_err(|e| AppError::Unknown(format!("seek video failed: {e}")))?;
+        let take_len = range.end_inclusive - range.start + 1;
+        let mut headers = media_response_headers(&full_path, take_len);
+        headers.insert(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{len}", range.start, range.end_inclusive)
+                .parse()
+                .map_err(|e| AppError::Unknown(format!("invalid content range header: {e}")))?,
+        );
+        let stream = ReaderStream::new(file.take(take_len));
+        let mut ret = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .body(Body::from_stream(stream))
+            .unwrap();
+        *(ret.headers_mut()) = headers;
+        return Ok(ret);
+    }
+
+    let headers = media_response_headers(&full_path, len);
+    let mut ret = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from_stream(ReaderStream::new(file)))
         .unwrap();
     *(ret.headers_mut()) = headers;
     Ok(ret)
@@ -980,6 +1153,13 @@ pub async fn web_egui_file(
 pub struct DownloadQuery {
     #[serde(default)]
     owner: Option<String>,
+    /// `play=1` serves a video inline with HTTP Range. Photos ignore it.
+    #[serde(default)]
+    play: Option<String>,
+}
+
+fn wants_inline_playback(play: Option<&str>) -> bool {
+    matches!(play, Some("1") | Some("true") | Some("yes"))
 }
 
 #[named]
@@ -988,6 +1168,7 @@ pub async fn api_download_file(
     token: Token,
     path: Option<Path<String>>,
     query: Query<DownloadQuery>,
+    headers: HeaderMap,
     Extension(cfg): Extension<Arc<AppState>>,
 ) -> Result<Response<Body>, AppError> {
     eprintln!("{} called: {:?}", function_name!(), path);
@@ -1014,7 +1195,14 @@ pub async fn api_download_file(
     };
 
     let full_path = into_host_path_safely(effective_root.as_path(), &path_str)?;
-    send_file(full_path, false).await
+    if wants_inline_playback(query.play.as_deref())
+        && crate::backend::album::media::is_video_path(&full_path)
+    {
+        return send_media_range(full_path, &headers).await;
+    }
+    // Attachment disposition: iOS Safari would otherwise open the photo inline in a
+    // fullscreen preview with no way back instead of downloading.
+    send_file(full_path, true).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1487,3 +1675,35 @@ pub async fn api_upload_feed(
 }
 
 // Re-export DefaultBodyLimit for main.rs route configuration
+
+#[cfg(test)]
+mod range_tests {
+    use super::parse_byte_range;
+
+    #[test]
+    fn parses_open_closed_and_suffix_ranges() {
+        let open = parse_byte_range("bytes=0-", 1000).unwrap();
+        assert_eq!(open.start, 0);
+        assert_eq!(open.end_inclusive, 999);
+
+        let closed = parse_byte_range("bytes=100-199", 1000).unwrap();
+        assert_eq!(closed.start, 100);
+        assert_eq!(closed.end_inclusive, 199);
+
+        let clamped = parse_byte_range("bytes=900-5000", 1000).unwrap();
+        assert_eq!(clamped.end_inclusive, 999);
+
+        let suffix = parse_byte_range("bytes=-200", 1000).unwrap();
+        assert_eq!(suffix.start, 800);
+        assert_eq!(suffix.end_inclusive, 999);
+    }
+
+    #[test]
+    fn rejects_unsatisfiable_ranges() {
+        assert!(parse_byte_range("bytes=1000-", 1000).is_err());
+        assert!(parse_byte_range("bytes=20-10", 1000).is_err());
+        assert!(parse_byte_range("bytes=-", 1000).is_err());
+        assert!(parse_byte_range("items=0-1", 1000).is_err());
+        assert!(parse_byte_range("bytes=0-", 0).is_err());
+    }
+}

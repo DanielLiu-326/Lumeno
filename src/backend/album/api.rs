@@ -19,7 +19,7 @@ use crate::backend::i18n::{RequestLocale, tr, trf};
 use crate::backend::tasks::{Task, TaskStatus};
 
 use super::helpers::*;
-use super::media::is_image_path;
+use super::media::{is_album_media_path, is_image_path};
 use super::types::*;
 
 // ── Album API handlers ───────────────────────────────────────────────────────
@@ -1192,7 +1192,7 @@ pub async fn api_albums_photo_meta(
             )));
         }
     }
-    if !photo.exists() || !photo.is_file() || !is_image_path(photo.as_path()) {
+    if !photo.exists() || !photo.is_file() || !is_album_media_path(photo.as_path()) {
         return Err(AppError::BadRequest(tr(
             locale.as_str(),
             "error.invalid_image_path",

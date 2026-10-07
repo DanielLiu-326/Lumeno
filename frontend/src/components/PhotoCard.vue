@@ -8,6 +8,7 @@ import {
   OVERLAY_SLOTS,
   normalizeColorLabels,
 } from "../utils/photoCardLayout.js";
+import { isVideoPhoto } from "../utils/mediaKind.js";
 
 const props = defineProps({
   photo: { type: Object, required: true },
@@ -166,6 +167,8 @@ function slotFields(slotId) {
   return visibleFields(props.layout.slots?.[slotId] || []);
 }
 
+const isVideo = computed(() => isVideoPhoto(props.photo));
+
 function displayText(key) {
   const photo = props.photo;
   if (key === "name") return photo.name || "";
@@ -218,6 +221,17 @@ function displayText(key) {
           <path d="M0 138 L52 92 L86 118 L128 70 L200 132 V200 H0 Z" :fill="isDark ? '#44403c' : '#a8a29e'" />
           <path d="M0 162 L70 118 L110 148 L200 108 V200 H0 Z" :fill="isDark ? '#292524' : '#78716c'" opacity="0.85" />
         </svg>
+      </div>
+
+      <div
+        v-if="isVideo"
+        class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"
+      >
+        <span class="flex h-9 w-9 items-center justify-center rounded-full bg-black/55 text-white shadow-sm">
+          <svg viewBox="0 0 24 24" class="ml-0.5 h-4 w-4" fill="currentColor" aria-hidden="true">
+            <path d="M8 5.5v13l11-6.5-11-6.5z" />
+          </svg>
+        </span>
       </div>
 
       <div

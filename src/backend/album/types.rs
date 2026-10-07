@@ -263,6 +263,8 @@ pub struct ExifCacheEntry {
     pub(crate) width: u32,
     #[serde(default)]
     pub(crate) height: u32,
+    #[serde(default)]
+    pub(crate) duration_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -284,6 +286,8 @@ pub struct AlbumPhotoItem {
     pub(crate) width: u32,
     #[serde(default)]
     pub(crate) height: u32,
+    #[serde(default)]
+    pub(crate) duration_ms: u64,
     pub(crate) rating: u8,
     #[serde(default, deserialize_with = "de_color_labels::deserialize")]
     pub(crate) color_label: Vec<ColorLabel>,

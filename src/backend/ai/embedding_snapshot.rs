@@ -218,8 +218,7 @@ async fn snapshot_commit_tmp(tmp: &Path, dest: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::backend::ai::album_cache::AlbumAiCache;
+    use crate::backend::ai::album_cache::{AlbumAiCache, EmbeddingCacheFile};
 
     #[tokio::test]
     async fn snapshot_roundtrip_from_json_caches() {

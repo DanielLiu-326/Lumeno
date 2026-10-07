@@ -9,7 +9,8 @@
 //! Each enabled predicate is combined with the result so far:
 //!   first clause is the seed (`and_not` negates it; `and` / `or` are the predicate);
 //!   later clauses apply `acc ∧ P`, `acc ∨ P`, or `acc ∧ ¬P`.
-//! AI text clauses are skipped here and handled by the caller.
+//! A semantic text clause with an empty query is an always-true predicate.
+//! A non-empty query is skipped here and handled by the caller.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -152,6 +153,11 @@ impl FilterRegistry {
                 if let Some(mut effect) = kind.compile_ai_text(&clause.value)? {
                     effect.logic = clause.logic;
                     out.push(CompiledClause::AiText(effect));
+                } else if let Some(pred) = kind.compile(&clause.value)? {
+                    out.push(CompiledClause::Pred {
+                        logic: clause.logic,
+                        pred,
+                    });
                 }
                 continue;
             }
@@ -200,7 +206,8 @@ pub fn extract_ai_text_effects(compiled: &[CompiledClause]) -> Vec<AiTextEffect>
         .collect()
 }
 
-/// Left-to-right chain over compiled photo predicates (AI text skipped).
+/// Left-to-right chain over compiled photo predicates.
+/// Non-empty semantic text is skipped; an empty query is a normal predicate.
 pub fn matches_compiled(
     photo: &dyn FilterablePhoto,
     compiled: &[CompiledClause],
@@ -716,9 +723,27 @@ impl PhotoPredicate for PersonPred {
     }
 }
 
-// ── text (AI semantic search — handled by caller) ────────────────────────────
+// ── text (empty query is always true; a query is handled by the caller) ─────
 
 struct AiTextKind;
+
+/// Blank semantic text matches every photo and never loads the text model.
+struct AlwaysTrue;
+
+impl PhotoPredicate for AlwaysTrue {
+    fn matches(&self, _: &dyn FilterablePhoto, _: &FilterEvalCtx) -> bool {
+        true
+    }
+}
+
+fn ai_text_query(value: &Value) -> String {
+    value
+        .get("q")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
 
 impl FilterKind for AiTextKind {
     fn key(&self) -> &'static str {
@@ -727,16 +752,14 @@ impl FilterKind for AiTextKind {
     fn is_ai_text(&self) -> bool {
         true
     }
-    fn compile(&self, _value: &Value) -> Result<Option<Arc<dyn PhotoPredicate>>, AppError> {
+    fn compile(&self, value: &Value) -> Result<Option<Arc<dyn PhotoPredicate>>, AppError> {
+        if ai_text_query(value).is_empty() {
+            return Ok(Some(Arc::new(AlwaysTrue)));
+        }
         empty_ok()
     }
     fn compile_ai_text(&self, value: &Value) -> Result<Option<AiTextEffect>, AppError> {
-        let query = value
-            .get("q")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let query = ai_text_query(value);
         if query.is_empty() {
             return Ok(None);
         }
@@ -936,5 +959,36 @@ mod tests {
                 ("tags", FilterLogic::And),
             ]
         );
+    }
+
+    #[test]
+    fn empty_ai_text_is_true_and_does_not_become_an_effect() {
+        let registry = FilterRegistry::global();
+        let empty: Vec<FilterClause> = serde_json::from_value(serde_json::json!([
+            { "type": "rating", "logic": "and", "enabled": true, "value": { "ratings": [5] } },
+            { "type": "text", "logic": "or", "enabled": true, "value": { "q": "  " } }
+        ]))
+        .unwrap();
+        let compiled = registry.compile_clauses(&empty, "en").unwrap();
+        assert!(extract_ai_text_effects(&compiled).is_empty());
+        // Rating 5 misses DummyPhoto; blank text is true, so false ∨ true.
+        assert!(eval(&compiled));
+
+        let negated: Vec<FilterClause> = serde_json::from_value(serde_json::json!([
+            { "type": "text", "logic": "and_not", "enabled": true, "value": { "q": "" } }
+        ]))
+        .unwrap();
+        let compiled = registry.compile_clauses(&negated, "en").unwrap();
+        assert!(!eval(&compiled));
+
+        let query: Vec<FilterClause> = serde_json::from_value(serde_json::json!([
+            { "type": "text", "logic": "and", "enabled": true, "value": { "q": "海边" } }
+        ]))
+        .unwrap();
+        let compiled = registry.compile_clauses(&query, "en").unwrap();
+        let effects = extract_ai_text_effects(&compiled);
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].query, "海边");
+        assert!(matches!(compiled[0], CompiledClause::AiText(_)));
     }
 }

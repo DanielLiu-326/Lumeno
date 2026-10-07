@@ -19,7 +19,8 @@ use crate::backend::tasks::{
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::media::{
-    collect_album_images, exif_cache_key, find_xmp_sidecar, is_image_path, is_raw_path,
+    collect_album_media, exif_cache_key, find_xmp_sidecar, is_image_path, is_raw_path,
+    is_video_path,
 };
 use super::types::*;
 
@@ -605,10 +606,55 @@ pub(crate) fn fallback_date_from_metadata(metadata: &std::fs::Metadata) -> Strin
         .unwrap_or_else(|| "1970-01-01".to_string())
 }
 
+/// Seconds from an exiftool Duration value (`12.5`, `00:01:02.50`, `1:02`).
+pub(crate) fn parse_duration_ms(raw: &str) -> u64 {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    if !trimmed.contains(':')
+        && let Ok(secs) = trimmed.parse::<f64>()
+        && secs > 0.0
+    {
+        return (secs * 1000.0).round() as u64;
+    }
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    let secs = match parts.as_slice() {
+        [h, m, sec] => {
+            h.parse::<f64>().unwrap_or(0.0) * 3600.0
+                + m.parse::<f64>().unwrap_or(0.0) * 60.0
+                + sec.parse::<f64>().unwrap_or(0.0)
+        }
+        [m, sec] => m.parse::<f64>().unwrap_or(0.0) * 60.0 + sec.parse::<f64>().unwrap_or(0.0),
+        _ => return 0,
+    };
+    if secs <= 0.0 {
+        0
+    } else {
+        (secs * 1000.0).round() as u64
+    }
+}
+
+fn duration_ms_from_exif_value(value: Option<&Value>) -> u64 {
+    match value {
+        Some(Value::Number(n)) => {
+            let secs = n.as_f64().unwrap_or(0.0);
+            if secs > 0.0 {
+                (secs * 1000.0).round() as u64
+            } else {
+                0
+            }
+        }
+        Some(Value::String(s)) => parse_duration_ms(s),
+        _ => 0,
+    }
+}
+
 /// Extract EXIF from RAW files via exiftool CLI (the `exif` crate doesn't support most RAW formats).
-pub(crate) async fn ensure_exif_via_exiftool(source: &FsPath) -> ExifCacheEntry {
-    let output = tokio::process::Command::new("exiftool")
-        .arg("-json")
+/// Videos use the same tool for create date, frame size, and duration.
+pub(crate) async fn ensure_exif_via_exiftool(source: &FsPath, video: bool) -> ExifCacheEntry {
+    let mut cmd = tokio::process::Command::new("exiftool");
+    cmd.arg("-json")
         .arg("-DateTimeOriginal")
         .arg("-Make")
         .arg("-Model")
@@ -618,7 +664,16 @@ pub(crate) async fn ensure_exif_via_exiftool(source: &FsPath) -> ExifCacheEntry 
         .arg("-ExposureTime")
         .arg("-ISO")
         .arg("-ImageWidth")
-        .arg("-ImageHeight")
+        .arg("-ImageHeight");
+    if video {
+        cmd.arg("-CreateDate")
+            .arg("-MediaCreateDate")
+            .arg("-TrackCreateDate")
+            .arg("-SourceImageWidth")
+            .arg("-SourceImageHeight")
+            .arg("-Duration#");
+    }
+    let output = cmd
         .arg(source)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -650,7 +705,24 @@ pub(crate) async fn ensure_exif_via_exiftool(source: &FsPath) -> ExifCacheEntry 
             .unwrap_or_default()
     };
 
-    let datetime_raw = get("DateTimeOriginal");
+    let datetime_raw = if video {
+        let mut found = String::new();
+        for key in [
+            "CreateDate",
+            "MediaCreateDate",
+            "DateTimeOriginal",
+            "TrackCreateDate",
+        ] {
+            let value = get(key);
+            if !value.is_empty() {
+                found = value;
+                break;
+            }
+        }
+        found
+    } else {
+        get("DateTimeOriginal")
+    };
     let date = parse_exif_datetime_to_date(&datetime_raw).unwrap_or_default();
     // Normalize "2026:04:04 17:27:57" to "2026-04-04 17:27:57" for display consistency
     let datetime_display = if datetime_raw.len() >= 10 && &datetime_raw[4..5] == ":" {
@@ -695,6 +767,14 @@ pub(crate) async fn ensure_exif_via_exiftool(source: &FsPath) -> ExifCacheEntry 
     };
 
     let iso = get("ISO").parse::<u32>().ok();
+    let mut width = get("ImageWidth").parse().unwrap_or(0);
+    let mut height = get("ImageHeight").parse().unwrap_or(0);
+    if width == 0 {
+        width = get("SourceImageWidth").parse().unwrap_or(0);
+    }
+    if height == 0 {
+        height = get("SourceImageHeight").parse().unwrap_or(0);
+    }
 
     ExifCacheEntry {
         date,
@@ -706,8 +786,13 @@ pub(crate) async fn ensure_exif_via_exiftool(source: &FsPath) -> ExifCacheEntry 
         aperture,
         shutter_speed,
         iso,
-        width: get("ImageWidth").parse().unwrap_or(0),
-        height: get("ImageHeight").parse().unwrap_or(0),
+        width,
+        height,
+        duration_ms: if video {
+            duration_ms_from_exif_value(obj.get("Duration"))
+        } else {
+            0
+        },
     }
 }
 
@@ -734,10 +819,11 @@ pub(crate) async fn ensure_exif_cached(
     }
 
     let source_for_block = source.to_path_buf();
+    let is_video = is_video_path(source);
     let is_raw = is_raw_path(source);
-    let exif_info = if is_raw {
-        // Use exiftool CLI for RAW files (the exif crate doesn't support most RAW formats)
-        ensure_exif_via_exiftool(source).await
+    let exif_info = if is_video || is_raw {
+        // Videos and RAW both go through exiftool. The image crate cannot read them.
+        ensure_exif_via_exiftool(source, is_video).await
     } else {
         tokio::task::spawn_blocking(move || -> ExifCacheEntry {
             let (width, height) = image::image_dimensions(&source_for_block).unwrap_or((0, 0));
@@ -807,6 +893,7 @@ pub(crate) async fn ensure_exif_cached(
                 iso,
                 width,
                 height,
+                duration_ms: 0,
             }
         })
         .await
@@ -983,7 +1070,7 @@ pub(crate) async fn rebuild_album_index(
     }
 
     let mut photos_paths = Vec::new();
-    collect_album_images(album_dir.as_path(), &mut photos_paths).await;
+    collect_album_media(album_dir.as_path(), &mut photos_paths).await;
     let total = photos_paths.len();
 
     if let Some(base) = task_base {
@@ -1081,6 +1168,7 @@ pub(crate) async fn rebuild_album_index(
                     iso: exif_info.iso,
                     width: exif_info.width,
                     height: exif_info.height,
+                    duration_ms: exif_info.duration_ms,
                     rating: software_meta.rating,
                     color_label: software_meta.color_label,
                     tags,
@@ -1190,7 +1278,7 @@ pub(crate) async fn import_album_files(
     let mut all_images = Vec::new();
     for source in sources {
         let full = into_host_path_safely(root_path, source)?;
-        collect_album_images(full.as_path(), &mut all_images).await;
+        collect_album_media(full.as_path(), &mut all_images).await;
     }
 
     if let Some(base) = task_base {
@@ -1663,5 +1751,20 @@ mod cover_path_tests {
             normalize_album_cover_path("  ", "Trip", "Trip").as_deref(),
             Some("")
         );
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::parse_duration_ms;
+
+    #[test]
+    fn parses_seconds_and_clock_times() {
+        assert_eq!(parse_duration_ms("12.5"), 12500);
+        assert_eq!(parse_duration_ms("1:02"), 62000);
+        assert_eq!(parse_duration_ms("1:02:03"), 3723000);
+        assert_eq!(parse_duration_ms("00:00:01.5"), 1500);
+        assert_eq!(parse_duration_ms(""), 0);
+        assert_eq!(parse_duration_ms("0"), 0);
     }
 }

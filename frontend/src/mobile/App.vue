@@ -167,6 +167,41 @@ function repaintMobileApp() {
   app.addEventListener("animationend", () => app.classList.remove("is-repaint"), { once: true });
 }
 
+// iOS rasters the first screen lazily while the boot splash still covers it
+// and keeps that low-quality raster afterwards (reads as a gaussian blur on
+// the top region). Only a real box rebuild clears it - the same reason an
+// edge-swipe back (which re-inserts the KeepAlive screen node) fixes it while
+// a plain repaint does not. Drop each resting screen's box for two frames so
+// WebKit re-rasters its content into the page host layer, then restore it.
+function sharpenScreenBoxes() {
+  const host = document.querySelector(".mobile-page-host");
+  if (!host) return;
+  const screens = [];
+  for (const el of host.children) {
+    if (el instanceof HTMLElement && el.style.display !== "contents") {
+      el.style.display = "contents";
+      screens.push(el);
+    }
+  }
+  if (!screens.length) return;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      for (const el of screens) el.style.display = "";
+    });
+  });
+}
+
+function sharpenAndRepaintMobileApp() {
+  requestAnimationFrame(() => {
+    sharpenScreenBoxes();
+    repaintMobileApp();
+  });
+}
+
+function onLumenoBooted() {
+  window.setTimeout(sharpenScreenBoxes, 480);
+}
+
 function releaseLayer(el, settled) {
   if (!settled.value && !el?.classList.contains("is-settled")) return;
   settled.value = false;
@@ -176,7 +211,17 @@ function releaseLayer(el, settled) {
 
 function onLayerTransitionEnd(event) {
   if (event.target !== event.currentTarget || event.propertyName !== "transform") return;
-  settleLayer(event.currentTarget);
+  const layer = event.currentTarget;
+  if (layer instanceof Element && !layer.classList.contains("is-open")) {
+    // A closing layer re-exposes the screen behind it; WebKit can keep a soft
+    // raster of that region, which reads as a gaussian blur around the top bar.
+    requestAnimationFrame(() => {
+      sharpenScreenBoxes();
+      repaintMobileApp();
+    });
+    return;
+  }
+  settleLayer(layer);
 }
 
 function armLayerSettle(openRef, elRef) {
@@ -494,11 +539,18 @@ function toggleTheme() {
   applyTheme(isDark.value ? "light" : "dark", true);
 }
 
-function syncAppViewport() {
+let viewportSettleTimer = 0;
+
+function syncAppViewport(settle = true) {
   const { height, top } = layoutViewportSize();
   document.documentElement.style.setProperty("--app-height", `${height}px`);
   document.documentElement.style.setProperty("--app-top", `${top}px`);
   scheduleSafeAreaSync();
+  if (!settle) return;
+  // iOS can report a momentary short innerHeight while bars or the keyboard
+  // settle; re-measure once so the app (tab bar, sheets) fills the bottom.
+  window.clearTimeout(viewportSettleTimer);
+  viewportSettleTimer = window.setTimeout(() => syncAppViewport(false), 350);
 }
 
 function openTasks() {
@@ -516,6 +568,25 @@ function closePhotoViewer() {
   ui.albumPanelRef?.closeDetail?.({ force: true });
   ui.viewerPhoto = null;
 }
+
+// WebKit keeps a soft raster of the swipe track while the viewer rests; the
+// delayed repaint drops it so the top bar does not read as blurred.
+function onViewerNav(dir) {
+  if (dir > 0) ui.albumPanelRef?.goDetailNext?.();
+  else ui.albumPanelRef?.goDetailPrev?.();
+  window.setTimeout(() => {
+    sharpenScreenBoxes();
+    repaintMobileApp();
+  }, 360);
+}
+
+watch(() => ui.viewerPhoto, (photo) => {
+  if (photo) return;
+  requestAnimationFrame(() => {
+    sharpenScreenBoxes();
+    repaintMobileApp();
+  });
+});
 
 function onViewerSave(payload) {
   app.updatePhotoMeta(payload);
@@ -642,6 +713,12 @@ onMounted(() => {
   document.addEventListener("selectstart", preventSelectStart);
   document.addEventListener("dragstart", preventImageDrag);
   window.addEventListener("popstate", onHistoryPop, true);
+  // The first screen is rastered while the splash still covers it; once the
+  // splash is gone, rebuild its box so the top region gets a clean raster.
+  window.addEventListener("lumeno:booted", onLumenoBooted, { once: true });
+  if (!document.getElementById("boot-splash")) {
+    window.setTimeout(sharpenScreenBoxes, 480);
+  }
   window.addEventListener("resize", syncAppViewport);
   window.addEventListener("orientationchange", syncAppViewport);
   window.addEventListener("pageshow", syncAppViewport);
@@ -665,6 +742,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("selectstart", preventSelectStart);
   document.removeEventListener("dragstart", preventImageDrag);
   window.removeEventListener("popstate", onHistoryPop, true);
+  window.removeEventListener("lumeno:booted", onLumenoBooted);
   window.removeEventListener("resize", syncAppViewport);
   window.removeEventListener("orientationchange", syncAppViewport);
   window.removeEventListener("pageshow", syncAppViewport);
@@ -673,6 +751,7 @@ onBeforeUnmount(() => {
   window.visualViewport?.removeEventListener("resize", syncAppViewport);
   window.visualViewport?.removeEventListener("scroll", syncAppViewport);
   if (toastTimer) clearTimeout(toastTimer);
+  window.clearTimeout(viewportSettleTimer);
 });
 </script>
 
@@ -695,7 +774,7 @@ onBeforeUnmount(() => {
     <div class="mobile-notch-cap" aria-hidden="true"></div>
     <div class="mobile-page-host relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden">
       <RouterView v-slot="{ Component, route: viewRoute }">
-        <Transition :name="pageTransition" :css="Boolean(pageTransition)">
+        <Transition :name="pageTransition" :css="Boolean(pageTransition)" @after-enter="sharpenAndRepaintMobileApp" @after-leave="sharpenAndRepaintMobileApp">
           <KeepAlive include="HomeScreen,AlbumsScreen,FilesScreen,MeScreen">
             <component :is="Component" :key="viewRoute.meta.tab || viewRoute.name" />
           </KeepAlive>
@@ -767,8 +846,8 @@ onBeforeUnmount(() => {
       :index-label="ui.viewerIndexLabel"
       :available-tags="app.albumAvailableTags"
       @close="closePhotoViewer"
-      @prev="ui.albumPanelRef?.goDetailPrev?.()"
-      @next="ui.albumPanelRef?.goDetailNext?.()"
+      @prev="onViewerNav(-1)"
+      @next="onViewerNav(1)"
       @save="onViewerSave"
       @delete="onViewerDelete"
       @set-cover="onViewerSetCover"

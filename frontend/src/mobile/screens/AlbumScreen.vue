@@ -272,7 +272,7 @@ function resetThumbnailSize() {
             <input
               ref="searchInputRef"
               v-model="searchText"
-              type="search"
+              type="text"
               enterkeyhint="search"
               autocomplete="off"
               class="mobile-search-input"

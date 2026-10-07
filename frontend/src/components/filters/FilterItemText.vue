@@ -26,7 +26,8 @@ function onApply() {
   <div class="flex flex-col gap-1.5">
     <input
       :value="modelValue.q || ''"
-      type="search"
+      type="text"
+      autocomplete="off"
       :placeholder="t('filter.textPlaceholder')"
       class="w-full rounded-lg border px-2 py-1.5 text-xs app-control"
       :class="isDark

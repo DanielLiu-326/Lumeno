@@ -51,7 +51,7 @@ export function markImageReady(url) {
 /** Fire-and-forget preload. Does not delay display; just fills the cache. */
 export function prefetch(url, priority = "auto") {
   if (!url || loadedUrls.has(url)) return;
-  enqueue(url, undefined, { priority }).catch(() => {});
+  enqueue(url, undefined, { priority }).catch(() => { });
 }
 
 export function prefetchMany(urls, priority = "auto") {

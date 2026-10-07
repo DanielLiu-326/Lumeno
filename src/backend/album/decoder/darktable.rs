@@ -181,14 +181,14 @@ async fn run_darktable_cli(path: &Path, options: DecodeOptions) -> Result<Vec<u8
     Ok(bytes)
 }
 
-/// Export via darktable-cli with required XMP, optional max width and JPEG quality.
+/// Export via darktable-cli with optional XMP grading, max width and JPEG quality.
 ///
 /// Isolated `--configdir` starts with empty `metadata_flags` (no EXIF). Explicitly set
 /// darktable's default export metadata flags so EXIF/geo/tags are written into the file:
 /// `DT_META_EXIF|METADATA|GEOTAG|TAG|DT_HISTORY` = `0x2f`.
 pub async fn darktable_export(
     source: &Path,
-    xmp: &Path,
+    xmp: Option<&Path>,
     output: &Path,
     out_ext: &str,
     quality: u32,
@@ -200,7 +200,11 @@ pub async fn darktable_export(
 
     let started = std::time::Instant::now();
     let mut cmd = tokio::process::Command::new("darktable-cli");
-    cmd.arg(source).arg(xmp).arg(output);
+    cmd.arg(source);
+    if let Some(xmp) = xmp {
+        cmd.arg(xmp);
+    }
+    cmd.arg(output);
     if max_width > 0 {
         cmd.arg("--width").arg(max_width.to_string());
     }

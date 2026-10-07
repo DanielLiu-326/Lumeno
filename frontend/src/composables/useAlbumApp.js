@@ -5,6 +5,7 @@ import { compareRelativePaths, encodePath, joinPath, prettyPath, normalizeBrowse
 import { compileAlbumFilterClauses, loadFilterItemsFromStorage, partitionFilterClauses } from "../utils/filterDefs.js";
 import { defaultWallpaper, normalizeWallpaper } from "../utils/wallpaper.js";
 import { defaultAccent, loadCachedAccent, normalizeAccent } from "../utils/accent.js";
+import { downloadFileByUrl } from "../utils/downloadFile.js";
 
 const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 100;
@@ -508,8 +509,12 @@ export function useAlbumApp() {
             return;
         }
 
+        // Blob download: a plain navigation/window.open hands the file to
+        // Safari's inline viewer on iOS even with an attachment header.
         const path = encodePath(entry.fullPath);
-        window.open(`/api/download/${path}`, "_blank", "noopener");
+        downloadFileByUrl(`/api/download/${path}`, entry.name).catch((e) => {
+            alert(e.message || "Download failed");
+        });
     }
 
     function setViewMode(mode) {
@@ -1037,11 +1042,11 @@ export function useAlbumApp() {
 
         const clauses = [...(albumFilters.clauses || [])];
         const { aiText, metadata } = partitionFilterClauses(clauses);
-        if (aiText.length > 0) {
-            const primary = aiText[0];
+        const text = String(aiText[0]?.value?.q || "").trim();
+        if (text) {
             await applyAiTextFilterToPhotos(
-                String(primary.value?.q || "").trim(),
-                Number(primary.value?.minScore) || 0,
+                text,
+                Number(aiText[0].value?.minScore) || 0,
                 metadata,
                 fetchId,
             );

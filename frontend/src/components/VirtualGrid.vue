@@ -1965,9 +1965,9 @@ function onScroll(offset) {
     (vl.scrollSize ?? 0) - offset - (vl.viewportSize ?? 0) < props.bottomThreshold
   ), false);
   if (!nearBottom) return;
-  nearBottomPending = true;
-  setTimeout(() => { nearBottomPending = false; }, 300);
-  emit("scroll-near-bottom");
+    nearBottomPending = true;
+    setTimeout(() => { nearBottomPending = false; }, 300);
+    emit("scroll-near-bottom");
 }
 </script>
 
@@ -1991,19 +1991,19 @@ function onScroll(offset) {
     </div>
 
     <div ref="flipLayerRef" class="virtual-grid-zoom-layer absolute inset-0 overflow-visible">
-      <VList
+    <VList
         v-if="!paused"
         :key="listLayoutKey"
-        ref="listRef"
-        :data="rows"
+      ref="listRef"
+      :data="rows"
         :item-size="listItemSize"
         class="virtual-grid-scroller absolute inset-0 app-scrollbar"
         :class="zooming || livePinching ? 'pointer-events-none' : ''"
         :buffer-size="listBufferPx"
-        @scroll="onScroll"
-      >
-        <template #default="{ item: row }">
-          <div
+      @scroll="onScroll"
+    >
+      <template #default="{ item: row }">
+        <div
             v-if="row.kind === 'inset'"
             aria-hidden="true"
             :style="{ height: `${row.height}px` }"
@@ -2012,17 +2012,17 @@ function onScroll(offset) {
             v-else
             :key="`${row.startIndex}:${colCount}:${headRemainder}`"
             :class="liveGridClass"
-            :style="rowGapPx > 0 ? { paddingBottom: rowGapPx + 'px' } : undefined"
-          >
-            <slot
-              v-for="(item, colIdx) in row.items"
-              :key="getKey(item)"
-              :item="item"
-              :index="row.startIndex + colIdx"
-            />
-          </div>
-        </template>
-      </VList>
+          :style="rowGapPx > 0 ? { paddingBottom: rowGapPx + 'px' } : undefined"
+        >
+          <slot
+            v-for="(item, colIdx) in row.items"
+            :key="getKey(item)"
+            :item="item"
+            :index="row.startIndex + colIdx"
+          />
+        </div>
+      </template>
+    </VList>
     </div>
     <div
       ref="ghostHostRef"
@@ -2041,17 +2041,26 @@ function onScroll(offset) {
   pointer-events: none;
 }
 
+/* Keep the grid unpromoted at rest: iOS holds a soft raster of resting
+   composited layers, and the top of the first screen then reads as blurred
+   until the screen is remounted. Promote only while a zoom animation runs. */
 .virtual-grid-zoom-layer {
-  backface-visibility: hidden;
+    backface-visibility: visible;
 }
 
 .virtual-grid-zoom-overlay {
-  backface-visibility: hidden;
+    backface-visibility: visible;
 }
 
 .virtual-grid-zoom-overlay-board {
-  transform-origin: 0 0;
-  backface-visibility: hidden;
+    transform-origin: 0 0;
+    backface-visibility: visible;
+}
+
+.virtual-grid-zooming .virtual-grid-zoom-layer,
+.virtual-grid-zooming .virtual-grid-zoom-overlay,
+.virtual-grid-zooming .virtual-grid-zoom-overlay-board {
+    backface-visibility: hidden;
 }
 
 .virtual-grid-scroller {

@@ -368,13 +368,9 @@ pub(crate) async fn attach_album_index_metadata(
 
     for ((owner, album), slots) in groups {
         let root = cfg.user_root_path(&owner);
-        let Ok(Some(index)) = load_existing_album_index(
-            cfg.data_path.as_path(),
-            root.as_path(),
-            &owner,
-            &album,
-        )
-        .await
+        let Ok(Some(index)) =
+            load_existing_album_index(cfg.data_path.as_path(), root.as_path(), &owner, &album)
+                .await
         else {
             continue;
         };

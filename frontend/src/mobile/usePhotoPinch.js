@@ -35,6 +35,7 @@ export function usePhotoPinch({
   canSlideNext,
   canDismiss,
   isLocked,
+  allowPinch,
 } = {}) {
   const scale = ref(1);
   const x = ref(0);
@@ -274,11 +275,29 @@ export function usePhotoPinch({
     zoomAround(2.6, clientX - box.left, clientY - box.top, box);
   }
 
+  function videoControlsTouch(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLVideoElement)) return false;
+    const touch = event.touches?.[0] || event.changedTouches?.[0];
+    if (!touch) return false;
+    const rect = target.getBoundingClientRect();
+    return touch.clientY >= rect.bottom - 64;
+  }
+
+  function pinchAllowed() {
+    return !allowPinch || allowPinch();
+  }
+
   function onTouchStart(event) {
     if (isLocked?.()) return;
+    if (videoControlsTouch(event)) {
+      mode = "exempt";
+      return;
+    }
     stopCoast();
     onSlideGrab?.();
     if (event.touches.length >= 2) {
+      if (!pinchAllowed()) return;
       event.preventDefault();
       beginPinch(event);
       return;
@@ -303,8 +322,10 @@ export function usePhotoPinch({
 
   function onTouchMove(event) {
     if (isLocked?.()) return;
+    if (mode === "exempt") return;
+    if (event.touches.length >= 2 && !pinchAllowed()) return;
+    event.preventDefault();
     if (event.touches.length >= 2) {
-      event.preventDefault();
       if (mode !== "pinch") beginPinch(event);
       else applyPinch(event);
       return;
@@ -365,6 +386,10 @@ export function usePhotoPinch({
   }
 
   function onTouchEnd(event) {
+    if (mode === "exempt") {
+      mode = "idle";
+      return;
+    }
     if (isLocked?.()) return;
     if (mode === "pinch") {
       endPinch(event);

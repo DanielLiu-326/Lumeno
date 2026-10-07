@@ -48,6 +48,7 @@ export function useSheetDrag(openRef, closeFn) {
   let extraH = 0;
   let settleTimer = 0;
   let moved = false;
+  let fromHandle = false;
 
   const panelStyle = computed(() => {
     const style = {
@@ -67,6 +68,13 @@ export function useSheetDrag(openRef, closeFn) {
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
     window.removeEventListener("pointercancel", onPointerUp);
+    window.removeEventListener("touchmove", onTouchMove);
+  }
+
+  function onTouchMove(event) {
+    if (!tracking) return;
+    if (!fromHandle && !dragging.value) return;
+    if (event.cancelable) event.preventDefault();
   }
 
   function clearSettle() {
@@ -82,6 +90,7 @@ export function useSheetDrag(openRef, closeFn) {
     dragY.value = 0;
     extraH = 0;
     moved = false;
+    fromHandle = false;
     unbind();
   }
 
@@ -168,9 +177,11 @@ export function useSheetDrag(openRef, closeFn) {
     if (event.target.closest?.(".mobile-sheet-view, .app-slider, .mobile-filter-swipe, .mobile-filter-card, .mobile-sort-row, .mobile-filter-add, .mobile-filter-editor, .mobile-sheet-scroll, .mobile-filter-collections, input, textarea, select")) return;
     const panel = event.currentTarget;
     if (inNestedScrollY(event.target, panel)) return;
+    const handle = event.target.closest?.(".mobile-sheet-handle") || null;
     tracking = true;
     dragging.value = false;
     moved = false;
+    fromHandle = Boolean(handle);
     pointerId = event.pointerId;
     panelEl = panel;
     startX = event.clientX;
@@ -184,6 +195,7 @@ export function useSheetDrag(openRef, closeFn) {
     window.addEventListener("pointermove", onPointerMove, { passive: false });
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
   }
 
   function onPointerMove(event) {
@@ -192,16 +204,11 @@ export function useSheetDrag(openRef, closeFn) {
     const dx = event.clientX - startX;
     if (!dragging.value) {
       if (Math.abs(dy) < 8) {
-        if (Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy)) reset();
+        if (!fromHandle && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy)) reset();
         return;
       }
       dragging.value = true;
       moved = true;
-      try {
-        panelEl?.setPointerCapture?.(event.pointerId);
-      } catch {
-        // Capture can fail if the pointer already ended.
-      }
     }
     lastY = event.clientY;
     lastAt = performance.now();

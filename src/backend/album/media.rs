@@ -8,6 +8,7 @@ use axum::{Extension, Json};
 use base64::Engine;
 use function_name::named;
 use image::GenericImageView;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha512};
@@ -27,6 +28,7 @@ use crate::backend::constants::{
     FACE_AVATAR_PAD, PREVIEW_THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE_MAX,
     THUMBNAIL_SIZE_MIN,
 };
+use crate::backend::files::send_file;
 use crate::backend::i18n::{RequestLocale, tr, trf};
 use crate::backend::tasks::{
     Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused,
@@ -87,6 +89,20 @@ pub fn is_image_path(path: &std::path::Path) -> bool {
         ext.to_ascii_lowercase().as_str(),
         "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "heic" | "heif" | "hif"
     ) || is_raw_path(path)
+}
+
+pub fn is_video_path(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mp4" | "m4v" | "mov" | "webm"
+    )
+}
+
+pub fn is_album_media_path(path: &std::path::Path) -> bool {
+    is_image_path(path) || is_video_path(path)
 }
 
 /// Path component of cache keys: relative to the app data root so bind-mount
@@ -255,6 +271,10 @@ pub(crate) async fn ensure_thumbnail_cached(
         return Ok(());
     }
 
+    if is_video_path(&source) {
+        return ensure_video_poster_cached(source, output, size, thumbnail_limiter).await;
+    }
+
     let use_darktable = generator == ThumbnailGenerator::Darktable && is_raw_path(&source);
     let limiter = if use_darktable {
         darktable_limiter
@@ -314,6 +334,80 @@ pub(crate) async fn ensure_thumbnail_cached(
         .map_err(|e| format!("thumbnail save join failed: {e}"))?
     }
     .await;
+    drop(permit);
+    result.map_err(AppError::Unknown)
+}
+
+async fn ffmpeg_frame_jpeg(source: &FsPath, seek: &str) -> Result<Vec<u8>, String> {
+    let output = tokio::process::Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-ss")
+        .arg(seek)
+        .arg("-i")
+        .arg(source)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-f")
+        .arg("image2pipe")
+        .arg("-vcodec")
+        .arg("mjpeg")
+        .arg("-")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("ffmpeg failed to start: {e}"))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if err.is_empty() {
+            return Err("ffmpeg frame extract failed".to_string());
+        }
+        return Err(format!("ffmpeg frame extract failed: {err}"));
+    }
+    Ok(output.stdout)
+}
+
+async fn extract_video_poster_jpeg(source: &FsPath) -> Result<Vec<u8>, String> {
+    match ffmpeg_frame_jpeg(source, "1").await {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => ffmpeg_frame_jpeg(source, "0").await,
+    }
+}
+
+async fn ensure_video_poster_cached(
+    source: PathBuf,
+    output: PathBuf,
+    size: u32,
+    thumbnail_limiter: &Arc<ConcurrencyLimiter>,
+) -> Result<(), AppError> {
+    let permit = thumbnail_limiter.acquire().await;
+    if output.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = output.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::Unknown(format!("create thumbnail cache dir failed: {e}")))?;
+    }
+    let jpeg = extract_video_poster_jpeg(&source)
+        .await
+        .map_err(AppError::Unknown)?;
+    let output_blocking = output.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let image = image::load_from_memory(&jpeg).map_err(|e| e.to_string())?;
+        save_decoded_outputs(
+            image,
+            output_blocking,
+            size,
+            image::ImageFormat::WebP,
+            None,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Unknown(format!("thumbnail save join failed: {e}")))?;
     drop(permit);
     result.map_err(AppError::Unknown)
 }
@@ -641,7 +735,7 @@ impl Task for BackgroundThumbnailTask {
                 if !is_user_visible_album_dir(&name) {
                     continue;
                 }
-                collect_album_images(entry.path().as_path(), &mut sources).await;
+                collect_album_media(entry.path().as_path(), &mut sources).await;
             }
         }
         if self.is_cancelled() {
@@ -897,7 +991,8 @@ pub async fn api_thumbnail(
             &[("value", path.clone())],
         )));
     }
-    if !is_image_path(source.as_path()) {
+    let video = is_video_path(source.as_path());
+    if !video && !is_image_path(source.as_path()) {
         return Err(AppError::BadRequest(tr(
             locale.as_str(),
             "error.not_previewable_image",
@@ -911,9 +1006,14 @@ pub async fn api_thumbnail(
         Some(s) => s.clamp(THUMBNAIL_SIZE_MIN, THUMBNAIL_SIZE_MAX),
         None => THUMBNAIL_SIZE,
     };
-    let generator = ThumbnailGenerator::parse(query.generator.as_deref()).ok_or_else(|| {
-        AppError::BadRequest(tr(locale.as_str(), "error.invalid_thumbnail_generator"))
-    })?;
+    // Video posters always use the still-image cache slot. darktable does not apply.
+    let generator = if video {
+        ThumbnailGenerator::Lumeno
+    } else {
+        ThumbnailGenerator::parse(query.generator.as_deref()).ok_or_else(|| {
+            AppError::BadRequest(tr(locale.as_str(), "error.invalid_thumbnail_generator"))
+        })?
+    };
     let metadata = tokio::fs::metadata(&source)
         .await
         .map_err(|_| AppError::NotFound(source.display().to_string()))?;
@@ -1174,12 +1274,20 @@ pub struct ExportPayload {
     format: String,
     quality: Option<u32>,
     max_width: Option<u32>,
+    /// Apply XMP grading (darktable edit) when exporting. Defaults to true;
+    /// when true a sidecar must exist.
+    #[serde(default)]
+    apply_xmp: Option<bool>,
     #[serde(default)]
     owner: Option<String>,
 }
 
-/// POST /api/albums/export — Export a photo through darktable-cli with XMP, format & quality options.
-/// Returns the exported file as a download.
+/// POST /api/albums/export — Export a photo as a download.
+///
+/// With `apply_xmp` the image is graded through darktable-cli with its XMP sidecar.
+/// Without it, darktable is only used on demand: an unchanged format at full size
+/// streams the original file untouched, otherwise darktable-cli re-encodes
+/// (format / max width / quality) without the sidecar.
 #[named]
 pub async fn api_albums_export(
     locale: RequestLocale,
@@ -1216,8 +1324,14 @@ pub async fn api_albums_export(
         )));
     }
 
-    let xmp_path = find_xmp_sidecar(&source)
-        .ok_or_else(|| AppError::BadRequest(tr(locale.as_str(), "error.no_xmp_sidecar")))?;
+    let xmp_path = if payload.apply_xmp.unwrap_or(true) {
+        Some(
+            find_xmp_sidecar(&source)
+                .ok_or_else(|| AppError::BadRequest(tr(locale.as_str(), "error.no_xmp_sidecar")))?,
+        )
+    } else {
+        None
+    };
 
     // Validate and determine output extension
     let (out_ext, content_type) = match payload.format.to_ascii_lowercase().as_str() {
@@ -1236,6 +1350,33 @@ pub async fn api_albums_export(
     let quality = payload.quality.unwrap_or(95).clamp(1, 100);
     let max_width = payload.max_width.unwrap_or(0); // 0 = full size
 
+    // Download name from the original file
+    let stem = source.file_stem().unwrap_or_default().to_string_lossy();
+
+    // When grading is off and nothing needs converting (same format, full size),
+    // stream the original file untouched — no darktable pass at all.
+    if xmp_path.is_none() {
+        let src_ext = source
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let same_format = match (src_ext.as_str(), out_ext) {
+            ("jpg" | "jpeg", "jpg") | ("png", "png") | ("tif" | "tiff", "tiff")
+            | ("webp", "webp") => true,
+            _ => false,
+        };
+        if same_format && max_width == 0 {
+            return send_file(source, true).await;
+        }
+    }
+
+    let download_name = if xmp_path.is_some() {
+        format!("{stem}_edited.{out_ext}")
+    } else {
+        format!("{stem}.{out_ext}")
+    };
+
     // Unique temp output path
     let export_id = uuid::Uuid::new_v4().to_string();
     let export_dir = cfg.data_path.join("cache").join("exports");
@@ -1248,7 +1389,7 @@ pub async fn api_albums_export(
         let permit = cfg.darktable_limiter.acquire().await;
         darktable_export(
             &source,
-            &xmp_path,
+            xmp_path.as_deref(),
             &export_path,
             out_ext,
             quality,
@@ -1263,10 +1404,24 @@ pub async fn api_albums_export(
         .await
         .map_err(|e| AppError::Unknown(format!("read export file failed: {e}")))?;
     let _ = tokio::fs::remove_file(&export_path).await;
-
-    // Build download filename from original name
-    let stem = source.file_stem().unwrap_or_default().to_string_lossy();
-    let download_name = format!("{stem}_edited.{out_ext}");
+    // ASCII fallback plus filename* so non-ASCII (e.g. Chinese) names survive
+    // instead of failing HeaderValue::from_str.
+    let fallback_name: String = download_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && !c.is_control() && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let fallback_name = if fallback_name.trim_matches('_').is_empty() {
+        "export"
+    } else {
+        fallback_name.as_str()
+    };
+    let encoded_name = utf8_percent_encode(&download_name, NON_ALPHANUMERIC).to_string();
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1276,8 +1431,10 @@ pub async fn api_albums_export(
     );
     headers.insert(
         "Content-Disposition",
-        HeaderValue::from_str(&format!("attachment; filename=\"{download_name}\""))
-            .map_err(|e| AppError::Unknown(format!("invalid disposition header: {e}")))?,
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"{fallback_name}\"; filename*=UTF-8''{encoded_name}"
+        ))
+        .map_err(|e| AppError::Unknown(format!("invalid disposition header: {e}")))?,
     );
     headers.insert(
         "Content-Length",
@@ -1327,9 +1484,14 @@ pub async fn api_has_xmp(
 }
 
 #[async_recursion]
-pub(crate) async fn collect_album_images(path: &FsPath, out: &mut Vec<PathBuf>) {
+async fn collect_album_paths(path: &FsPath, out: &mut Vec<PathBuf>, videos: bool) {
     if path.is_file() {
-        if is_image_path(path) {
+        let include = if videos {
+            is_album_media_path(path)
+        } else {
+            is_image_path(path)
+        };
+        if include {
             out.push(path.to_path_buf());
         }
         return;
@@ -1342,8 +1504,16 @@ pub(crate) async fn collect_album_images(path: &FsPath, out: &mut Vec<PathBuf>) 
         return;
     };
     while let Ok(Some(entry)) = dir.next_entry().await {
-        collect_album_images(entry.path().as_path(), out).await;
+        collect_album_paths(entry.path().as_path(), out, videos).await;
     }
+}
+
+pub(crate) async fn collect_album_images(path: &FsPath, out: &mut Vec<PathBuf>) {
+    collect_album_paths(path, out, false).await;
+}
+
+pub(crate) async fn collect_album_media(path: &FsPath, out: &mut Vec<PathBuf>) {
+    collect_album_paths(path, out, true).await;
 }
 
 pub(crate) async fn collect_album_image_paths(path: &FsPath) -> Vec<PathBuf> {
@@ -1354,8 +1524,26 @@ pub(crate) async fn collect_album_image_paths(path: &FsPath) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_relative_path;
+    use super::{cache_relative_path, is_album_media_path, is_image_path, is_video_path};
     use std::path::PathBuf;
+
+    #[test]
+    fn video_extensions_are_album_media_but_not_images() {
+        let mp4 = PathBuf::from("clip.MP4");
+        let mov = PathBuf::from("clip.mov");
+        let webm = PathBuf::from("clip.webm");
+        let jpg = PathBuf::from("still.jpg");
+        let txt = PathBuf::from("notes.txt");
+        assert!(is_video_path(&mp4));
+        assert!(is_video_path(&mov));
+        assert!(is_video_path(&webm));
+        assert!(is_album_media_path(&mp4));
+        assert!(!is_image_path(&mp4));
+        assert!(is_image_path(&jpg));
+        assert!(is_album_media_path(&jpg));
+        assert!(!is_video_path(&jpg));
+        assert!(!is_album_media_path(&txt));
+    }
 
     #[test]
     fn owner_cache_dir_rejects_path_escape() {

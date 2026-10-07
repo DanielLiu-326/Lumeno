@@ -1414,8 +1414,9 @@ function expandDupGroup(group, index = 0) {
             <div class="mb-3 flex items-center gap-2">
               <input
                 v-model="query"
-                type="search"
+                type="text"
                 enterkeyhint="search"
+                autocomplete="off"
                 :placeholder="t('albums.textSearchPlaceholder')"
                 class="min-w-0 flex-1 rounded-xl border px-3 py-2 text-sm"
                 :class="isDark ? 'border-stone-700 bg-stone-950 text-stone-100' : 'border-stone-300 bg-white text-stone-900'"

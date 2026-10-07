@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { t } from "../../i18n/index.js";
 import { COLOR_LABELS } from "../../utils/photoCardLayout.js";
+import { downloadFileByUrl } from "../../utils/downloadFile.js";
+import { formatDurationMs, isVideoPhoto, playbackUrl } from "../../utils/mediaKind.js";
 import {
   IconArrowLeft, IconCamera, IconCheck, IconChevronLeft, IconChevronRight,
   IconChevronUp, IconDots, IconDownload, IconImage, IconPencil, IconSparkles,
@@ -99,13 +101,35 @@ const viewOpen = ref(false);
 const albumOpen = ref(false);
 const exportOpen = ref(false);
 const exporting = ref(false);
-const exportForm = ref({ format: "jpeg", quality: 95, maxWidth: 0 });
+const exportForm = ref({ format: "jpeg", quality: 95, maxWidth: 0, applyXmp: false });
+// Same format at full size with grading off: the backend sends the original
+// file directly, no darktable pass.
+const exportDirectCopy = computed(() => {
+  const photo = props.photo;
+  if (!photo || exportForm.value.applyXmp || exportForm.value.maxWidth) return false;
+  const srcExt = (photo.name.split(".").pop() || "").toLowerCase();
+  switch (exportForm.value.format) {
+    case "jpeg": return srcExt === "jpg" || srcExt === "jpeg";
+    case "png": return srcExt === "png";
+    case "tiff": return srcExt === "tif" || srcExt === "tiff";
+    case "webp": return srcExt === "webp";
+    default: return false;
+  }
+});
 let chromeTimer = null;
 let snapTimer = 0;
 let fromSlideCommit = false;
 let keepSlideOffset = false;
 let pageShifted = false;
 let infoStartY = 0;
+const videoRef = ref(null);
+const videoPlaying = ref(false);
+const videoUnplayable = ref(false);
+
+function pauseViewerVideo() {
+  videoPlaying.value = false;
+  videoRef.value?.pause?.();
+}
 
 const {
   zoomed: photoZoomed,
@@ -120,6 +144,7 @@ const {
   onTouchEnd: onPhotoTouchEnd,
 } = usePhotoPinch({
   isLocked: () => editing.value || dismissMode.value === "out",
+  allowPinch: () => !videoPlaying.value,
   canSlidePrev: () => !editing.value && (localStrip.value ? isSlidePhoto(localStrip.value[0]) : props.hasPrev),
   canSlideNext: () => !editing.value && (localStrip.value ? isSlidePhoto(localStrip.value[2]) : props.hasNext),
   canDismiss: () => !editing.value && dismissMode.value !== "out",
@@ -158,6 +183,7 @@ const {
   },
   onSlideStart() {
     interruptSnap();
+    pauseViewerVideo();
   },
   onSlideGrab() {
     interruptSnap();
@@ -168,6 +194,12 @@ const {
   onSlideEnd(info) {
     finishSlide(info);
   },
+});
+
+watch(stageRef, (el, _, onCleanup) => {
+  if (!el) return;
+  el.addEventListener("touchmove", onPhotoTouchMove, { passive: false });
+  onCleanup(() => el.removeEventListener("touchmove", onPhotoTouchMove));
 });
 
 const RAW_EXTS = new Set(["cr2", "cr3", "nef", "arw", "dng", "orf", "rw2", "raf", "pef", "srw"]);
@@ -243,8 +275,13 @@ function slideThumbSrc(item) {
   return isSlidePhoto(item) ? thumbSrc(item, 360) : "";
 }
 
-function slideFullSrc(item) {
+function slidePlaybackSrc(item) {
   if (!isSlidePhoto(item)) return "";
+  return playbackUrl(item.path, item.owner || photoOwner.value);
+}
+
+function slideFullSrc(item) {
+  if (!isSlidePhoto(item) || isVideoPhoto(item)) return "";
   // While the strip is moving/committing, keep neighbor URLs so Vue can reuse the same <img>.
   if (
     item.path === props.photo?.path
@@ -329,18 +366,26 @@ function srcIsReady(src) {
   return !!src && readyGen.value >= 0 && readySrcs.has(src);
 }
 
+const isCurrentVideo = computed(() => isVideoPhoto(props.photo));
+const durationLabel = computed(() => formatDurationMs(props.photo?.duration_ms));
+
 const moreActions = computed(() => {
+  const video = isCurrentVideo.value;
   const items = [
-    { id: "download", label: t("detail.downloadOriginal"), icon: IconDownload },
-    { id: "export", label: t("detail.downloadEdited"), icon: IconDownload, disabled: !hasXmp.value },
+    { id: "download", label: t("detail.download"), icon: IconDownload },
   ];
-  if (props.canWrite) {
+  if (!video) {
+    items.push({ id: "export", label: t("detail.exportBtn"), icon: IconDownload });
+  }
+  if (props.canWrite && !video) {
     items.push({ id: "cover", label: t("detail.setAsCover"), icon: IconImage });
   }
   items.push(
     { id: "album", label: t("detail.addToAlbum"), icon: IconImage, disabled: addableAlbums.value.length === 0 },
-    { id: "similar", label: t("detail.findSimilar"), icon: IconSparkles },
   );
+  if (!video) {
+    items.push({ id: "similar", label: t("detail.findSimilar"), icon: IconSparkles });
+  }
   if (props.canDelete) {
     items.push({ id: "delete", label: t("detail.delete"), icon: IconTrash, danger: true });
   }
@@ -398,6 +443,9 @@ watch(() => props.photo?.path, async (path) => {
     return;
   }
   syncFields(props.photo);
+  pauseViewerVideo();
+  videoUnplayable.value = false;
+  if (isVideoPhoto(props.photo)) viewOpen.value = false;
   imageFallback.value = false;
   currentFullReady.value = srcIsReady(imageSrc.value);
   imageLoading.value = !currentFullReady.value;
@@ -889,6 +937,29 @@ function armChrome() {
   if (infoOpen.value || editing.value) return;
   chromeTimer = setTimeout(() => { chromeVisible.value = false; }, 2200);
 }
+function onVideoReady(event) {
+  const el = event?.target;
+  imageLoading.value = false;
+  if (!(el instanceof HTMLVideoElement) || !el.isConnected) return;
+  if (el.videoWidth > 0 && el.videoHeight > 0) return;
+  el.pause();
+  videoPlaying.value = false;
+  videoUnplayable.value = true;
+}
+function onVideoPlay() {
+  videoPlaying.value = true;
+  imageLoading.value = false;
+}
+function onVideoPause() {
+  videoPlaying.value = false;
+}
+function onVideoError(event) {
+  const el = event?.target;
+  if (el instanceof HTMLVideoElement && (!el.isConnected || (videoRef.value && el !== videoRef.value))) return;
+  videoUnplayable.value = true;
+  videoPlaying.value = false;
+  imageLoading.value = false;
+}
 function onImageError() {
   if (!imageFallback.value) {
     imageFallback.value = true;
@@ -902,10 +973,14 @@ function onImageError() {
 function downloadOriginal() {
   if (!props.photo) return;
   const q = ownerQuery.value ? `?${ownerQuery.value}` : "";
-  const a = document.createElement("a");
-  a.href = `/api/download/${encodeURIComponent(props.photo.path)}${q}`;
-  a.download = "";
-  a.click();
+  // Blob download: a plain <a href> navigation hands the file to Safari's
+  // inline viewer on iOS even with an attachment header.
+  downloadFileByUrl(
+    `/api/download/${encodeURIComponent(props.photo.path)}${q}`,
+    props.photo.name,
+  ).catch((e) => {
+    alert(e.message || "Download failed");
+  });
 }
 
 async function doExport() {
@@ -917,6 +992,7 @@ async function doExport() {
       format: exportForm.value.format,
       quality: exportForm.value.quality,
       max_width: exportForm.value.maxWidth || 0,
+      apply_xmp: !!exportForm.value.applyXmp,
     };
     if (photoOwner.value) body.owner = photoOwner.value;
     const res = await fetch("/api/albums/export", {
@@ -952,7 +1028,7 @@ function onMore(action) {
   moreOpen.value = false;
   if (action.id === "download") downloadOriginal();
   else if (action.id === "export") {
-    exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0 };
+    exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: hasXmp.value };
     exportOpen.value = true;
   } else if (action.id === "cover") emit("set-cover", props.photo);
   else if (action.id === "album") albumOpen.value = true;
@@ -978,6 +1054,7 @@ function onPickAlbum(action) {
       class="mobile-photo-viewer is-fullscreen"
       :class="{
         'is-dark': isDark,
+        'is-slide-live': slideSnapping || slideCommitting,
         'is-info-open': infoOpen,
         'is-info-dragging': infoDragging,
         'is-info-snapping': infoMode === 'snap-open' || infoMode === 'snap-close',
@@ -995,7 +1072,7 @@ function onPickAlbum(action) {
           <p class="truncate text-sm font-semibold">{{ photo.name }}</p>
           <p v-if="indexLabel" class="text-[0.6875rem] opacity-60">{{ indexLabel }}</p>
         </div>
-        <button type="button" class="mobile-icon-btn" :title="t('mobile.viewOptions')" @click="viewOpen = true">
+        <button v-if="!isCurrentVideo" type="button" class="mobile-icon-btn" :title="t('mobile.viewOptions')" @click="viewOpen = true">
           <IconViewOriginal class="h-5 w-5" />
         </button>
         <button type="button" class="mobile-icon-btn" @click="moreOpen = true">
@@ -1013,7 +1090,6 @@ function onPickAlbum(action) {
         }"
         :style="stageDismissStyle"
         @touchstart="onPhotoTouchStart"
-        @touchmove.prevent="onPhotoTouchMove"
         @touchend="onPhotoTouchEnd"
         @touchcancel="onPhotoTouchEnd"
       >
@@ -1045,6 +1121,25 @@ function onPickAlbum(action) {
             </div>
           </div>
         </div>
+        </div>
+        <video
+          v-if="isCurrentVideo && !videoUnplayable"
+          ref="videoRef"
+          :key="photo.path"
+          class="mobile-photo-video"
+          :class="{ 'is-concealed': stageBusy }"
+          :src="slidePlaybackSrc(photo)"
+          controls
+          playsinline
+          @play="onVideoPlay"
+          @pause="onVideoPause"
+          @ended="onVideoPause"
+          @loadeddata="onVideoReady"
+          @error="onVideoError"
+        />
+        <div v-if="isCurrentVideo && videoUnplayable" class="mobile-photo-video-fallback">
+          <p>{{ t("detail.videoUnplayable") }}</p>
+          <button type="button" @click.stop="downloadOriginal">{{ t("detail.download") }}</button>
         </div>
         <button
           type="button"
@@ -1153,6 +1248,7 @@ function onPickAlbum(action) {
             <div v-if="photo.iso"><span class="opacity-60">ISO</span> {{ photo.iso }}</div>
             <div><span class="opacity-60">{{ t("detail.size") }}</span> {{ formatSize(photo.size) }}</div>
             <div v-if="dimensions"><span class="opacity-60">{{ t("detail.dimensions") }}</span> {{ dimensions }}</div>
+            <div v-if="durationLabel"><span class="opacity-60">{{ t("detail.duration") }}</span> {{ durationLabel }}</div>
           </div>
         </div>
 
@@ -1215,6 +1311,19 @@ function onPickAlbum(action) {
         <label class="mb-1 block text-xs opacity-60">{{ t("detail.exportMaxWidth") }}</label>
         <input v-model.number="exportForm.maxWidth" type="number" min="0" step="100" class="mobile-search-input w-full" :placeholder="t('detail.exportMaxWidthPlaceholder')" />
       </div>
+      <div class="mb-4 flex items-center justify-between gap-3">
+        <label class="text-xs" :class="hasXmp ? 'opacity-80' : 'opacity-50'">
+          {{ t("detail.exportApplyXmp") }}
+          <span v-if="!hasXmp" class="ml-1 font-normal opacity-70">{{ t("detail.noXmp") }}</span>
+        </label>
+        <label class="app-switch">
+          <input type="checkbox" v-model="exportForm.applyXmp" :disabled="!hasXmp" />
+          <span class="app-switch-track"></span>
+        </label>
+      </div>
+      <p v-if="exportDirectCopy" class="mb-3 text-[11px] leading-snug opacity-50">
+        {{ t("detail.exportDirectHint") }}
+      </p>
       <div class="flex gap-2">
         <button type="button" class="mobile-photo-btn flex-1" @click="exportOpen = false">{{ t("share.close") }}</button>
         <button type="button" class="mobile-photo-btn is-primary flex-1" :disabled="exporting" @click="doExport">

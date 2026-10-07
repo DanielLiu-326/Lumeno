@@ -208,7 +208,10 @@ export function buildFilterClauses(filterItems, collectionFilter = {}) {
   for (const item of filterItems || []) {
     if (!item?.enabled) continue;
     const def = FILTER_DEF_MAP[item.type];
-    if (!def || def.isEmpty(item.value)) continue;
+    if (!def) continue;
+    // Empty semantic text is still sent. The backend treats a blank query as true
+    // and does not load the text model.
+    if (item.type !== "text" && def.isEmpty(item.value)) continue;
     const value = def.toWire ? def.toWire(item.value) : { ...item.value };
     clauses.push({
       type: item.type,
@@ -293,8 +296,11 @@ export function partitionFilterClauses(clauses) {
   const aiText = [];
   const metadata = [];
   for (const clause of list) {
-    if (clause?.type === "text") aiText.push(clause);
-    else metadata.push(clause);
+    if (clause?.type === "text" && String(clause.value?.q || "").trim()) {
+      aiText.push(clause);
+      continue;
+    }
+    metadata.push(clause);
   }
   return { aiText, metadata };
 }

@@ -10,6 +10,8 @@ import {
 } from "../utils/icons";
 import { t } from "../i18n/index.js";
 import { albumCoverUrl } from "../utils/albumCover.js";
+import { downloadFileByUrl } from "../utils/downloadFile.js";
+import { formatDurationMs, isVideoPhoto, playbackUrl } from "../utils/mediaKind.js";
 import ImportSourceModal from "./ImportSourceModal.vue";
 import CloudFilePicker from "./CloudFilePicker.vue";
 import FilterSidebar from "./FilterSidebar.vue";
@@ -442,6 +444,23 @@ const detailFullscreenControlsVisible = ref(false);
 const detailDimensions = ref(null);
 const detailImageFallback = ref(false);
 const detailImageEpoch = ref(0);
+const detailVideoRef = ref(null);
+const videoUnplayable = ref(false);
+const detailVideoLive = ref(false);
+let detailVideoLiveTimer = 0;
+
+watch(() => detailPhoto.value?.path, (path) => {
+  detailVideoLive.value = false;
+  window.clearTimeout(detailVideoLiveTimer);
+  if (!path || !isVideoPhoto(detailPhoto.value)) return;
+  // Mount after the dialog fade. A video created while an ancestor opacity is
+  // animating stays on the poster and only outputs audio.
+  detailVideoLiveTimer = window.setTimeout(() => {
+    if (detailPhoto.value?.path === path) detailVideoLive.value = true;
+  }, 320);
+});
+
+onBeforeUnmount(() => window.clearTimeout(detailVideoLiveTimer));
 const DETAIL_VIEW_PREFERENCES_KEY = "album-detail-view-preferences";
 
 function loadDetailViewPreferences() {
@@ -477,7 +496,24 @@ const darktablePreview = ref(false);
 const hasXmpSidecar = ref(false);
 const showExportDialog = ref(false);
 const exporting = ref(false);
-const exportForm = ref({ format: "jpeg", quality: 95, maxWidth: 0 });
+const exportForm = ref({ format: "jpeg", quality: 95, maxWidth: 0, applyXmp: false });
+// The photo the export dialog targets (grid menu photo wins over the detail photo),
+// plus its XMP state and whether the current settings allow a direct original copy.
+const exportPhoto = computed(() => menuPhoto.value || detailPhoto.value);
+const exportHasXmp = computed(() => (menuPhoto.value ? menuHasXmp.value : hasXmpSidecar.value));
+const exportDirectCopy = computed(() => {
+  const photo = exportPhoto.value;
+  if (!photo || exportForm.value.applyXmp) return false;
+  if (exportForm.value.maxWidth) return false;
+  const srcExt = (photo.name.split(".").pop() || "").toLowerCase();
+  switch (exportForm.value.format) {
+    case "jpeg": return srcExt === "jpg" || srcExt === "jpeg";
+    case "png": return srcExt === "png";
+    case "tiff": return srcExt === "tif" || srcExt === "tiff";
+    case "webp": return srcExt === "webp";
+    default: return false;
+  }
+});
 
 // Add-to-album modal state
 const showAddToAlbumModal = ref(false);
@@ -841,7 +877,89 @@ let desktopSearchToken = 0;
 
 const showingDesktopSearch = computed(() => desktopSearchPhotos.value !== null);
 const desktopSearchBar = computed(() => !inSpecialView.value && !isMobile.value);
+/** Toolbar is too narrow for the full search field beside labeled actions. */
+const desktopSearchCollapsed = ref(false);
+/** User opened the field from the collapsed search button. */
+const desktopSearchForcedOpen = ref(false);
+const desktopSearchNeedWidth = ref(0);
+const desktopToolbarRef = ref(null);
+const desktopSearchFieldOpen = computed(() => desktopSearchBar.value && (
+  !desktopSearchCollapsed.value
+  || desktopSearchForcedOpen.value
+  || showingDesktopSearch.value
+  || desktopSearchLoading.value
+));
+const desktopToolbarIconsOnly = computed(() => (
+  desktopSearchCollapsed.value
+  && desktopSearchForcedOpen.value
+  && !showingDesktopSearch.value
+  && !desktopSearchLoading.value
+));
+const desktopActionLabelClass = computed(() => (
+  desktopToolbarIconsOnly.value ? "hidden" : "hidden md:inline"
+));
 const gridPhotos = computed(() => (showingDesktopSearch.value ? desktopSearchPhotos.value : props.albumPhotos));
+
+function openDesktopSearchField() {
+  if (desktopSearchCollapsed.value) desktopSearchForcedOpen.value = true;
+  nextTick(() => {
+    const input = desktopSearchInputRef.value;
+    if (!input) return;
+    input.focus();
+    input.select();
+  });
+}
+
+function onDesktopSearchEscape() {
+  if (!desktopSearchCollapsed.value || showingDesktopSearch.value || desktopSearchLoading.value) return;
+  desktopSearchForcedOpen.value = false;
+}
+
+function measureDesktopToolbar() {
+  const bar = desktopToolbarRef.value;
+  if (!bar || !desktopSearchBar.value || props.embedded) {
+    desktopSearchCollapsed.value = false;
+    desktopSearchForcedOpen.value = false;
+    return;
+  }
+  const width = bar.clientWidth;
+  if (width <= 0) return;
+  const showingFullField = desktopSearchFieldOpen.value
+    && !desktopToolbarIconsOnly.value
+    && !showingDesktopSearch.value
+    && !desktopSearchLoading.value;
+  if (showingFullField) {
+    desktopSearchNeedWidth.value = bar.scrollWidth;
+    const overflows = bar.scrollWidth > width + 1;
+    desktopSearchCollapsed.value = overflows;
+    if (!overflows) desktopSearchForcedOpen.value = false;
+    return;
+  }
+  // Extra room avoids flipping back to the field on the same width that just overflowed.
+  if (
+    desktopSearchCollapsed.value
+    && desktopSearchNeedWidth.value > 0
+    && width >= desktopSearchNeedWidth.value + 16
+  ) {
+    desktopSearchCollapsed.value = false;
+    desktopSearchForcedOpen.value = false;
+    nextTick(measureDesktopToolbar);
+  }
+}
+
+let desktopToolbarObserver = null;
+watch(desktopToolbarRef, (bar) => {
+  desktopToolbarObserver?.disconnect();
+  desktopToolbarObserver = null;
+  if (!bar || typeof ResizeObserver === "undefined") return;
+  desktopToolbarObserver = new ResizeObserver(() => measureDesktopToolbar());
+  desktopToolbarObserver.observe(bar);
+  measureDesktopToolbar();
+});
+onBeforeUnmount(() => {
+  desktopToolbarObserver?.disconnect();
+  desktopToolbarObserver = null;
+});
 
 function resetDesktopSearch() {
   desktopSearchToken += 1;
@@ -854,7 +972,15 @@ watch(() => props.currentAlbum, (album, previous) => {
   if (previous === undefined || album === previous) return;
   resetDesktopSearch();
   textSearchInput.value = '';
+  desktopSearchForcedOpen.value = false;
+  desktopSearchCollapsed.value = false;
+  desktopSearchNeedWidth.value = 0;
 });
+
+watch(
+  [desktopSearchBar, showingDesktopSearch, isSharedAlbum, currentAlbumCanDelete, inSpecialView, isMobile],
+  () => nextTick(measureDesktopToolbar),
+);
 
 async function submitTextSearch() {
   const text = textSearchInput.value.trim();
@@ -1095,18 +1221,23 @@ async function openPhotoMenu(photo) {
 }
 
 const photoMenuActions = computed(() => {
+  const video = isVideoPhoto(menuPhoto.value);
   const items = [
     { id: "select", label: t("albums.select"), icon: IconCheck },
-    { id: "download", label: t("detail.downloadOriginal"), icon: IconDownload },
-    { id: "export", label: t("detail.downloadEdited"), icon: IconDownload, disabled: !menuHasXmp.value },
+    { id: "download", label: t("detail.download"), icon: IconDownload },
   ];
-  if (currentAlbumCanWrite.value) {
+  if (!video) {
+    items.push({ id: "export", label: t("detail.exportBtn"), icon: IconDownload });
+  }
+  if (currentAlbumCanWrite.value && !video) {
     items.push({ id: "cover", label: t("detail.setAsCover"), icon: IconImage });
   }
   items.push(
     { id: "album", label: t("detail.addToAlbum"), icon: IconImage, disabled: addableAlbums.value.length === 0 },
-    { id: "similar", label: t("detail.findSimilar"), icon: IconSparkles },
   );
+  if (!video) {
+    items.push({ id: "similar", label: t("detail.findSimilar"), icon: IconSparkles });
+  }
   if (currentAlbumCanDelete.value) {
     items.push({ id: "delete", label: t("detail.delete"), icon: IconTrash, danger: true });
   }
@@ -1121,10 +1252,11 @@ const photoMenuAlbumActions = computed(() => addableAlbums.value.map((album) => 
 
 function downloadPhotoFile(photo) {
   if (!photo?.path) return;
-  const a = document.createElement("a");
-  a.href = getOriginalUrl(photo.path, photo.owner);
-  a.download = "";
-  a.click();
+  // Blob download: a plain <a href> navigation hands the file to Safari's
+  // inline viewer on iOS even with an attachment header.
+  downloadFileByUrl(getOriginalUrl(photo.path, photo.owner), photo.name).catch((e) => {
+    alert(e.message || "Download failed");
+  });
 }
 
 function onPhotoMenuAction(action) {
@@ -1138,8 +1270,7 @@ function onPhotoMenuAction(action) {
     downloadPhotoFile(photo);
     menuPhoto.value = null;
   } else if (action.id === "export") {
-    if (!menuHasXmp.value) return;
-    exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0 };
+    exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: menuHasXmp.value };
     showExportDialog.value = true;
   } else if (action.id === "cover") {
     setCoverFromPhoto(photo);
@@ -1493,9 +1624,15 @@ function withAlbumOwner(photo) {
   return owner && photo.owner !== owner ? { ...photo, owner } : photo;
 }
 
+function pauseDetailVideo() {
+  detailVideoRef.value?.pause?.();
+}
+
 function openDetail(photo, expanded = detailOriginalPreference.value, options = {}) {
+  pauseDetailVideo();
   detailRequestToken += 1;
   detailClosing.value = false;
+  videoUnplayable.value = false;
   if (!options.fromNav) {
     detailNavPhotos.value = options.navPhotos ?? null;
     const fullscreen = options.fullscreen ?? detailFullscreenPreference.value;
@@ -1551,6 +1688,7 @@ function onAiToolsOpenPhoto({ photo, navPhotos } = {}) {
 }
 
 function closeDetail(options = {}) {
+  pauseDetailVideo();
   const force = options === true || options.force;
   if (!force && !props.embedded && detailDirty.value && !window.confirm(t('msg.unsavedChangesClose'))) return;
   detailOriginalPreference.value = detailExpanded.value;
@@ -1650,12 +1788,9 @@ function focusDesktopSearchFromShortcut(event) {
     && target !== desktopSearchInputRef.value
     && target.closest("input, textarea, select, [contenteditable='true']")
   ) return false;
-  const input = desktopSearchInputRef.value;
-  if (!input) return false;
   event.preventDefault();
   thumbnailPopoverOpen.value = false;
-  input.focus();
-  input.select();
+  openDesktopSearchField();
   return true;
 }
 
@@ -1710,6 +1845,21 @@ function toggleDarktablePreview() {
   saveDetailViewPreferences();
 }
 function onDetailImageLoad() {
+  imageLoading.value = false;
+}
+function onDetailVideoReady(event) {
+  const el = event?.target;
+  if (!(el instanceof HTMLVideoElement) || !el.isConnected) return;
+  imageLoading.value = false;
+  if (el.videoWidth > 0 && el.videoHeight > 0) return;
+  el.pause();
+  videoUnplayable.value = true;
+}
+function onDetailVideoError(event) {
+  const el = event?.target;
+  if (el instanceof HTMLVideoElement && !el.isConnected) return;
+  if (el instanceof HTMLVideoElement) el.pause();
+  videoUnplayable.value = true;
   imageLoading.value = false;
 }
 function onDetailImageError() {
@@ -1768,8 +1918,18 @@ function isRawFile(name) {
   const ext = (name || "").split(".").pop().toLowerCase();
   return RAW_EXTS.has(ext);
 }
+const isDetailVideo = computed(() => isVideoPhoto(detailPhoto.value));
+const detailDurationLabel = computed(() => formatDurationMs(detailPhoto.value?.duration_ms));
+const detailPlaybackSrc = computed(() => {
+  if (!detailPhoto.value) return "";
+  const owner = detailPhoto.value.owner || currentAlbumOwner.value;
+  return playbackUrl(detailPhoto.value.path, owner);
+});
 const detailImageSrc = computed(() => {
   if (!detailPhoto.value) return "";
+  if (isDetailVideo.value) {
+    return getThumbnail(detailPhoto.value.path, 800);
+  }
   const isRaw = isRawFile(detailPhoto.value.name);
 
   // Explicit darktable toggle (requires XMP): always use darktable_preview.
@@ -1795,16 +1955,17 @@ const detailImageSrc = computed(() => {
 });
 
 function downloadOriginal() {
-  if (!detailPhoto.value) return;
-  const a = document.createElement("a");
-  a.href = getOriginalUrl(detailPhoto.value.path);
-  a.download = "";
-  a.click();
+  const photo = detailPhoto.value;
+  if (!photo) return;
+  // Blob download: a plain <a href> navigation hands the file to Safari's
+  // inline viewer on iOS even with an attachment header.
+  downloadFileByUrl(getOriginalUrl(photo.path), photo.name).catch((e) => {
+    alert(e.message || "Download failed");
+  });
 }
 
 function openExportDialog() {
-  if (!hasXmpSidecar.value) return;
-  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0 };
+  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: hasXmpSidecar.value };
   showExportDialog.value = true;
 }
 
@@ -1818,6 +1979,7 @@ async function doExport() {
       format: exportForm.value.format,
       quality: exportForm.value.quality,
       max_width: exportForm.value.maxWidth || 0,
+      apply_xmp: !!exportForm.value.applyXmp,
     };
     if (photo.owner || currentAlbumOwner.value) {
       body.owner = photo.owner || currentAlbumOwner.value;
@@ -2125,10 +2287,9 @@ defineExpose({
     <div v-else key="photo-browser" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="relative z-10 flex shrink-0 flex-col">
       <!-- Top toolbar (desktop / non-embedded mobile). Phone shell supplies its own chrome. -->
-      <div v-if="!embedded" class="album-toolbar grid items-center gap-1.5 app-split-b px-2.5 py-2.5 app-frost-toolbar md:gap-2 md:px-4 md:py-3"
-        :class="desktopSearchBar ? 'grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]' : 'grid-cols-[minmax(0,1fr)_0px_minmax(0,1fr)]'">
-        <div class="flex min-w-0 items-center gap-1.5 md:gap-2">
-        <button class="app-btn app-btn-secondary px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+      <div v-if="!embedded" ref="desktopToolbarRef" class="album-toolbar flex min-w-0 items-center gap-1.5 overflow-x-hidden app-split-b px-2.5 py-2.5 app-frost-toolbar md:gap-2 md:px-4 md:py-3">
+        <div class="flex w-0 min-w-min flex-1 items-center gap-1.5 md:gap-2">
+        <button class="app-btn app-btn-secondary shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           @click="onAlbumBack">
           <IconArrowLeft class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.back') }}</span>
         </button>
@@ -2147,23 +2308,26 @@ defineExpose({
             <IconImage class="h-4 w-4" :class="isDark ? 'text-stone-500' : 'text-stone-400'" />
           </div>
         </div>
-        <h2 class="min-w-0 truncate text-sm font-bold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">
+        <h2 class="w-0 min-w-0 flex-1 truncate text-sm font-bold" :class="isDark ? 'text-stone-100' : 'text-stone-800'">
           {{ currentAlbumObj?.name || currentAlbum }}
           <span v-if="isSharedAlbum" class="ml-1 text-xs font-normal" :class="isDark ? 'text-blue-400' : 'text-blue-600'">
             (​{{ t('albums.from', { owner: currentAlbumOwner }) }})
           </span>
         </h2>
         </div>
-        <!-- Desktop: search field, centered on the toolbar -->
-        <div v-if="desktopSearchBar" class="flex w-[min(28rem,40vw)] max-w-full items-center gap-1">
+        <!-- Desktop: full search field when it fits, or after the collapsed button is opened. -->
+        <div v-if="desktopSearchFieldOpen" class="flex items-center gap-1"
+          :class="desktopToolbarIconsOnly ? 'min-w-32 max-w-[28rem] flex-1' : 'w-[28rem] min-w-32 max-w-[28rem] shrink'">
           <input
             ref="desktopSearchInputRef"
             v-model="textSearchInput"
-            type="search"
+            type="text"
+            autocomplete="off"
             :placeholder="t('albums.textSearchPlaceholder')"
             class="min-w-0 flex-1 rounded-xl border px-2.5 py-1.5 text-xs"
             :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"
             @keydown.enter.prevent="submitTextSearch"
+            @keydown.escape.prevent="onDesktopSearchEscape"
           />
           <button
             class="inline-flex shrink-0 items-center rounded-xl px-2 py-1.5 text-xs font-medium transition"
@@ -2183,8 +2347,16 @@ defineExpose({
             <IconClose class="h-3.5 w-3.5" />
           </button>
         </div>
-        <div v-else></div>
-        <div class="flex min-w-0 items-center justify-end gap-1.5 md:gap-2">
+        <div class="flex items-center justify-end gap-1.5 whitespace-nowrap md:gap-2"
+          :class="desktopSearchFieldOpen && !desktopToolbarIconsOnly ? 'min-w-max flex-1' : (desktopSearchBar ? 'shrink-0' : 'min-w-0 flex-1')">
+        <button
+          v-if="desktopSearchBar && !desktopSearchFieldOpen"
+          class="app-btn app-btn-secondary shrink-0 px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :title="t('albums.textSearch')"
+          @click="openDesktopSearchField"
+        >
+          <IconSearch class="h-3.5 w-3.5" />
+        </button>
         <!-- Mobile: collapsed search button / expanded field -->
         <template v-if="!inSpecialView && isMobile">
           <button
@@ -2200,7 +2372,8 @@ defineExpose({
             <input
               ref="mobileSearchInputRef"
               v-model="textSearchInput"
-              type="search"
+              type="text"
+              autocomplete="off"
               :placeholder="t('albums.textSearchPlaceholder')"
               class="min-w-0 flex-1 rounded-xl border px-2.5 py-1.5 text-xs"
               :class="isDark ? 'border-stone-700 bg-stone-900 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'"
@@ -2225,33 +2398,38 @@ defineExpose({
             </button>
           </div>
         </template>
-        <button v-if="!isSharedAlbum && !inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="inline-flex items-center gap-1 rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
+        <button v-if="!isSharedAlbum && !inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-2xl px-2.5 py-1.5 text-xs font-medium transition md:gap-1.5 md:px-3 md:py-2"
           :class="isDark ? 'bg-emerald-700 text-white hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'"
+          :title="t('albums.import')"
           @click="openImportModal">
-          <IconImport class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.import') }}</span>
+          <IconImport class="h-3.5 w-3.5" /><span :class="desktopActionLabelClass">{{ t('albums.import') }}</span>
         </button>
-        <button v-if="currentAlbumCanDelete && !inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+        <button v-if="currentAlbumCanDelete && !inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           :class="selectMode ? 'app-btn-accent' : 'app-btn-secondary'"
+          :title="t('albums.select')"
           @click="toggleSelectMode">
-          <IconCheck class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.select') }}</span>
+          <IconCheck class="h-3.5 w-3.5" /><span :class="desktopActionLabelClass">{{ t('albums.select') }}</span>
         </button>
-        <button v-if="!showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn app-btn-secondary px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+        <button v-if="!showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn app-btn-secondary shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :title="t('albums.rebuildIndex')"
           @click="emit('rebuild-index')">
-          <IconDatabase class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.rebuildIndex') }}</span>
+          <IconDatabase class="h-3.5 w-3.5" /><span :class="desktopActionLabelClass">{{ t('albums.rebuildIndex') }}</span>
         </button>
         <button
           v-if="inSpecialView"
-          class="app-btn app-btn-accent px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          class="app-btn app-btn-accent shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :title="t('albums.backToPhotos')"
           @click="emit('show-photos')"
         >
           <IconImage class="h-3.5 w-3.5" />
-          <span class="hidden md:inline">{{ t('albums.backToPhotos') }}</span>
+          <span :class="desktopActionLabelClass">{{ t('albums.backToPhotos') }}</span>
         </button>
-        <button v-if="!inSpecialView && !showingDesktopSearch && !isMobile" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+        <button v-if="!inSpecialView && !showingDesktopSearch && !isMobile" class="app-btn shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           :class="filterSortPanelOpen ? 'app-btn-accent' : 'app-btn-secondary'"
+          :title="t('albums.filterAndSort')"
           @click="toggleFilterSortPanel">
           <IconFilter class="h-3.5 w-3.5" />
-          <span class="hidden md:inline">{{ t('albums.filterAndSort') }}</span>
+          <span :class="desktopActionLabelClass">{{ t('albums.filterAndSort') }}</span>
           <span v-if="hasActiveFilters || hasActiveSort" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
         </button>
         <button v-if="!inSpecialView && !showingDesktopSearch && isMobile && !mobileSearchOpen" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
@@ -2268,18 +2446,20 @@ defineExpose({
           <IconSort class="h-3.5 w-3.5" />
           <span v-if="hasActiveSort" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
         </button>
-        <button v-if="!showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+        <button v-if="!showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           :class="aiToolsPanelOpen || inSpecialView ? 'app-btn-accent' : 'app-btn-secondary'"
+          :title="t('albums.aiTools')"
           @click="toggleAiToolsPanel">
           <IconWand class="h-3.5 w-3.5" />
-          <span class="hidden md:inline">{{ t('albums.aiTools') }}</span>
+          <span :class="desktopActionLabelClass">{{ t('albums.aiTools') }}</span>
         </button>
-        <div v-if="!inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="relative">
-          <button ref="thumbnailBtnRef" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+        <div v-if="!inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="relative shrink-0">
+          <button ref="thumbnailBtnRef" class="app-btn shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
             :class="thumbnailPopoverOpen || viewSettingsOpen ? 'app-btn-accent' : 'app-btn-secondary'"
+            :title="t('view.settings')"
             @click="toggleThumbnailPopover">
             <IconGrid class="h-3.5 w-3.5" />
-            <span class="hidden md:inline">{{ t('view.settings') }}</span>
+            <span :class="desktopActionLabelClass">{{ t('view.settings') }}</span>
           </button>
           <teleport to="body">
             <Transition name="app-dropdown" :duration="{ enter: 300, leave: 200 }">
@@ -2998,7 +3178,7 @@ defineExpose({
               @click="toggleDetailFullscreen">
               <IconExpand class="h-4 w-4" />
             </button>
-            <button class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition"
+            <button v-if="!isDetailVideo" class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition"
               :class="detailExpanded
                 ? (isDark ? 'bg-amber-500/20 text-amber-200' : 'bg-amber-100 text-amber-900')
                 : (isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300')"
@@ -3006,7 +3186,7 @@ defineExpose({
               <IconViewOriginal class="h-3.5 w-3.5" />
               <span class="hidden md:inline">{{ detailExpanded ? t('detail.collapse') : t('detail.viewOriginal') }}</span>
             </button>
-            <button class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition"
+            <button v-if="!isDetailVideo" class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs font-medium transition"
               :class="darktablePreview
                 ? (isDark ? 'bg-emerald-500/20 text-emerald-200' : 'bg-emerald-100 text-emerald-900')
                 : hasXmpSidecar
@@ -3039,7 +3219,24 @@ defineExpose({
                   <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
                 </svg>
               </div>
-              <img :key="detailImageEpoch"
+              <video
+                v-if="isDetailVideo && detailVideoLive && !videoUnplayable"
+                ref="detailVideoRef"
+                :key="detailPhoto.path"
+                :src="detailPlaybackSrc"
+                class="rounded-xl bg-black object-contain"
+                :style="{ background: `#000 url('${detailImageSrc}') center / contain no-repeat` }"
+                :class="detailFullscreen
+                  ? 'app-photo-fullscreen-img'
+                  : isMobile
+                    ? 'absolute inset-0 h-full w-full'
+                    : (detailExpanded ? 'max-h-64 w-full sm:max-h-[60vh] md:max-h-full' : 'max-h-56 w-full sm:max-h-96 md:max-h-[72vh]')"
+                controls
+                playsinline
+                @loadeddata="onDetailVideoReady"
+                @error="onDetailVideoError"
+              />
+              <img v-else :key="detailImageEpoch"
                 :src="detailImageSrc"
                 class="rounded-xl object-contain transition-opacity"
                 :class="[
@@ -3051,6 +3248,17 @@ defineExpose({
                   imageLoading ? 'opacity-40' : 'opacity-100'
                 ]"
                 alt="" @load="onDetailImageLoad" @error="onDetailImageError" />
+              <div
+                v-if="isDetailVideo && videoUnplayable"
+                class="absolute inset-x-6 bottom-6 z-20 flex flex-col items-center gap-2 rounded-xl bg-black/70 px-4 py-3 text-center text-sm text-white"
+              >
+                <p>{{ t('detail.videoUnplayable') }}</p>
+                <button
+                  type="button"
+                  class="rounded-full bg-white/15 px-3 py-1.5 text-xs font-medium hover:bg-white/25"
+                  @click="downloadOriginal"
+                >{{ t('detail.download') }}</button>
+              </div>
 
               <div v-if="detailFullscreen"
                 class="pointer-events-none absolute left-4 top-4 max-w-[calc(100%-10rem)] rounded-md bg-black/40 px-3 py-2 text-white backdrop-blur-sm transition-opacity"
@@ -3110,6 +3318,7 @@ defineExpose({
                 <div v-if="detailPhoto.iso"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">ISO</span> {{ detailPhoto.iso }}</div>
                 <div><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.size') }}</span> {{ formatSize(detailPhoto.size) }}</div>
                 <div v-if="detailDimensions"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.dimensions') }}</span> {{ detailDimensions }}</div>
+                <div v-if="detailDurationLabel"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.duration') }}</span> {{ detailDurationLabel }}</div>
               </div>
 
               <hr :class="isDark ? 'border-stone-700' : 'border-stone-200'" />
@@ -3119,16 +3328,12 @@ defineExpose({
                 <button class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium transition"
                   :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
                   @click="downloadOriginal">
-                  <IconDownload class="h-3.5 w-3.5" />{{ t('detail.downloadOriginal') }}
+                  <IconDownload class="h-3.5 w-3.5" />{{ t('detail.download') }}
                 </button>
-                <button class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium transition"
-                  :class="hasXmpSidecar
-                    ? (isDark ? 'bg-emerald-700 text-emerald-100 hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700')
-                    : 'opacity-40 cursor-default'"
-                  :disabled="!hasXmpSidecar"
-                  :title="!hasXmpSidecar ? t('detail.noXmp') : ''"
+                <button v-if="!isDetailVideo" class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium transition"
+                  :class="isDark ? 'bg-emerald-700 text-emerald-100 hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'"
                   @click="openExportDialog">
-                  <IconDownload class="h-3.5 w-3.5" />{{ t('detail.downloadEdited') }}
+                  <IconDownload class="h-3.5 w-3.5" />{{ t('detail.exportBtn') }}
                 </button>
               </div>
 
@@ -3164,7 +3369,7 @@ defineExpose({
 
               <!-- Set as album cover + Add to album + Delete -->
               <div class="flex flex-wrap gap-2">
-                <button v-if="currentAlbumCanWrite" class="flex-1 rounded-xl px-4 py-2 text-xs font-medium transition"
+                <button v-if="currentAlbumCanWrite && !isDetailVideo" class="flex-1 rounded-xl px-4 py-2 text-xs font-medium transition"
                   :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
                   @click="setCoverFromPhoto(detailPhoto)">
                   {{ t('detail.setAsCover') }}
@@ -3176,6 +3381,7 @@ defineExpose({
                   <IconImage class="h-3.5 w-3.5" />{{ t('detail.addToAlbum') }}
                 </button>
                 <button
+                  v-if="!isDetailVideo"
                   class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
                   :class="isDark ? 'bg-violet-900/60 text-violet-200 hover:bg-violet-800' : 'bg-violet-100 text-violet-700 hover:bg-violet-200'"
                   :title="t('detail.findSimilar')"
@@ -3251,6 +3457,21 @@ defineExpose({
               class="w-full rounded-lg border px-2.5 py-1.5 text-sm"
               :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
           </div>
+
+          <!-- Apply XMP grading -->
+          <div class="mb-4 flex items-center justify-between gap-3">
+            <label class="text-xs font-medium" :class="exportHasXmp ? (isDark ? 'text-stone-300' : 'text-stone-600') : (isDark ? 'text-stone-600' : 'text-stone-400')">
+              {{ t('detail.exportApplyXmp') }}
+              <span v-if="!exportHasXmp" class="ml-1 font-normal opacity-70">{{ t('detail.noXmp') }}</span>
+            </label>
+            <label class="app-switch">
+              <input type="checkbox" v-model="exportForm.applyXmp" :disabled="!exportHasXmp" />
+              <span class="app-switch-track"></span>
+            </label>
+          </div>
+          <p v-if="exportDirectCopy" class="mb-3 text-[11px] leading-snug" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+            {{ t('detail.exportDirectHint') }}
+          </p>
 
           <!-- Actions -->
           <div class="flex gap-2">

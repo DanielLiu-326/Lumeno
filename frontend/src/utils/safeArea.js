@@ -44,8 +44,12 @@ function applyInsets() {
   const insets = measureInsets();
   let bottom = insets.bottom;
   const portrait = window.innerHeight >= window.innerWidth;
-  if (portrait && insets.top >= 44 && bottom < 8) {
-    bottom = lastBottomPx >= 8 ? lastBottomPx : HOME_INDICATOR;
+  if (portrait && bottom < 8) {
+    // Safari reports every inset as 0 while its own bars/sheets (download,
+    // share, print) cover the page, and often fires no resize when they
+    // close. Never drop a healthy bottom inset once the device has shown
+    // one; fall back to the notch height when only the top inset proves it.
+    bottom = lastBottomPx >= 8 ? lastBottomPx : (insets.top >= 44 ? HOME_INDICATOR : 0);
   }
   if (bottom >= 8) lastBottomPx = bottom;
 

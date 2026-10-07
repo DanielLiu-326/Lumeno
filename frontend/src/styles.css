@@ -1072,8 +1072,10 @@ html.is-layer-kick .mobile-notch-cap {
 
 html[data-shell="mobile"] {
     width: calc(100lvw * var(--ui-zoom-inv, 1));
-    height: var(--app-height, calc(100lvh * var(--ui-zoom-inv, 1)));
-    min-height: var(--app-height, calc(100lvh * var(--ui-zoom-inv, 1)));
+    /* Never sit shorter than the live viewport: a momentary short
+       --app-height would lift the tab bar off the physical bottom edge. */
+    height: max(var(--app-height, 0px), 100dvh);
+    min-height: max(var(--app-height, 0px), 100dvh);
     max-height: none;
     overflow: hidden;
     overscroll-behavior: none;
@@ -1841,9 +1843,15 @@ html.dark .mobile-search-input {
     left: 0;
     z-index: 120;
     display: flex;
-    height: var(--app-height, calc(100dvh * var(--ui-zoom-inv, 1)));
+    height: max(var(--app-height, 0px), 100dvh);
     flex-direction: column;
     justify-content: flex-end;
+}
+
+/* With the keyboard open the visible region is --app-height; do not extend
+   the sheet mask under the keyboard. */
+html.is-keyboard .mobile-sheet-root {
+    height: var(--app-height, 100dvh);
 }
 
 .mobile-sheet-root.is-stacked {
@@ -1863,7 +1871,7 @@ html.dark .mobile-search-input {
     display: flex;
     min-height: 0;
     flex-direction: column;
-    padding: 0.4rem 0 calc(0.75rem + var(--safe-bottom, 0px));
+    padding: 0 0 calc(0.75rem + var(--safe-bottom, 0px));
     border-radius: 1.35rem 1.35rem 0 0;
     background: rgb(252 250 247 / 0.96);
     -webkit-backdrop-filter: blur(24px) saturate(1.4);
@@ -1877,14 +1885,16 @@ html.dark .mobile-search-input {
     touch-action: pan-y;
 }
 
-.mobile-sheet-panel.is-dragging {
+.mobile-sheet-panel.is-dragging,
+.mobile-sheet-enter-active .mobile-sheet-panel.is-dragging,
+.mobile-sheet-leave-active .mobile-sheet-panel.is-dragging {
     transition: none;
 }
 
 .mobile-sheet-panel.is-expanded {
     height: 100%;
     max-height: none;
-    padding-top: max(0.4rem, var(--safe-top, 0px));
+    padding-top: var(--safe-top, 0px);
     border-radius: 0.9rem 0.9rem 0 0;
 }
 
@@ -1918,13 +1928,25 @@ html.dark .mobile-sheet-panel {
 }
 
 .mobile-sheet-handle {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    width: 100%;
+    height: 2.75rem;
+    margin: 0 0 0.15rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    touch-action: none;
+}
+
+.mobile-sheet-handle::before {
+    content: "";
     width: 2.5rem;
     height: 0.3rem;
-    margin: 0.35rem auto 0.65rem;
-    flex-shrink: 0;
     border-radius: 999px;
     background: rgb(120 113 108 / 0.35);
-    touch-action: none;
 }
 
 .mobile-sheet-action,
@@ -2544,8 +2566,13 @@ html.dark .mobile-login-submit {
     display: flex;
     height: 100%;
     width: 100%;
-    will-change: transform;
     transition: none;
+}
+
+/* Promote the track only while it animates; a resting will-change layer
+   keeps an iOS soft raster that reads as gaussian blur at the top. */
+.mobile-photo-viewer.is-slide-live .mobile-photo-track {
+    will-change: transform;
 }
 
 .mobile-photo-slide {
@@ -2589,6 +2616,45 @@ html.dark .mobile-login-submit {
     opacity: 1;
 }
 
+.mobile-photo-video {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    height: 100%;
+    width: 100%;
+    object-fit: contain;
+    background: transparent;
+}
+
+.mobile-photo-video.is-concealed {
+    visibility: hidden;
+}
+
+.mobile-photo-video-fallback {
+    position: absolute;
+    inset: auto 1.25rem 4.5rem;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+    border-radius: 0.85rem;
+    background: rgb(0 0 0 / 0.72);
+    padding: 0.85rem 1rem;
+    text-align: center;
+    color: white;
+    font-size: 0.875rem;
+    pointer-events: auto;
+}
+
+.mobile-photo-video-fallback button {
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.16);
+    padding: 0.4rem 0.85rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
 .mobile-photo-stage.is-sliding .mobile-photo-img.is-full {
     transition: none;
 }
@@ -2611,6 +2677,7 @@ html.dark .mobile-login-submit {
 
 .mobile-photo-nav {
     position: absolute;
+    z-index: 4;
     top: 50%;
     display: flex;
     height: 2.75rem;
