@@ -146,6 +146,7 @@ impl LocalBurnProvider {
         let max_batch_size = batch_size.clamp(1, 64);
         match LocalModelRuntime::try_load(&model_root) {
             Ok(runtime) => {
+                LocalModelRuntime::spawn_idle_sweep(&runtime);
                 let image_dim = runtime.info.image_dim;
                 let face_dim = runtime.info.face_dim;
                 let revision = runtime.info.revision.clone();

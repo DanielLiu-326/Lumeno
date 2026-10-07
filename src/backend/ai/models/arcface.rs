@@ -31,6 +31,7 @@ impl ArcFaceRuntime {
             let device = selected_ai_device().device;
             let bpk = resolve_bpk(root, &["arcface_r50.bpk", "arcface-r50.bpk"])?;
             let model = super::onnx_gen::arcface_r50::Model::<AiBackend>::from_file(bpk, &device);
+            eprintln!("[ai] arcface device={device:?}");
             Ok(Self {
                 model,
                 device,

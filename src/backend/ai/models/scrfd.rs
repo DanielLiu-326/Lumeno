@@ -45,6 +45,7 @@ impl ScrfdRuntime {
             let device = selected_ai_device().device;
             let bpk = resolve_bpk(root, &["scrfd.bpk", "scrfd-2.5g.bpk"])?;
             let model = super::onnx_gen::scrfd::Model::<AiBackend>::from_file(bpk, &device);
+            eprintln!("[ai] scrfd device={device:?}");
             Ok(Self {
                 model,
                 device,

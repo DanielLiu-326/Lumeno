@@ -1,15 +1,27 @@
-//! Local model runtime: verified manifest → SigLIP2 + SCRFD + ArcFace.
+//! Local model runtime: verified manifest, weights loaded on demand.
+//!
+//! SigLIP2 vision, SigLIP2 text, SCRFD, and ArcFace each sit in their own slot.
+//! A slot stays empty until the matching call, and drops its weights after
+//! [`MODEL_IDLE`] with no caller still holding the model.
 
 use image::{DynamicImage, GenericImageView};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use super::arcface::ArcFaceRuntime;
-use super::manifest::{ManifestError, ModelManifest, VerifiedModelManifest};
+use super::manifest::{ManifestError, ModelArtifactSpec, ModelManifest, VerifiedModelManifest};
 use super::preprocess::align_face_112_rgb;
 use super::scrfd::ScrfdRuntime;
-use super::siglip2::Siglip2Runtime;
+use super::siglip2::{Siglip2Text, Siglip2Vision};
+use crate::backend::ai::embedding::{ARCFACE_EMBEDDING_DIM, SIGLIP2_EMBEDDING_DIM};
 use crate::backend::ai::faces::{DetectedFace, normalize_box_xywh, normalize_landmarks};
+
+/// Drop a model this long after its last use, once no call still holds it.
+const MODEL_IDLE: Duration = Duration::from_secs(60);
+const MODEL_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// burn-onnx graphs overflow the default thread stack during Flex init.
+const MODEL_LOAD_STACK: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct LocalModelInfo {
@@ -20,30 +32,143 @@ pub struct LocalModelInfo {
     pub device_label: String,
 }
 
+struct ResidentSlot<T> {
+    name: &'static str,
+    model: Mutex<Option<Arc<T>>>,
+    last_used: Mutex<Option<Instant>>,
+    /// One load at a time. Inference can still run on an already-resident model.
+    loading: Mutex<()>,
+}
+
+impl<T> ResidentSlot<T> {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            model: Mutex::new(None),
+            last_used: Mutex::new(None),
+            loading: Mutex::new(()),
+        }
+    }
+
+    fn lock_model(&self) -> std::sync::MutexGuard<'_, Option<Arc<T>>> {
+        self.model.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn lock_last_used(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
+        self.last_used
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn current(&self) -> Option<Arc<T>> {
+        let model = self.lock_model().as_ref().map(Arc::clone);
+        if model.is_some() {
+            *self.lock_last_used() = Some(Instant::now());
+        }
+        model
+    }
+
+    fn ensure<F>(&self, load: F) -> Result<Arc<T>, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        if let Some(model) = self.current() {
+            return Ok(model);
+        }
+        let _loading = self
+            .loading
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(model) = self.current() {
+            return Ok(model);
+        }
+        let name = self.name;
+        eprintln!("[ai] loading {name}");
+        let started = Instant::now();
+        let loaded = std::thread::Builder::new()
+            .name(format!("ai-model-load-{name}"))
+            .stack_size(MODEL_LOAD_STACK)
+            .spawn(load)
+            .map_err(|error| {
+                let message = format!("spawn model load thread: {error}");
+                eprintln!("[ai] load {name} failed: {message}");
+                message
+            })?
+            .join()
+            .map_err(|_| {
+                let message = format!("{name} load thread panicked");
+                eprintln!("[ai] load {name} failed: {message}");
+                message
+            })?
+            .map_err(|error| {
+                eprintln!("[ai] load {name} failed: {error}");
+                error
+            })?;
+        let model = Arc::new(loaded);
+        *self.lock_model() = Some(Arc::clone(&model));
+        *self.lock_last_used() = Some(Instant::now());
+        eprintln!(
+            "[ai] loaded {name} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        Ok(model)
+    }
+
+    fn touch(&self) {
+        if self.lock_model().is_some() {
+            *self.lock_last_used() = Some(Instant::now());
+        }
+    }
+
+    /// Drop weights when idle and this slot is the only remaining owner.
+    fn sweep(&self, idle: Duration) {
+        let mut slot = self.lock_model();
+        let Some(model) = slot.as_ref() else {
+            return;
+        };
+        if Arc::strong_count(model) > 1 {
+            return;
+        }
+        let idle_for = self.lock_last_used().map(|used| used.elapsed());
+        let stale = idle_for.is_some_and(|elapsed| elapsed >= idle);
+        if !stale || Arc::strong_count(slot.as_ref().unwrap()) > 1 {
+            return;
+        }
+        let dropped = slot.take();
+        drop(slot);
+        drop(dropped);
+        *self.lock_last_used() = None;
+        eprintln!(
+            "[ai] unloaded {} idle_ms={}",
+            self.name,
+            idle_for.map(|elapsed| elapsed.as_millis()).unwrap_or(0)
+        );
+    }
+}
+
 pub struct LocalModelRuntime {
     pub info: LocalModelInfo,
-    siglip2: Siglip2Runtime,
-    scrfd: ScrfdRuntime,
-    arcface: ArcFaceRuntime,
+    root: PathBuf,
+    image_text: ModelArtifactSpec,
+    face_detector: ModelArtifactSpec,
+    face_embedder: ModelArtifactSpec,
+    tokenizer_path: Option<PathBuf>,
+    max_text_len: usize,
+    vision: ResidentSlot<Siglip2Vision>,
+    text: ResidentSlot<Siglip2Text>,
+    scrfd: ResidentSlot<ScrfdRuntime>,
+    arcface: ResidentSlot<ArcFaceRuntime>,
 }
 
 impl LocalModelRuntime {
+    /// Verify the manifest and remember where weights live. Does not read them.
     pub fn try_load(model_root: &Path) -> Result<Arc<Self>, String> {
-        // burn-onnx generated graphs are deep; Flex init can overflow the default stack.
-        let model_root = model_root.to_path_buf();
-        std::thread::Builder::new()
-            .name("ai-model-load".into())
-            .stack_size(128 * 1024 * 1024)
-            .spawn(move || {
-                let verified = ModelManifest::verify_in_dir(&model_root).map_err(manifest_err)?;
-                Self::from_verified(verified).map(Arc::new)
-            })
-            .map_err(|error| format!("spawn model load thread: {error}"))?
-            .join()
-            .map_err(|_| "model load thread panicked".to_string())?
+        let verified = ModelManifest::verify_in_dir(model_root).map_err(manifest_err)?;
+        Ok(Arc::new(Self::from_verified(verified)))
     }
 
-    pub fn from_verified(verified: VerifiedModelManifest) -> Result<Self, String> {
+    pub fn from_verified(verified: VerifiedModelManifest) -> Self {
         let root = verified.root.clone();
         let manifest = verified.manifest;
         let tokenizer_path = manifest
@@ -56,74 +181,156 @@ impl LocalModelRuntime {
             .and_then(|spec| spec.max_length)
             .unwrap_or(64);
         let device = super::selected_ai_device();
-        let siglip2 = Siglip2Runtime::load(
-            &root,
-            &manifest.image_text,
-            tokenizer_path.as_deref(),
-            max_text_len,
-        )?;
-        let scrfd = ScrfdRuntime::load(&root, &manifest.face_detector)?;
-        let arcface = ArcFaceRuntime::load(&root, &manifest.face_embedder)?;
-        let revision = manifest.combined_revision();
         // Vision/faces on `device`; SigLIP text is always Flex CPU (embedding table).
         let device_label = if device.label == "cpu" {
             device.label
         } else {
             format!("{}+flex-text", device.label)
         };
-        Ok(Self {
+        let image_dim = if manifest.image_text.dimension > 0 {
+            manifest.image_text.dimension
+        } else {
+            SIGLIP2_EMBEDDING_DIM
+        };
+        let face_dim = if manifest.face_embedder.dimension > 0 {
+            manifest.face_embedder.dimension
+        } else {
+            ARCFACE_EMBEDDING_DIM
+        };
+        Self {
             info: LocalModelInfo {
-                revision,
-                image_dim: manifest.image_text.dimension.max(siglip2.dimension),
-                face_dim: manifest.face_embedder.dimension.max(arcface.dimension),
-                model_root: root,
+                revision: manifest.combined_revision(),
+                image_dim,
+                face_dim,
+                model_root: root.clone(),
                 device_label,
             },
-            siglip2,
-            scrfd,
-            arcface,
-        })
+            root,
+            image_text: manifest.image_text,
+            face_detector: manifest.face_detector,
+            face_embedder: manifest.face_embedder,
+            tokenizer_path,
+            max_text_len,
+            vision: ResidentSlot::new("siglip2 vision"),
+            text: ResidentSlot::new("siglip2 text"),
+            scrfd: ResidentSlot::new("scrfd"),
+            arcface: ResidentSlot::new("arcface"),
+        }
+    }
+
+    /// Stop sweeping once `runtime` is dropped (provider reload or shutdown).
+    pub fn spawn_idle_sweep(runtime: &Arc<Self>) {
+        let weak: Weak<Self> = Arc::downgrade(runtime);
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            eprintln!("[ai] idle unload disabled: no tokio runtime");
+            return;
+        };
+        handle.spawn(async move {
+            loop {
+                tokio::time::sleep(MODEL_SWEEP_INTERVAL).await;
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                if tokio::task::spawn_blocking(move || runtime.sweep_idle())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn sweep_idle(&self) {
+        self.vision.sweep(MODEL_IDLE);
+        self.text.sweep(MODEL_IDLE);
+        self.scrfd.sweep(MODEL_IDLE);
+        self.arcface.sweep(MODEL_IDLE);
     }
 
     pub fn embed_images(&self, images: &[DynamicImage]) -> Vec<Result<Vec<f32>, String>> {
-        self.siglip2.embed_images(images)
+        if images.is_empty() {
+            return Vec::new();
+        }
+        let root = self.root.clone();
+        let spec = self.image_text.clone();
+        let vision = match self
+            .vision
+            .ensure(move || Siglip2Vision::load(&root, &spec))
+        {
+            Ok(vision) => vision,
+            Err(error) => {
+                return images.into_iter().map(|_| Err(error.clone())).collect();
+            }
+        };
+        let embedded = vision.embed_images(images);
+        self.vision.touch();
+        embedded
     }
 
     pub fn embed_texts(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-        self.siglip2.embed_texts(texts)
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let root = self.root.clone();
+        let spec = self.image_text.clone();
+        let tokenizer = self.tokenizer_path.clone();
+        let max_text_len = self.max_text_len;
+        let text = self.text.ensure(move || {
+            Siglip2Text::load(&root, &spec, tokenizer.as_deref(), max_text_len)
+        })?;
+        let embedded = text.embed_texts(texts);
+        self.text.touch();
+        embedded
     }
 
     pub fn detect_and_embed_faces(
         &self,
         image: &DynamicImage,
     ) -> Result<Vec<DetectedFace>, String> {
-        let detections = self.scrfd.detect(image)?;
-        let (img_w, img_h) = image.dimensions();
-        let owned;
-        let rgb = match image {
-            DynamicImage::ImageRgb8(rgb) => rgb,
-            other => {
-                owned = other.to_rgb8();
-                &owned
-            }
-        };
+        let root = self.root.clone();
+        let detector = self.face_detector.clone();
+        let scrfd = self
+            .scrfd
+            .ensure(move || ScrfdRuntime::load(&root, &detector))?;
+        let root = self.root.clone();
+        let embedder = self.face_embedder.clone();
+        let arcface = self
+            .arcface
+            .ensure(move || ArcFaceRuntime::load(&root, &embedder))?;
 
-        // Align on CPU (112×112 sample). Uploading the full photo as f32 NCHW for
-        // GPU warp blows VRAM on large images; ArcFace only needs the tiny crop.
-        let mut faces = Vec::with_capacity(detections.len());
-        for det in detections {
-            let crop = align_face_112_rgb(rgb, det.landmarks)?;
-            let embedding = self.arcface.embed_crop(&crop)?;
-            let area = det.box_xywh[2] * det.box_xywh[3];
-            faces.push(DetectedFace {
-                box_xywh: normalize_box_xywh(det.box_xywh, img_w, img_h),
-                landmarks: normalize_landmarks(det.landmarks, img_w, img_h),
-                detection_score: det.score,
-                quality_score: (det.score * (area / (area + 1.0))).clamp(0.0, 1.0),
-                embedding,
-            });
-        }
-        Ok(faces)
+        let detected = (|| {
+            let detections = scrfd.detect(image)?;
+            let (img_w, img_h) = image.dimensions();
+            let owned;
+            let rgb = match image {
+                DynamicImage::ImageRgb8(rgb) => rgb,
+                other => {
+                    owned = other.to_rgb8();
+                    &owned
+                }
+            };
+
+            // Align on CPU (112×112 sample). Uploading the full photo as f32 NCHW for
+            // GPU warp blows VRAM on large images; ArcFace only needs the tiny crop.
+            let mut faces = Vec::with_capacity(detections.len());
+            for det in detections {
+                let crop = align_face_112_rgb(rgb, det.landmarks)?;
+                let embedding = arcface.embed_crop(&crop)?;
+                let area = det.box_xywh[2] * det.box_xywh[3];
+                faces.push(DetectedFace {
+                    box_xywh: normalize_box_xywh(det.box_xywh, img_w, img_h),
+                    landmarks: normalize_landmarks(det.landmarks, img_w, img_h),
+                    detection_score: det.score,
+                    quality_score: (det.score * (area / (area + 1.0))).clamp(0.0, 1.0),
+                    embedding,
+                });
+            }
+            Ok(faces)
+        })();
+        self.scrfd.touch();
+        self.arcface.touch();
+        detected
     }
 }
 
