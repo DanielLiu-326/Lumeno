@@ -173,45 +173,12 @@ pub(crate) fn thumbnail_cache_file(
     )))
 }
 
-/// Longest edge to send to darktable-cli when the same decode also feeds the
-/// album-grid thumb. `request_size == 0` means full resolution (already larger).
-fn darktable_combined_max_edge(request_size: u32) -> u32 {
-    if request_size == 0 {
-        0
-    } else {
-        request_size.max(THUMBNAIL_SIZE)
-    }
-}
-
-fn album_browse_thumbnail_path(
-    data_path: &std::path::Path,
-    cache_owner: &str,
-    source: &std::path::Path,
-    metadata: &std::fs::Metadata,
-) -> Option<PathBuf> {
-    thumbnail_cache_file(
-        data_path,
-        cache_owner,
-        source,
-        THUMBNAIL_SIZE,
-        metadata,
-        ThumbnailGenerator::Lumeno,
-    )
-    .ok()
-}
-
-/// Write the requested output and, when `browse_path` is set, a 360px lumeno
-/// grid thumb from the same bitmap so darktable-cli is not invoked twice.
 fn save_decoded_outputs(
     image: image::DynamicImage,
     request_path: PathBuf,
     request_size: u32,
     request_format: image::ImageFormat,
-    browse_path: Option<PathBuf>,
 ) -> Result<(), String> {
-    let browse = browse_path
-        .as_ref()
-        .map(|_| image.thumbnail(THUMBNAIL_SIZE, THUMBNAIL_SIZE));
     let requested = apply_max_edge(image, request_size);
     if let Some(parent) = request_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create output dir failed: {e}"))?;
@@ -219,18 +186,98 @@ fn save_decoded_outputs(
     requested
         .save_with_format(&request_path, request_format)
         .map_err(|e| format!("save decoded output failed: {e}"))?;
-    if let (Some(browse_img), Some(path)) = (browse, browse_path) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(error) = browse_img.save_with_format(&path, image::ImageFormat::WebP) {
-            eprintln!(
-                "[thumbnail] overwrite browse thumb failed: {error} ({})",
-                path.display()
-            );
-        }
-    }
     Ok(())
+}
+
+async fn xmp_modified_secs(xmp_path: Option<&std::path::Path>) -> Option<u64> {
+    let path = xmp_path?;
+    let secs = tokio::fs::metadata(path)
+        .await
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    Some(secs)
+}
+
+fn source_modified_secs(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `size == 0` is the full-resolution darktable render. Other sizes are JPEG
+/// derivatives of that file and share this key, including the XMP mtime.
+fn darktable_preview_cache_path(
+    data_path: &std::path::Path,
+    username: &str,
+    source: &std::path::Path,
+    size: u32,
+    src_len: u64,
+    src_modified: u64,
+    xmp_modified: Option<u64>,
+) -> PathBuf {
+    let mut hasher = Sha512::new();
+    hasher.update(username.as_bytes());
+    hasher.update(b"|dt|");
+    hasher.update(cache_relative_path(data_path, source).as_bytes());
+    hasher.update(b"|v2|");
+    hasher.update(size.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(src_len.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(src_modified.to_string().as_bytes());
+    if let Some(xmp_modified) = xmp_modified {
+        hasher.update(b"|xmp|");
+        hasher.update(xmp_modified.to_string().as_bytes());
+    } else {
+        hasher.update(b"|noxmp|");
+    }
+    let digest = hasher.finalize();
+    let cache_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    data_path
+        .join("cache")
+        .join("darktable")
+        .join(format!("{cache_key}.jpg"))
+}
+
+fn scale_darktable_preview(master: &std::path::Path, dest: &std::path::Path, size: u32) -> Result<(), String> {
+    let image = image::open(master).map_err(|error| error.to_string())?;
+    let scaled = apply_max_edge(image, size);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("create darktable cache dir failed: {error}"))?;
+    }
+    let tmp = dest.with_extension("part");
+    scaled
+        .save_with_format(&tmp, image::ImageFormat::Jpeg)
+        .map_err(|error| format!("save darktable preview failed: {error}"))?;
+    std::fs::rename(&tmp, dest).map_err(|error| format!("rename darktable preview failed: {error}"))?;
+    Ok(())
+}
+
+/// Return the requested darktable JPEG when it already exists, or scale it from
+/// the full-resolution render. Does not run darktable-cli.
+async fn existing_or_scaled_darktable_preview(
+    master: &std::path::Path,
+    sized: &std::path::Path,
+    size: u32,
+) -> Result<Option<PathBuf>, String> {
+    if sized.exists() {
+        return Ok(Some(sized.to_path_buf()));
+    }
+    if size == 0 || !master.exists() {
+        return Ok(None);
+    }
+    let master = master.to_path_buf();
+    let sized_buf = sized.to_path_buf();
+    tokio::task::spawn_blocking(move || scale_darktable_preview(&master, &sized_buf, size))
+        .await
+        .map_err(|error| format!("scale darktable preview failed: {error}"))??;
+    Ok(Some(sized.to_path_buf()))
 }
 
 /// Cache key for EXIF metadata, keyed on file path, size, and mtime.
@@ -265,7 +312,6 @@ pub(crate) async fn ensure_thumbnail_cached(
     generator: ThumbnailGenerator,
     thumbnail_limiter: &Arc<ConcurrencyLimiter>,
     darktable_limiter: &Arc<ConcurrencyLimiter>,
-    overwrite_browse: Option<PathBuf>,
 ) -> Result<(), AppError> {
     if output.exists() {
         return Ok(());
@@ -297,22 +343,12 @@ pub(crate) async fn ensure_thumbnail_cached(
     } else {
         DecoderCreateOptions::auto()
     };
-    let decode_edge = if use_darktable {
-        darktable_combined_max_edge(size)
-    } else {
-        size
-    };
     let mut decode_opts = DecodeOptions::for_path(&source)
         .map_err(|error| AppError::Unknown(error.message))?
-        .with_max_edge(decode_edge);
+        .with_max_edge(size);
     if use_darktable {
         decode_opts = decode_opts.with_xmp();
     }
-    let browse_path = if use_darktable {
-        overwrite_browse
-    } else {
-        None
-    };
     let source_for_decode = source.clone();
     let output_blocking = output.clone();
     let result = async {
@@ -322,13 +358,7 @@ pub(crate) async fn ensure_thumbnail_cached(
             .await
             .map_err(|error| error.message)?;
         tokio::task::spawn_blocking(move || {
-            save_decoded_outputs(
-                image,
-                output_blocking,
-                size,
-                image::ImageFormat::WebP,
-                browse_path,
-            )
+            save_decoded_outputs(image, output_blocking, size, image::ImageFormat::WebP)
         })
         .await
         .map_err(|e| format!("thumbnail save join failed: {e}"))?
@@ -398,13 +428,7 @@ async fn ensure_video_poster_cached(
     let output_blocking = output.clone();
     let result = tokio::task::spawn_blocking(move || {
         let image = image::load_from_memory(&jpeg).map_err(|e| e.to_string())?;
-        save_decoded_outputs(
-            image,
-            output_blocking,
-            size,
-            image::ImageFormat::WebP,
-            None,
-        )
+        save_decoded_outputs(image, output_blocking, size, image::ImageFormat::WebP)
     })
     .await
     .map_err(|e| AppError::Unknown(format!("thumbnail save join failed: {e}")))?;
@@ -650,7 +674,6 @@ pub(crate) async fn generate_thumbnail_batch(
                 ThumbnailGenerator::Lumeno,
                 &cfg.thumbnail_limiter,
                 &cfg.darktable_limiter,
-                None,
             )
             .await
             .err()
@@ -961,6 +984,35 @@ pub(crate) async fn resolve_photo_owner_root(
     }
 }
 
+async fn serve_image_file(
+    path: &std::path::Path,
+    content_type: &'static str,
+    cache_control: &'static str,
+) -> Result<Response<Body>, AppError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| AppError::Unknown(format!("open image failed: {e}")))?;
+    let file_size = file
+        .metadata()
+        .await
+        .map_err(|e| AppError::Unknown(format!("stat image failed: {e}")))?
+        .len();
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", HeaderValue::from_static(content_type));
+    headers.insert("Cache-Control", HeaderValue::from_static(cache_control));
+    headers.insert(
+        "Content-Length",
+        HeaderValue::from_str(file_size.to_string().as_str())
+            .map_err(|e| AppError::Unknown(format!("invalid content length header: {e}")))?,
+    );
+    let mut ret = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from_stream(ReaderStream::new(file)))
+        .map_err(|e| AppError::Unknown(format!("build image response failed: {e}")))?;
+    *(ret.headers_mut()) = headers;
+    Ok(ret)
+}
+
 #[named]
 pub async fn api_thumbnail(
     locale: RequestLocale,
@@ -1007,79 +1059,76 @@ pub async fn api_thumbnail(
         None => THUMBNAIL_SIZE,
     };
     // Video posters always use the still-image cache slot. darktable does not apply.
-    let generator = if video {
-        ThumbnailGenerator::Lumeno
-    } else {
+    if !video {
         ThumbnailGenerator::parse(query.generator.as_deref()).ok_or_else(|| {
             AppError::BadRequest(tr(locale.as_str(), "error.invalid_thumbnail_generator"))
-        })?
-    };
+        })?;
+    }
     let metadata = tokio::fs::metadata(&source)
         .await
         .map_err(|_| AppError::NotFound(source.display().to_string()))?;
     let cache_owner = query.owner.as_deref().unwrap_or(&username);
+    if !video {
+        let xmp_path = find_xmp_sidecar(&source);
+        let xmp_modified = xmp_modified_secs(xmp_path.as_deref()).await;
+        let src_modified = source_modified_secs(&metadata);
+        let sized = darktable_preview_cache_path(
+            cfg.data_path.as_path(),
+            &username,
+            source.as_path(),
+            size,
+            metadata.len(),
+            src_modified,
+            xmp_modified,
+        );
+        let master = darktable_preview_cache_path(
+            cfg.data_path.as_path(),
+            &username,
+            source.as_path(),
+            0,
+            metadata.len(),
+            src_modified,
+            xmp_modified,
+        );
+        match existing_or_scaled_darktable_preview(&master, &sized, size).await {
+            Ok(Some(preview)) => {
+                return serve_image_file(
+                    &preview,
+                    "image/jpeg",
+                    "private, max-age=31536000, immutable",
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("[thumbnail] darktable preview scale failed: {error}"),
+        }
+    }
     let cache_path = thumbnail_cache_file(
         cfg.data_path.as_path(),
         cache_owner,
         source.as_path(),
         size,
         &metadata,
-        generator,
+        ThumbnailGenerator::Lumeno,
     )?;
     let owner_dir = owner_cache_dir(cfg.data_path.as_path(), "thumbnails", cache_owner)?;
     if !cache_path.starts_with(&owner_dir) {
         return Err(AppError::NotFound(path.clone()));
     }
-    let overwrite_browse = (generator == ThumbnailGenerator::Darktable)
-        .then(|| {
-            album_browse_thumbnail_path(
-                cfg.data_path.as_path(),
-                cache_owner,
-                source.as_path(),
-                &metadata,
-            )
-        })
-        .flatten();
 
     // Cache hits bypass the limiter inside ensure_thumbnail_cached().
+    // A missing darktable preview stays on LibRaw; this request does not start darktable.
     ensure_thumbnail_cached(
         source,
         cache_path.clone(),
         size,
-        generator,
+        ThumbnailGenerator::Lumeno,
         &cfg.thumbnail_limiter,
         &cfg.darktable_limiter,
-        overwrite_browse,
     )
     .await?;
 
-    let file = tokio::fs::File::open(&cache_path)
-        .await
-        .map_err(|e| AppError::Unknown(format!("open thumbnail failed: {e}")))?;
-    let file_size = file
-        .metadata()
-        .await
-        .map_err(|e| AppError::Unknown(format!("stat thumbnail failed: {e}")))?
-        .len();
-
-    let mut headers = HeaderMap::new();
-    headers.insert("Content-Type", HeaderValue::from_static("image/webp"));
-    headers.insert(
-        "Cache-Control",
-        HeaderValue::from_static("private, max-age=31536000, immutable"),
-    );
-    headers.insert(
-        "Content-Length",
-        HeaderValue::from_str(file_size.to_string().as_str())
-            .map_err(|e| AppError::Unknown(format!("invalid content length header: {e}")))?,
-    );
-
-    let mut ret = Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from_stream(ReaderStream::new(file)))
-        .map_err(|e| AppError::Unknown(format!("build thumbnail response failed: {e}")))?;
-    *(ret.headers_mut()) = headers;
-    Ok(ret)
+    serve_image_file(&cache_path, "image/webp", "private, max-age=31536000, immutable").await
 }
 
 // ── Darktable preview / export ───────────────────────────────────────────────
@@ -1130,10 +1179,10 @@ pub async fn api_darktable_preview(
         )));
     }
 
-    // XMP is optional: use it if found, basic RAW development if not
+    // XMP is optional: use it if found, basic RAW development if not.
+    // darktable-cli always writes the original pixel count. Smaller sizes are
+    // scaled from that file and stored beside it.
     let xmp_path = find_xmp_sidecar(&source);
-
-    // size=0 means full resolution (no --width/--height)
     let size = query.size.unwrap_or(DARKTABLE_PREVIEW_DEFAULT_SIZE);
     let size = if size == 0 {
         0
@@ -1141,79 +1190,51 @@ pub async fn api_darktable_preview(
         size.clamp(DARKTABLE_PREVIEW_SIZE_MIN, DARKTABLE_PREVIEW_SIZE_MAX)
     };
 
-    // Build a cache key that includes the XMP modification time (if any)
     let src_meta = tokio::fs::metadata(&source)
         .await
         .map_err(|_| AppError::NotFound(source.display().to_string()))?;
-    let xmp_modified = if let Some(ref xmp) = xmp_path {
-        tokio::fs::metadata(xmp)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let src_modified = src_meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let mut hasher = Sha512::new();
-    hasher.update(username.as_bytes());
-    hasher.update(b"|dt|");
-    hasher.update(cache_relative_path(cfg.data_path.as_path(), source.as_path()).as_bytes());
-    hasher.update(b"|v2|");
-    hasher.update(size.to_string().as_bytes());
-
-    hasher.update(b"|");
-    hasher.update(src_meta.len().to_string().as_bytes());
-    hasher.update(b"|");
-    hasher.update(src_modified.to_string().as_bytes());
-    if xmp_path.is_some() {
-        hasher.update(b"|xmp|");
-        hasher.update(xmp_modified.to_string().as_bytes());
-    } else {
-        hasher.update(b"|noxmp|");
-    }
-    let digest = hasher.finalize();
-    let cache_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-
-    let cache_path = cfg
-        .data_path
-        .join("cache")
-        .join("darktable")
-        .join(format!("{cache_key}.jpg"));
-
-    let cache_owner = query.owner.as_deref().unwrap_or(&username);
-    let browse_path = album_browse_thumbnail_path(
+    let xmp_modified = xmp_modified_secs(xmp_path.as_deref()).await;
+    let src_modified = source_modified_secs(&src_meta);
+    let sized = darktable_preview_cache_path(
         cfg.data_path.as_path(),
-        cache_owner,
+        &username,
         source.as_path(),
-        &src_meta,
+        size,
+        src_meta.len(),
+        src_modified,
+        xmp_modified,
+    );
+    let master = darktable_preview_cache_path(
+        cfg.data_path.as_path(),
+        &username,
+        source.as_path(),
+        0,
+        src_meta.len(),
+        src_modified,
+        xmp_modified,
     );
 
-    if !cache_path.exists() {
+    if let Some(preview) = existing_or_scaled_darktable_preview(&master, &sized, size)
+        .await
+        .map_err(AppError::Unknown)?
+    {
+        return serve_image_file(&preview, "image/jpeg", "private, no-cache").await;
+    }
+
+    if !master.exists() {
         let permit = cfg.darktable_limiter.acquire().await;
-        if cache_path.exists() {
-            drop(permit);
-        } else {
-            if let Some(parent) = cache_path.parent() {
+        if !master.exists() {
+            if let Some(parent) = master.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| {
                     AppError::Unknown(format!("create darktable cache dir failed: {e}"))
                 })?;
             }
             let source_for_decode = source.clone();
-            let cache_blocking = cache_path.clone();
+            let master_blocking = master.clone();
             let decode_opts = DecodeOptions::for_path(&source_for_decode)
                 .map_err(|error| AppError::Unknown(error.message))?
                 .with_xmp()
-                .with_max_edge(darktable_combined_max_edge(size));
+                .with_max_edge(0);
             let result = async {
                 let decoder = create_decoder(DecoderCreateOptions::darktable())
                     .map_err(|error| error.message)?;
@@ -1224,10 +1245,9 @@ pub async fn api_darktable_preview(
                 tokio::task::spawn_blocking(move || {
                     save_decoded_outputs(
                         image,
-                        cache_blocking,
-                        size,
+                        master_blocking,
+                        0,
                         image::ImageFormat::Jpeg,
-                        browse_path,
                     )
                     .map_err(|e| format!("save darktable preview failed: {e}"))
                 })
@@ -1240,32 +1260,11 @@ pub async fn api_darktable_preview(
         }
     }
 
-    let file = tokio::fs::File::open(&cache_path)
+    let preview = existing_or_scaled_darktable_preview(&master, &sized, size)
         .await
-        .map_err(|e| AppError::Unknown(format!("open darktable preview failed: {e}")))?;
-    let file_size = file
-        .metadata()
-        .await
-        .map_err(|e| AppError::Unknown(format!("stat darktable preview failed: {e}")))?
-        .len();
-
-    let mut headers = HeaderMap::new();
-    headers.insert("Content-Type", HeaderValue::from_static("image/jpeg"));
-    headers.insert(
-        "Cache-Control",
-        HeaderValue::from_static("private, no-cache"),
-    );
-    headers.insert(
-        "Content-Length",
-        HeaderValue::from_str(file_size.to_string().as_str())
-            .map_err(|e| AppError::Unknown(format!("invalid content length header: {e}")))?,
-    );
-    let mut ret = Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from_stream(ReaderStream::new(file)))
-        .map_err(|e| AppError::Unknown(format!("build darktable preview response failed: {e}")))?;
-    *(ret.headers_mut()) = headers;
-    Ok(ret)
+        .map_err(AppError::Unknown)?
+        .unwrap_or(master);
+    serve_image_file(&preview, "image/jpeg", "private, no-cache").await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1362,7 +1361,9 @@ pub async fn api_albums_export(
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
         let same_format = match (src_ext.as_str(), out_ext) {
-            ("jpg" | "jpeg", "jpg") | ("png", "png") | ("tif" | "tiff", "tiff")
+            ("jpg" | "jpeg", "jpg")
+            | ("png", "png")
+            | ("tif" | "tiff", "tiff")
             | ("webp", "webp") => true,
             _ => false,
         };
@@ -1576,38 +1577,19 @@ mod tests {
     }
 
     #[test]
-    fn darktable_combined_max_edge_picks_the_larger_side() {
-        assert_eq!(super::darktable_combined_max_edge(0), 0);
-        assert_eq!(
-            super::darktable_combined_max_edge(64),
-            crate::backend::constants::THUMBNAIL_SIZE
-        );
-        assert_eq!(
-            super::darktable_combined_max_edge(crate::backend::constants::THUMBNAIL_SIZE),
-            crate::backend::constants::THUMBNAIL_SIZE
-        );
-        assert_eq!(super::darktable_combined_max_edge(1600), 1600);
-    }
-
-    #[test]
-    fn save_decoded_outputs_writes_request_and_browse_thumbs() {
-        let dir = std::env::temp_dir().join(format!("lumeno-thumb-{}", uuid::Uuid::new_v4()));
+    fn scaled_darktable_preview_uses_the_full_render() {
+        let dir = std::env::temp_dir().join(format!("lumeno-dt-scale-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let request = dir.join("request.jpg");
-        let browse = dir.join("browse.webp");
+        let master = dir.join("master.jpg");
+        let sized = dir.join("sized.jpg");
         let image = image::DynamicImage::new_rgb8(800, 600);
-        super::save_decoded_outputs(
-            image,
-            request.clone(),
-            400,
-            image::ImageFormat::Jpeg,
-            Some(browse.clone()),
-        )
-        .unwrap();
-        let requested = image::open(&request).unwrap();
-        assert!(requested.width().max(requested.height()) <= 400);
-        let grid = image::open(&browse).unwrap();
-        assert!(grid.width().max(grid.height()) <= crate::backend::constants::THUMBNAIL_SIZE);
+        image
+            .save_with_format(&master, image::ImageFormat::Jpeg)
+            .unwrap();
+        super::scale_darktable_preview(&master, &sized, 100).unwrap();
+        let grid = image::open(&sized).unwrap();
+        assert!(grid.width().max(grid.height()) <= 100);
+        assert!(sized.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

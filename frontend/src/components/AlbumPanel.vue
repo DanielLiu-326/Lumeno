@@ -11,6 +11,7 @@ import {
 import { t } from "../i18n/index.js";
 import { albumCoverUrl } from "../utils/albumCover.js";
 import { downloadFileByUrl } from "../utils/downloadFile.js";
+import { gradedThumbEpoch, gradedThumbQuery, markGradedThumb } from "../utils/gradedThumb.js";
 import { formatDurationMs, isVideoPhoto, playbackUrl } from "../utils/mediaKind.js";
 import ImportSourceModal from "./ImportSourceModal.vue";
 import CloudFilePicker from "./CloudFilePicker.vue";
@@ -1507,13 +1508,19 @@ function handlePhotosScrollNearBottom() {
 }
 
 function getThumbnail(path, size = 320, owner = null) {
-  const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
+  const resolvedOwner = owner || currentAlbumOwner.value;
   const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
   return `/api/thumbnail/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
 }
 
+function gridThumbOwner(photo) {
+  return photo?.owner || currentAlbumOwner.value;
+}
+
 function getGridThumbnail(photo) {
-  return getThumbnail(photo.path, 360, photo.owner ?? currentAlbumOwner.value);
+  void gradedThumbEpoch.value;
+  const owner = gridThumbOwner(photo);
+  return getThumbnail(photo.path, 360, owner) + gradedThumbQuery(owner, photo.path);
 }
 
 const detailPhotoList = computed(() => detailNavPhotos.value || props.albumPhotos);
@@ -1846,6 +1853,10 @@ function toggleDarktablePreview() {
 }
 function onDetailImageLoad() {
   imageLoading.value = false;
+  const photo = detailPhoto.value;
+  if (photo?.path && String(detailImageSrc.value).includes("/api/albums/darktable_preview/")) {
+    markGradedThumb(gridThumbOwner(photo), photo.path);
+  }
 }
 function onDetailVideoReady(event) {
   const el = event?.target;
@@ -1928,7 +1939,7 @@ const detailPlaybackSrc = computed(() => {
 const detailImageSrc = computed(() => {
   if (!detailPhoto.value) return "";
   if (isDetailVideo.value) {
-    return getThumbnail(detailPhoto.value.path, 800);
+    return getThumbnail(detailPhoto.value.path, 800, detailPhoto.value.owner);
   }
   const isRaw = isRawFile(detailPhoto.value.name);
 
@@ -1939,19 +1950,19 @@ const detailImageSrc = computed(() => {
   }
 
   if (detailImageFallback.value) {
-    return getThumbnail(detailPhoto.value.path, 800);
+    return getThumbnail(detailPhoto.value.path, 800, detailPhoto.value.owner);
   }
 
   // Non-darktable: JPEG/etc can use original; RAW goes through /api/thumbnail (LibRaw/lumeno).
   // size=0 requests full-resolution decode (same as darktable_preview).
   if (detailFullscreen.value || detailExpanded.value) {
     if (isRaw) {
-      return getThumbnail(detailPhoto.value.path, 0);
+      return getThumbnail(detailPhoto.value.path, 0, detailPhoto.value.owner);
     }
     return getOriginalUrl(detailPhoto.value.path);
   }
 
-  return getThumbnail(detailPhoto.value.path, isMobile.value ? 1600 : 1200);
+  return getThumbnail(detailPhoto.value.path, isMobile.value ? 1600 : 1200, detailPhoto.value.owner);
 });
 
 function downloadOriginal() {
@@ -2669,7 +2680,7 @@ defineExpose({
                             @click="openDuplicateDetail(photo)"
                           >
                             <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                              <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360)" alt="" />
+                              <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getGridThumbnail(photo)" alt="" />
                             </div>
                             <p class="mt-1.5 truncate text-xs font-semibold" :title="duplicateDisplayName(photo)">{{ duplicateDisplayName(photo) }}</p>
                             <p class="truncate text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ formatSize(photo.size_bytes) }}</p>
@@ -2710,7 +2721,7 @@ defineExpose({
                 class="group min-w-0 self-start cursor-pointer rounded-xl app-surface app-card p-1.5 transition sm:p-2"
                 @click="openSimilarDetail(photo)">
                 <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                  <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
+                  <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getGridThumbnail(photo)" alt="" />
                 </div>
                 <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
                 <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -2738,7 +2749,7 @@ defineExpose({
                 class="group min-w-0 self-start cursor-pointer rounded-xl app-surface app-card p-1.5 transition sm:p-2"
                 @click="openSimilarDetail(photo)">
                 <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                  <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
+                  <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getGridThumbnail(photo)" alt="" />
                 </div>
                 <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
                 <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -2777,7 +2788,7 @@ defineExpose({
               @click="onGridPhotoClick(photo)"
             >
               <div class="relative aspect-square overflow-hidden rounded-lg" :class="isDark ? 'bg-stone-800' : 'bg-stone-100'">
-                <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getThumbnail(photo.path, 360, photo.owner)" alt="" />
+                <LazyImage img-class="absolute inset-0 h-full w-full object-cover transition group-hover:scale-105" :src="getGridThumbnail(photo)" alt="" />
               </div>
               <p class="mt-1.5 truncate text-[11px] font-medium" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ photo.name }}</p>
               <p class="truncate text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -2791,7 +2802,7 @@ defineExpose({
               :compact="gridCompact"
               :hide-overlays="gridHideOverlays"
               :is-dark="isDark"
-              :thumb-src="getThumbnail(photo.path, 360)"
+              :thumb-src="getGridThumbnail(photo)"
               :format-size="formatSize"
               :select-mode="selectMode"
               :selected="selectMode && selectedPhotoPaths.has(photo.path)"

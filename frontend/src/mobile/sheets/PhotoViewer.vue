@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { t } from "../../i18n/index.js";
 import { COLOR_LABELS } from "../../utils/photoCardLayout.js";
 import { downloadFileByUrl } from "../../utils/downloadFile.js";
+import { gradedThumbEpoch, gradedThumbQuery, markGradedThumb } from "../../utils/gradedThumb.js";
 import { formatDurationMs, isVideoPhoto, playbackUrl } from "../../utils/mediaKind.js";
 import {
   IconArrowLeft, IconCamera, IconCheck, IconChevronLeft, IconChevronRight,
@@ -253,7 +254,10 @@ function ownerAmpFor(photo) {
 
 function thumbSrc(photo, size = 360) {
   if (!photo?.path || String(photo.path).startsWith("__empty")) return "";
-  return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=${size}${ownerAmpFor(photo)}`;
+  void gradedThumbEpoch.value;
+  const owner = photo.owner || (photo.path === props.photo?.path ? photoOwner.value : "") || photoOwner.value;
+  const graded = size === 360 ? gradedThumbQuery(owner, photo.path) : "";
+  return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=${size}${ownerAmpFor(photo)}${graded}`;
 }
 
 function isSlidePhoto(item) {
@@ -668,6 +672,9 @@ function onSlideFullLoad(src) {
   if (src && src === imageSrc.value) {
     imageLoading.value = false;
     currentFullReady.value = true;
+    if (String(src).includes("/api/albums/darktable_preview/") && props.photo?.path) {
+      markGradedThumb(photoOwner.value, props.photo.path);
+    }
   }
 }
 
