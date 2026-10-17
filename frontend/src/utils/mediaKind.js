@@ -7,6 +7,16 @@ export function isVideoPhoto(photo) {
   return VIDEO_EXTS.has(ext);
 }
 
+/**
+ * Path segment for `/api/thumbnail/{segment}`.
+ * Mobile browsers refuse to paint an img whose URL ends in .mp4/.mov,
+ * so video requests get a trailing .webp that the server strips.
+ */
+export function thumbnailPathSegment(path) {
+  const encoded = encodeURIComponent(path || "");
+  return isVideoPhoto({ path }) ? `${encoded}.webp` : encoded;
+}
+
 export function formatDurationMs(ms) {
   const n = Number(ms);
   if (!Number.isFinite(n) || n <= 0) return "";

@@ -12,7 +12,8 @@ import { t } from "../i18n/index.js";
 import { albumCoverUrl } from "../utils/albumCover.js";
 import { downloadFileByUrl } from "../utils/downloadFile.js";
 import { gradedThumbEpoch, gradedThumbQuery, markGradedThumb } from "../utils/gradedThumb.js";
-import { formatDurationMs, isVideoPhoto, playbackUrl } from "../utils/mediaKind.js";
+import { formatDurationMs, isVideoPhoto, playbackUrl, thumbnailPathSegment } from "../utils/mediaKind.js";
+import { loadVideoInfo, planPlayback, startVideoEncode, watchVideoEncode } from "../utils/videoEncode.js";
 import ImportSourceModal from "./ImportSourceModal.vue";
 import CloudFilePicker from "./CloudFilePicker.vue";
 import FilterSidebar from "./FilterSidebar.vue";
@@ -73,6 +74,8 @@ const props = defineProps({
   albumFaceSuggestions: { type: Object, default: () => ({ clusters: [] }) },
   albumFacesEditable: { type: Boolean, default: true },
   albumFacesOwner: { type: String, default: "" },
+  albumClusterSimilarity: { type: Number, default: 0.62 },
+  albumClusterReclustering: { type: Boolean, default: false },
   onCreateAlbum: { type: Function, default: null },
   onUpdateAlbum: { type: Function, default: null },
   onShareAlbum: { type: Function, default: null },
@@ -117,6 +120,7 @@ const emit = defineEmits([
   "remove-album-center",
   "delete-album-person",
   "adopt-album-cluster",
+  "recluster-album-faces",
   "merge-album-cluster",
   "detail-photo",
 ]);
@@ -448,11 +452,63 @@ const detailImageEpoch = ref(0);
 const detailVideoRef = ref(null);
 const videoUnplayable = ref(false);
 const detailVideoLive = ref(false);
+const detailVideoPlan = ref(null);
+const detailVideoEncoding = ref(false);
 let detailVideoLiveTimer = 0;
+let detailVideoPlanToken = 0;
+let stopDetailEncodeWatch = () => {};
+
+async function refreshDetailVideoPlan(photo) {
+  const token = ++detailVideoPlanToken;
+  stopDetailEncodeWatch();
+  detailVideoPlan.value = null;
+  detailVideoEncoding.value = false;
+  if (!photo || !isVideoPhoto(photo)) return;
+  const owner = photo.owner || currentAlbumOwner.value;
+  try {
+    const info = await loadVideoInfo(photo.path, owner, { refresh: true });
+    if (token !== detailVideoPlanToken || detailPhoto.value?.path !== photo.path) return;
+    detailVideoPlan.value = planPlayback(info);
+  } catch {
+    if (token !== detailVideoPlanToken || detailPhoto.value?.path !== photo.path) return;
+    detailVideoPlan.value = planPlayback(null);
+  }
+}
+
+async function confirmDetailVideoEncode() {
+  const photo = detailPhoto.value;
+  const plan = detailVideoPlan.value;
+  if (!photo || plan?.mode !== "ask" || detailVideoEncoding.value) return;
+  const owner = photo.owner || currentAlbumOwner.value;
+  const token = detailVideoPlanToken;
+  detailVideoEncoding.value = true;
+  try {
+    const started = await startVideoEncode(photo.path, owner, plan.codec);
+    if (started?.ready) {
+      const info = await loadVideoInfo(photo.path, owner, { refresh: true });
+      if (token !== detailVideoPlanToken) return;
+      detailVideoEncoding.value = false;
+      detailVideoPlan.value = planPlayback(info);
+      return;
+    }
+    stopDetailEncodeWatch = watchVideoEncode(photo.path, owner, plan.codec, started?.task_id, () => (
+      token === detailVideoPlanToken && detailPhoto.value?.path === photo.path
+    ), (next) => {
+      detailVideoEncoding.value = false;
+      videoUnplayable.value = false;
+      detailVideoPlan.value = next;
+    }, () => {
+      if (token === detailVideoPlanToken) detailVideoEncoding.value = false;
+    });
+  } catch {
+    if (token === detailVideoPlanToken) detailVideoEncoding.value = false;
+  }
+}
 
 watch(() => detailPhoto.value?.path, (path) => {
   detailVideoLive.value = false;
   window.clearTimeout(detailVideoLiveTimer);
+  refreshDetailVideoPlan(detailPhoto.value);
   if (!path || !isVideoPhoto(detailPhoto.value)) return;
   // Mount after the dialog fade. A video created while an ancestor opacity is
   // animating stays on the poster and only outputs audio.
@@ -461,7 +517,10 @@ watch(() => detailPhoto.value?.path, (path) => {
   }, 320);
 });
 
-onBeforeUnmount(() => window.clearTimeout(detailVideoLiveTimer));
+onBeforeUnmount(() => {
+  window.clearTimeout(detailVideoLiveTimer);
+  stopDetailEncodeWatch();
+});
 const DETAIL_VIEW_PREFERENCES_KEY = "album-detail-view-preferences";
 
 function loadDetailViewPreferences() {
@@ -1510,7 +1569,7 @@ function handlePhotosScrollNearBottom() {
 function getThumbnail(path, size = 320, owner = null) {
   const resolvedOwner = owner || currentAlbumOwner.value;
   const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
-  return `/api/thumbnail/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
+  return `/api/thumbnail/${thumbnailPathSegment(path)}?size=${size}${ownerParam}`;
 }
 
 function gridThumbOwner(photo) {
@@ -1931,8 +1990,15 @@ function isRawFile(name) {
 }
 const isDetailVideo = computed(() => isVideoPhoto(detailPhoto.value));
 const detailDurationLabel = computed(() => formatDurationMs(detailPhoto.value?.duration_ms));
+const detailVideoCanPlay = computed(() => {
+  const mode = detailVideoPlan.value?.mode;
+  return mode === "original" || mode === "encode";
+});
 const detailPlaybackSrc = computed(() => {
   if (!detailPhoto.value) return "";
+  if (detailVideoPlan.value?.mode === "encode" && detailVideoPlan.value.url) {
+    return detailVideoPlan.value.url;
+  }
   const owner = detailPhoto.value.owner || currentAlbumOwner.value;
   return playbackUrl(detailPhoto.value.path, owner);
 });
@@ -2829,6 +2895,8 @@ defineExpose({
             :people="albumPeople"
             :suggestions="albumFaceSuggestions"
             :editable="albumFacesEditable"
+            :cluster-similarity="albumClusterSimilarity"
+            :reclustering="albumClusterReclustering"
             :initial-query="textSearchInput"
             :on-search-text="onSearchTextInModal"
             :on-load-duplicates="onLoadDuplicatesInModal"
@@ -2836,6 +2904,7 @@ defineExpose({
             @back="aiToolsPanelOpen = false"
             @refresh="emit('refresh-album-people')"
             @adopt-cluster="(body) => emit('adopt-album-cluster', body)"
+            @recluster="(similarity) => emit('recluster-album-faces', similarity)"
             @merge-cluster="(body) => emit('merge-album-cluster', body)"
             @patch-person="(id, updates) => emit('patch-album-person', id, updates)"
             @remove-center="(body) => emit('remove-album-center', body)"
@@ -3231,9 +3300,9 @@ defineExpose({
                 </svg>
               </div>
               <video
-                v-if="isDetailVideo && detailVideoLive && !videoUnplayable"
+                v-if="isDetailVideo && detailVideoLive && detailVideoCanPlay && !videoUnplayable"
                 ref="detailVideoRef"
-                :key="detailPhoto.path"
+                :key="detailPlaybackSrc"
                 :src="detailPlaybackSrc"
                 class="rounded-xl bg-black object-contain"
                 :style="{ background: `#000 url('${detailImageSrc}') center / contain no-repeat` }"
@@ -3259,6 +3328,24 @@ defineExpose({
                   imageLoading ? 'opacity-40' : 'opacity-100'
                 ]"
                 alt="" @load="onDetailImageLoad" @error="onDetailImageError" />
+              <div
+                v-if="isDetailVideo && detailVideoPlan?.badge"
+                class="pointer-events-none absolute right-3 top-3 z-30 max-w-[70%] truncate rounded-md bg-black/70 px-2 py-1 text-[11px] font-medium text-white opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
+              >{{ detailVideoPlan.badge }}</div>
+              <div
+                v-if="isDetailVideo && detailVideoPlan?.mode === 'ask'"
+                class="absolute inset-0 z-20 flex items-center justify-center p-6"
+              >
+                <div class="flex max-w-sm flex-col items-center gap-3 rounded-xl bg-black/75 px-4 py-4 text-center text-sm text-white">
+                  <p>{{ detailVideoPlan.ask }}</p>
+                  <button
+                    type="button"
+                    class="rounded-full bg-white/15 px-3 py-1.5 text-xs font-medium hover:bg-white/25 disabled:opacity-60"
+                    :disabled="detailVideoEncoding"
+                    @click="confirmDetailVideoEncode"
+                  >{{ detailVideoEncoding ? t('detail.videoTranscoding') : t('detail.videoTranscode') }}</button>
+                </div>
+              </div>
               <div
                 v-if="isDetailVideo && videoUnplayable"
                 class="absolute inset-x-6 bottom-6 z-20 flex flex-col items-center gap-2 rounded-xl bg-black/70 px-4 py-3 text-center text-sm text-white"

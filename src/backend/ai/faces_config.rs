@@ -16,13 +16,23 @@ use super::album_cache::{
 };
 use crate::backend::ai::faces::iou_box_xywh;
 use crate::backend::constants::MAX_PERSON_NAME_LEN;
-use crate::backend::constants::{DEFAULT_PERSON_MATCH_MIN_SCORE, RECONCILE_FACE_IOU_MIN};
+use crate::backend::constants::{
+    DEFAULT_CLUSTER_SIMILARITY, DEFAULT_PERSON_MATCH_MIN_SCORE, RECONCILE_FACE_IOU_MIN,
+};
 
 pub const FACES_CONFIG_VERSION: u32 = 3;
+
+fn default_cluster_similarity() -> f32 {
+    DEFAULT_CLUSTER_SIMILARITY
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FacesConfig {
     pub version: u32,
+    /// Neighbor similarity used the last time this album was clustered.
+    /// Missing on older files; defaults to the historical DBSCAN threshold.
+    #[serde(default = "default_cluster_similarity")]
+    pub cluster_similarity: f32,
     #[serde(default)]
     pub people: Vec<AlbumPerson>,
 }
@@ -31,6 +41,7 @@ impl Default for FacesConfig {
     fn default() -> Self {
         Self {
             version: FACES_CONFIG_VERSION,
+            cluster_similarity: DEFAULT_CLUSTER_SIMILARITY,
             people: Vec::new(),
         }
     }

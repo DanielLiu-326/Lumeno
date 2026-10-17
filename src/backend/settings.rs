@@ -444,6 +444,8 @@ pub struct UpdatePreferencesPayload {
     wallpaper: Option<WallpaperPrefs>,
     #[serde(default)]
     accent: Option<String>,
+    #[serde(default)]
+    video_encode_order: Option<Vec<String>>,
 }
 
 pub async fn api_preferences_get(
@@ -457,6 +459,7 @@ pub async fn api_preferences_get(
     let user_locale = cfg.user_manager.get_locale(&username).await;
     let wallpaper = cfg.user_manager.get_wallpaper(&username).await;
     let accent = cfg.user_manager.get_accent(&username).await;
+    let video_encode_order = cfg.user_manager.get_video_encode_order(&username).await;
     let message = tr(&user_locale, "response.ok");
     Ok(create_response(
         true,
@@ -466,6 +469,7 @@ pub async fn api_preferences_get(
             "locale": user_locale,
             "wallpaper": wallpaper,
             "accent": accent,
+            "video_encode_order": video_encode_order,
             "supported_locales": SUPPORTED_LOCALES,
         })),
     ))
@@ -508,6 +512,18 @@ pub async fn api_preferences_update(
     } else {
         cfg.user_manager.get_accent(&username).await
     };
+    let video_encode_order = if let Some(next) = payload.video_encode_order {
+        if !cfg
+            .user_manager
+            .set_video_encode_order(&username, &next)
+            .await
+        {
+            return Err(AppError::unauthorized(locale.as_str()));
+        }
+        cfg.user_manager.get_video_encode_order(&username).await
+    } else {
+        cfg.user_manager.get_video_encode_order(&username).await
+    };
     let message = tr(&next_locale, "response.preferences_saved");
     Ok(create_response(
         true,
@@ -517,6 +533,7 @@ pub async fn api_preferences_update(
             "locale": next_locale,
             "wallpaper": wallpaper,
             "accent": accent,
+            "video_encode_order": video_encode_order,
             "supported_locales": SUPPORTED_LOCALES,
         })),
     ))

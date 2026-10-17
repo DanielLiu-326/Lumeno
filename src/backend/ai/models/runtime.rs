@@ -276,9 +276,9 @@ impl LocalModelRuntime {
         let spec = self.image_text.clone();
         let tokenizer = self.tokenizer_path.clone();
         let max_text_len = self.max_text_len;
-        let text = self.text.ensure(move || {
-            Siglip2Text::load(&root, &spec, tokenizer.as_deref(), max_text_len)
-        })?;
+        let text = self
+            .text
+            .ensure(move || Siglip2Text::load(&root, &spec, tokenizer.as_deref(), max_text_len))?;
         let embedded = text.embed_texts(texts);
         self.text.touch();
         embedded

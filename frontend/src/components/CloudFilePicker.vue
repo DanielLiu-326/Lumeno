@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import { prettyPath } from "../utils/path";
-import { isImageEntry, thumbnailUrl } from "../utils/fileBrowser";
+import { hasThumbnail, thumbnailUrl } from "../utils/fileBrowser";
 import { t } from "../i18n/index.js";
 import AppDialog from "./AppDialog.vue";
 import {
@@ -280,7 +280,7 @@ function confirm() {
                     <span class="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl"
                       :class="entry.is_dir ? (isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
                       <img
-                        v-if="isImageEntry(entry)"
+                        v-if="hasThumbnail(entry)"
                         class="absolute inset-0 h-full w-full object-cover"
                         :src="thumbnailUrl(entry, 96)"
                         loading="lazy"
@@ -289,7 +289,7 @@ function confirm() {
                         alt=""
                       />
                       <IconFolder v-if="entry.is_dir" class="h-5 w-5" />
-                      <IconFile v-else-if="!isImageEntry(entry)" class="h-5 w-5" />
+                      <IconFile v-else-if="!hasThumbnail(entry)" class="h-5 w-5" />
                     </span>
                     <div class="min-w-0">
                       <p class="truncate text-sm font-medium" :class="isDark ? 'text-stone-100' : 'text-stone-900'">{{ entry.name }}</p>
@@ -313,7 +313,7 @@ function confirm() {
                     <span class="relative flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl"
                       :class="entry.is_dir ? (isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
                       <img
-                        v-if="isImageEntry(entry)"
+                        v-if="hasThumbnail(entry)"
                         class="absolute inset-0 h-full w-full object-cover"
                         :src="thumbnailUrl(entry, 96)"
                         loading="lazy"
@@ -322,7 +322,7 @@ function confirm() {
                         alt=""
                       />
                       <IconFolder v-if="entry.is_dir" class="h-5 w-5" />
-                      <IconFile v-else-if="!isImageEntry(entry)" class="h-5 w-5" />
+                      <IconFile v-else-if="!hasThumbnail(entry)" class="h-5 w-5" />
                     </span>
                     <div class="min-w-0 flex-1">
                       <p class="truncate text-sm font-medium" :class="isDark ? 'text-stone-100' : 'text-stone-900'">{{ entry.name }}</p>
@@ -361,7 +361,7 @@ function confirm() {
               <div class="relative flex h-28 items-center justify-center overflow-hidden rounded-xl"
                 :class="entry.is_dir ? (isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700') : (isDark ? 'bg-stone-800 text-stone-300' : 'bg-stone-200 text-stone-600')">
                 <img
-                  v-if="isImageEntry(entry)"
+                  v-if="hasThumbnail(entry)"
                   class="absolute inset-0 h-full w-full object-cover"
                   :src="thumbnailUrl(entry, 256)"
                   loading="lazy"
@@ -370,7 +370,7 @@ function confirm() {
                   alt=""
                 />
                 <IconFolder v-if="entry.is_dir" class="h-10 w-10" />
-                <IconFile v-else-if="!isImageEntry(entry)" class="h-10 w-10" />
+                <IconFile v-else-if="!hasThumbnail(entry)" class="h-10 w-10" />
               </div>
 
               <div class="mt-3 min-w-0">

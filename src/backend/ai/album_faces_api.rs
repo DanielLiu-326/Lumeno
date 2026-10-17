@@ -21,7 +21,7 @@ use super::super::album::ensure_cached_face_crop;
 use super::super::album::helpers::{albums_root, ensure_album_cache_id};
 use super::super::album::media::is_readable_face_crop;
 use super::super::common::{AppError, AppState, Token, create_response};
-use super::super::constants::FACE_CROP_SIZE;
+use super::super::constants::{FACE_CROP_SIZE, clamp_cluster_similarity};
 use super::super::i18n::{RequestLocale, tr};
 use super::album_cache::{
     AlbumAiCache, ClustersCacheFile, DEFAULT_PERSON_MATCH_MIN_SCORE, FaceHintsFile, FaceIndexEntry,
@@ -471,6 +471,7 @@ async fn build_faces_get_payload(
         "owner": owner,
         "cache_id": cache_id,
         "editable": editable,
+        "cluster_similarity": clamp_cluster_similarity(config.cluster_similarity),
         "people": people_payload(&config, album_name, owner),
         "suggestions": groups_payload(&clusters),
     })
@@ -612,6 +613,50 @@ pub async fn api_album_faces_get(
     .await;
 
     let message = tr(locale.as_str(), "response.success");
+    Ok(create_response(true, &message, 0, Some(data)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReclusterRequest {
+    similarity: f32,
+}
+
+/// Save this album's clustering similarity and rebuild unnamed suggestion groups.
+#[named]
+pub async fn api_album_faces_recluster(
+    locale: RequestLocale,
+    token: Token,
+    Extension(cfg): Extension<Arc<AppState>>,
+    AxumPath(album): AxumPath<String>,
+    Json(payload): Json<ReclusterRequest>,
+) -> Result<Json<Value>, AppError> {
+    if !payload.similarity.is_finite() {
+        return Err(AppError::BadRequest(tr(
+            locale.as_str(),
+            "error.cluster_similarity_invalid",
+        )));
+    }
+    let (_user, resolved, album_dir, cache_id) =
+        resolve_owned_album(cfg.as_ref(), &token, album.trim(), locale.as_str()).await?;
+    let mut config = load_faces_config_async(&album_dir).await;
+    config.cluster_similarity = clamp_cluster_similarity(payload.similarity);
+    let cache = AlbumAiCache::new(cfg.ai_service.store().root(), &resolved.owner, &cache_id);
+    super::pipelines::rebuild_album_face_clusters(&cache, &config)
+        .await
+        .map_err(AppError::BadRequest)?;
+    save_faces_config_async(&album_dir, &config)
+        .await
+        .map_err(AppError::BadRequest)?;
+    let data = build_faces_get_payload(
+        &album_dir,
+        &cache,
+        &resolved.album_name,
+        &resolved.owner,
+        &cache_id,
+        resolved.is_owner,
+    )
+    .await;
+    let message = tr(locale.as_str(), "response.faces_reclustered");
     Ok(create_response(true, &message, 0, Some(data)))
 }
 

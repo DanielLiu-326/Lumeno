@@ -8,13 +8,15 @@ use std::sync::{Arc, Mutex};
 use crate::backend::album::decoder::{DecoderCreateOptions, ImageDecoder, create_decoder};
 use crate::backend::album::{ensure_cached_face_crop, write_cached_face_crop_from_image};
 use crate::backend::common::AppState;
-use crate::backend::constants::{AI_FACE_COST, FACE_CROP_SIZE};
+use crate::backend::constants::{
+    AI_FACE_COST, DEFAULT_CLUSTER_MIN_SAMPLES, FACE_CROP_SIZE, cluster_eps_from_similarity,
+};
 use crate::backend::tasks::{TaskBase, format_subtask, task_file_name, wait_while_paused};
 
 use super::super::album_cache::{
     AlbumAiCache, FaceCacheEntry, FaceIndexEntry, FacePhotoCacheFile,
-    build_clusters_cache_with_matches, decode_f32_vector_b64, encode_f32_vector_b64, face_id,
-    face_photo_cache_key,
+    build_clusters_cache_with_matches_params, decode_f32_vector_b64, encode_f32_vector_b64,
+    face_id, face_photo_cache_key, hints_from_clusters,
 };
 use super::super::faces::FACE_DETECTOR_REVISION;
 use super::super::models::{AiFaceRecord, AiIndexedPhotoRecord, LoadedOwnerIndex};
@@ -467,6 +469,27 @@ async fn collect_unassigned_faces_for_clustering(
     (cluster_faces, face_metas)
 }
 
+/// Rebuild unnamed suggestion groups for one album using its saved similarity.
+pub(crate) async fn rebuild_album_face_clusters(
+    cache: &AlbumAiCache,
+    faces_config: &super::super::faces_config::FacesConfig,
+) -> Result<(), String> {
+    let assigned = super::super::faces_config::AssignedFaceFilter::from_config(faces_config);
+    let named_catalog = super::super::faces_config::collect_named_person_centers(faces_config);
+    let (cluster_faces, face_metas) =
+        collect_unassigned_faces_for_clustering(cache, &assigned).await;
+    let clusters = build_clusters_cache_with_matches_params(
+        &cluster_faces,
+        &face_metas,
+        cluster_eps_from_similarity(faces_config.cluster_similarity),
+        DEFAULT_CLUSTER_MIN_SAMPLES,
+        &named_catalog,
+    );
+    let hints = hints_from_clusters(&clusters);
+    cache.write_face_index_async(&clusters).await?;
+    cache.write_face_hints_async(&hints).await
+}
+
 async fn write_face_indexes(
     cfg: &AppState,
     ai_root: &Path,
@@ -562,8 +585,13 @@ async fn write_face_indexes(
         let (cluster_faces, face_metas) =
             collect_unassigned_faces_for_clustering(&cache, &assigned).await;
 
-        let clusters =
-            build_clusters_cache_with_matches(&cluster_faces, &face_metas, &named_catalog);
+        let clusters = build_clusters_cache_with_matches_params(
+            &cluster_faces,
+            &face_metas,
+            cluster_eps_from_similarity(faces_config.cluster_similarity),
+            DEFAULT_CLUSTER_MIN_SAMPLES,
+            &named_catalog,
+        );
         let hints = super::super::album_cache::hints_from_clusters(&clusters);
         if let Err(error) = cache.write_face_index_async(&clusters).await {
             eprintln!("face_index write failed for {cache_id}: {error}");

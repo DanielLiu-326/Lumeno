@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { t } from "../i18n/index.js";
 import { formatSize, progressPercent, statusLabel, statusTone } from "../utils/format";
 import { albumCoverUrl } from "../utils/albumCover.js";
+import { thumbnailPathSegment } from "../utils/mediaKind.js";
 import {
   IconAlbum,
   IconDatabase,
@@ -45,7 +46,7 @@ function formatUptime(seconds) {
 function thumbUrl(photo, size = 360) {
   if (!photo?.path) return "";
   const owner = photo.owner ? `&owner=${encodeURIComponent(photo.owner)}` : "";
-  return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=${size}${owner}`;
+  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${owner}`;
 }
 
 function albumCover(album) {

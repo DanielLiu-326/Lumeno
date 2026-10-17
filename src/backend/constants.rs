@@ -53,6 +53,25 @@ pub const DEFAULT_CLUSTER_EPS: f32 = 0.38;
 /// DBSCAN min_samples for face clustering suggestions.
 pub const DEFAULT_CLUSTER_MIN_SAMPLES: usize = 2;
 
+/// Album-wise neighbor similarity for face clustering (`1 - eps`).
+/// Higher means two faces must be more alike to join the same group.
+pub const DEFAULT_CLUSTER_SIMILARITY: f32 = 1.0 - DEFAULT_CLUSTER_EPS;
+pub const CLUSTER_SIMILARITY_MIN: f32 = 0.45;
+pub const CLUSTER_SIMILARITY_MAX: f32 = 0.90;
+
+/// Clamp a user-facing clustering similarity into the supported range.
+pub fn clamp_cluster_similarity(value: f32) -> f32 {
+    if !value.is_finite() {
+        return DEFAULT_CLUSTER_SIMILARITY;
+    }
+    value.clamp(CLUSTER_SIMILARITY_MIN, CLUSTER_SIMILARITY_MAX)
+}
+
+/// Cosine distance eps used by DBSCAN for a similarity threshold.
+pub fn cluster_eps_from_similarity(similarity: f32) -> f32 {
+    1.0 - clamp_cluster_similarity(similarity)
+}
+
 /// Min cosine similarity to suggest merging an unnamed cluster into a named person.
 pub const DEFAULT_PERSON_MATCH_MIN_SCORE: f32 = 0.45;
 
@@ -77,3 +96,21 @@ pub const AI_SCAN_COST: u64 = 1;
 pub const AI_EMBED_COST: u64 = 4;
 pub const AI_FACE_COST: u64 = 5;
 pub const AI_WRITE_COST: u64 = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_similarity_matches_historical_eps() {
+        let eps = cluster_eps_from_similarity(DEFAULT_CLUSTER_SIMILARITY);
+        assert!((eps - DEFAULT_CLUSTER_EPS).abs() < 1e-6);
+    }
+
+    #[test]
+    fn similarity_clamps_before_converting_to_distance() {
+        assert!((cluster_eps_from_similarity(0.99) - (1.0 - CLUSTER_SIMILARITY_MAX)).abs() < 1e-6);
+        assert!((cluster_eps_from_similarity(0.10) - (1.0 - CLUSTER_SIMILARITY_MIN)).abs() < 1e-6);
+        assert!((clamp_cluster_similarity(f32::NAN) - DEFAULT_CLUSTER_SIMILARITY).abs() < 1e-6);
+    }
+}

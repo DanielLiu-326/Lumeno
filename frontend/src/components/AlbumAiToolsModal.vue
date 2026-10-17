@@ -9,8 +9,10 @@ import FaceAvatar from "./FaceAvatar.vue";
 import LazyImage from "./LazyImage.vue";
 import VirtualGrid from "./VirtualGrid.vue";
 import { albumPhotoApiPath, personDisplayCover, personPhotoCount } from "../utils/faceCrop.js";
+import { thumbnailPathSegment } from "../utils/mediaKind.js";
 import AppDialog from "./AppDialog.vue";
 import AppSlider from "./AppSlider.vue";
+import FaceClusterSettings from "./FaceClusterSettings.vue";
 
 /** Fallback page size; album grid uses settings `photos_per_page` (default 100). */
 const DETAIL_PAGE_SIZE = 100;
@@ -29,6 +31,8 @@ const props = defineProps({
   people: { type: Array, default: () => [] },
   suggestions: { type: Object, default: () => ({ clusters: [] }) },
   editable: { type: Boolean, default: true },
+  clusterSimilarity: { type: Number, default: 0.62 },
+  reclustering: { type: Boolean, default: false },
   hintsLoading: { type: Boolean, default: false },
   initialQuery: { type: String, default: "" },
   /** (opts) => Promise<{ results, query }> — must NOT navigate away */
@@ -47,6 +51,7 @@ const emit = defineEmits([
   "remove-center",
   "delete-person",
   "open-photo",
+  "recluster",
 ]);
 
 const section = ref("faces");
@@ -450,7 +455,7 @@ function albumPhotoPath(relativeSource) {
 function photoThumb(path, owner) {
   if (!path) return "";
   const ownerParam = owner ? `&owner=${encodeURIComponent(owner)}` : (props.albumOwner ? `&owner=${encodeURIComponent(props.albumOwner)}` : "");
-  return `/api/thumbnail/${encodeURIComponent(path)}?size=360${ownerParam}`;
+  return `/api/thumbnail/${thumbnailPathSegment(path)}?size=360${ownerParam}`;
 }
 
 function basenameFromPath(path) {
@@ -1349,10 +1354,19 @@ function expandDupGroup(group, index = 0) {
                   {{ t("albums.aiSuggestions") }}
                   <span class="font-normal normal-case">({{ visibleSuggestions.length }})</span>
                 </h3>
-                <label class="inline-flex items-center gap-1.5 text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
+                <div class="flex items-center gap-2">
+                  <FaceClusterSettings
+                    v-if="editable"
+                    :is-dark="isDark"
+                    :similarity="clusterSimilarity"
+                    :busy="reclustering"
+                    @recluster="emit('recluster', $event)"
+                  />
+                  <label class="inline-flex items-center gap-1.5 text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
                   <input v-model="showSingles" type="checkbox" class="rounded accent-amber-500" />
                   {{ t("albums.aiShowSingles") }}
-                </label>
+                  </label>
+                </div>
               </div>
 
               <div v-if="busy && visibleSuggestions.length === 0" class="py-6 text-center text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">

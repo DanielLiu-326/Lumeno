@@ -90,7 +90,12 @@ export function useSwipeReveal(actionWidth = 148) {
     }
 
     function up(ev) {
-      if (!tracking || myGen !== gen || (ev.pointerId != null && ev.pointerId !== event.pointerId)) return;
+      if (!tracking) return;
+      if (ev.pointerId != null && ev.pointerId !== event.pointerId) return;
+      if (myGen !== gen) {
+        cleanup();
+        return;
+      }
       cleanup();
       draggingId.value = null;
       if (locked.value) {

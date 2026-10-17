@@ -4,7 +4,8 @@ import { t } from "../../i18n/index.js";
 import { COLOR_LABELS } from "../../utils/photoCardLayout.js";
 import { downloadFileByUrl } from "../../utils/downloadFile.js";
 import { gradedThumbEpoch, gradedThumbQuery, markGradedThumb } from "../../utils/gradedThumb.js";
-import { formatDurationMs, isVideoPhoto, playbackUrl } from "../../utils/mediaKind.js";
+import { formatDurationMs, isVideoPhoto, playbackUrl, thumbnailPathSegment } from "../../utils/mediaKind.js";
+import { loadVideoInfo, planPlayback, startVideoEncode, watchVideoEncode } from "../../utils/videoEncode.js";
 import {
   IconArrowLeft, IconCamera, IconCheck, IconChevronLeft, IconChevronRight,
   IconChevronUp, IconDots, IconDownload, IconImage, IconPencil, IconSparkles,
@@ -241,6 +242,65 @@ const photoOwner = computed(() => {
   const slash = album.indexOf("/");
   return slash > 0 ? album.slice(0, slash) : "";
 });
+const videoPlan = ref(null);
+const videoEncoding = ref(false);
+const videoCanPlay = computed(() => {
+  const mode = videoPlan.value?.mode;
+  return mode === "original" || mode === "encode";
+});
+let videoPlanToken = 0;
+let stopEncodeWatch = () => {};
+
+async function refreshVideoPlan(photo) {
+  const token = ++videoPlanToken;
+  stopEncodeWatch();
+  videoPlan.value = null;
+  videoEncoding.value = false;
+  if (!photo || !isVideoPhoto(photo)) return;
+  const owner = photo.owner || photoOwner.value;
+  try {
+    const info = await loadVideoInfo(photo.path, owner, { refresh: true });
+    if (token !== videoPlanToken || props.photo?.path !== photo.path) return;
+    videoPlan.value = planPlayback(info);
+  } catch {
+    if (token !== videoPlanToken || props.photo?.path !== photo.path) return;
+    videoPlan.value = planPlayback(null);
+  }
+}
+
+async function confirmVideoEncode() {
+  const photo = props.photo;
+  const plan = videoPlan.value;
+  if (!photo || plan?.mode !== "ask" || videoEncoding.value) return;
+  const owner = photo.owner || photoOwner.value;
+  const token = videoPlanToken;
+  videoEncoding.value = true;
+  try {
+    const started = await startVideoEncode(photo.path, owner, plan.codec);
+    if (started?.ready) {
+      const info = await loadVideoInfo(photo.path, owner, { refresh: true });
+      if (token !== videoPlanToken) return;
+      videoEncoding.value = false;
+      videoPlan.value = planPlayback(info);
+      return;
+    }
+    stopEncodeWatch = watchVideoEncode(photo.path, owner, plan.codec, started?.task_id, () => (
+      token === videoPlanToken && props.photo?.path === photo.path
+    ), (next) => {
+      videoEncoding.value = false;
+      videoUnplayable.value = false;
+      videoPlan.value = next;
+    }, () => {
+      if (token === videoPlanToken) videoEncoding.value = false;
+    });
+  } catch {
+    if (token === videoPlanToken) videoEncoding.value = false;
+  }
+}
+
+watch(() => props.photo?.path, (path) => {
+  refreshVideoPlan(path ? props.photo : null);
+}, { immediate: true });
 
 const ownerQuery = computed(() => {
   const owner = photoOwner.value;
@@ -257,7 +317,7 @@ function thumbSrc(photo, size = 360) {
   void gradedThumbEpoch.value;
   const owner = photo.owner || (photo.path === props.photo?.path ? photoOwner.value : "") || photoOwner.value;
   const graded = size === 360 ? gradedThumbQuery(owner, photo.path) : "";
-  return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=${size}${ownerAmpFor(photo)}${graded}`;
+  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${ownerAmpFor(photo)}${graded}`;
 }
 
 function isSlidePhoto(item) {
@@ -281,6 +341,9 @@ function slideThumbSrc(item) {
 
 function slidePlaybackSrc(item) {
   if (!isSlidePhoto(item)) return "";
+  if (item.path === props.photo?.path && videoPlan.value?.mode === "encode" && videoPlan.value.url) {
+    return videoPlan.value.url;
+  }
   return playbackUrl(item.path, item.owner || photoOwner.value);
 }
 
@@ -311,17 +374,17 @@ const imageSrc = computed(() => {
     return `/api/albums/darktable_preview/${encodeURIComponent(photo.path)}?size=0${ownerAmp}`;
   }
   if (imageFallback.value) {
-    return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=800${ownerAmp}`;
+    return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=800${ownerAmp}`;
   }
   if (viewOriginal.value) {
     const ext = (photo.name || "").split(".").pop().toLowerCase();
     if (RAW_EXTS.has(ext)) {
-      return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=0${ownerAmp}`;
+      return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=0${ownerAmp}`;
     }
     const q = ownerQuery.value ? `?${ownerQuery.value}` : "";
     return `/api/download/${encodeURIComponent(photo.path)}${q}`;
   }
-  return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=1600${ownerAmp}`;
+  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=1600${ownerAmp}`;
 });
 
 const trackStyle = computed(() => ({
@@ -682,6 +745,7 @@ onBeforeUnmount(() => {
   cancelSlideAnim();
   clearDismissTimer();
   clearInfoTimer();
+  stopEncodeWatch();
   snapDone = null;
 });
 
@@ -1130,12 +1194,13 @@ function onPickAlbum(action) {
         </div>
         </div>
         <video
-          v-if="isCurrentVideo && !videoUnplayable"
+          v-if="isCurrentVideo && videoCanPlay && !videoUnplayable"
           ref="videoRef"
-          :key="photo.path"
+          :key="slidePlaybackSrc(photo)"
           class="mobile-photo-video"
           :class="{ 'is-concealed': stageBusy }"
           :src="slidePlaybackSrc(photo)"
+          :poster="slideThumbSrc(photo)"
           controls
           playsinline
           @play="onVideoPlay"
@@ -1144,6 +1209,17 @@ function onPickAlbum(action) {
           @loadeddata="onVideoReady"
           @error="onVideoError"
         />
+        <div
+          v-if="isCurrentVideo && videoPlan?.badge"
+          class="pointer-events-none absolute left-3 top-3 z-30 max-w-[70%] truncate rounded-md bg-black/70 px-2 py-1 text-[11px] font-medium text-white transition-opacity"
+          :class="chromeVisible ? 'opacity-100' : 'opacity-0'"
+        >{{ videoPlan.badge }}</div>
+        <div v-if="isCurrentVideo && videoPlan?.mode === 'ask'" class="mobile-photo-video-fallback">
+          <p>{{ videoPlan.ask }}</p>
+          <button type="button" :disabled="videoEncoding" @click.stop="confirmVideoEncode">
+            {{ videoEncoding ? t("detail.videoTranscoding") : t("detail.videoTranscode") }}
+          </button>
+        </div>
         <div v-if="isCurrentVideo && videoUnplayable" class="mobile-photo-video-fallback">
           <p>{{ t("detail.videoUnplayable") }}</p>
           <button type="button" @click.stop="downloadOriginal">{{ t("detail.download") }}</button>

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import AppDialog from "../../components/AppDialog.vue";
 import FaceAvatar from "../../components/FaceAvatar.vue";
+import FaceClusterSettings from "../../components/FaceClusterSettings.vue";
 import { t } from "../../i18n/index.js";
 import { personDisplayCover, personPhotoCount } from "../../utils/faceCrop.js";
 import { IconPencil, IconTrash } from "../../utils/icons";
@@ -24,9 +25,18 @@ const props = defineProps({
   people: { type: Array, default: () => [] },
   suggestions: { type: Object, default: () => ({ clusters: [] }) },
   editable: { type: Boolean, default: true },
+  clusterSimilarity: { type: Number, default: 0.62 },
+  reclustering: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["open-person", "open-cluster", "merge-cluster", "delete-person", "patch-person"]);
+const emit = defineEmits([
+  "open-person",
+  "open-cluster",
+  "merge-cluster",
+  "delete-person",
+  "patch-person",
+  "recluster",
+]);
 
 const showSingles = ref(false);
 const revealed = ref(false);
@@ -185,15 +195,24 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div class="mb-2 flex items-center justify-between gap-2">
+      <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 class="text-xs font-bold uppercase tracking-wider" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
           {{ t("albums.aiSuggestions") }}
           <span class="font-normal normal-case">({{ clusters.length }})</span>
         </h3>
-        <label class="inline-flex items-center gap-1.5 text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
+        <div class="flex items-center gap-2">
+          <FaceClusterSettings
+            v-if="editable"
+            :is-dark="isDark"
+            :similarity="clusterSimilarity"
+            :busy="reclustering"
+            @recluster="emit('recluster', $event)"
+          />
+          <label class="inline-flex items-center gap-1.5 text-[10px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
           <input v-model="showSingles" type="checkbox" class="rounded accent-amber-500" />
           {{ t("albums.aiShowSingles") }}
-        </label>
+          </label>
+        </div>
       </div>
       <div v-if="clusters.length === 0" class="rounded-xl border px-3 py-4 text-center text-[11px]" :class="isDark ? 'border-stone-800 text-stone-500' : 'border-stone-200 text-stone-400'">
         {{ t("albums.aiFacesEmpty") }}

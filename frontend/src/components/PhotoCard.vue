@@ -9,6 +9,7 @@ import {
   normalizeColorLabels,
 } from "../utils/photoCardLayout.js";
 import { isVideoPhoto } from "../utils/mediaKind.js";
+import { loadVideoInfo, videoBadgeText } from "../utils/videoEncode.js";
 
 const props = defineProps({
   photo: { type: Object, required: true },
@@ -168,6 +169,27 @@ function slotFields(slotId) {
 }
 
 const isVideo = computed(() => isVideoPhoto(props.photo));
+const videoInfo = ref(null);
+const videoBadge = computed(() => (isVideo.value ? videoBadgeText(videoInfo.value) : ""));
+let videoBadgeLoading = false;
+watch(() => props.photo?.path, () => {
+  videoInfo.value = null;
+  videoBadgeLoading = false;
+});
+async function loadVideoBadge() {
+  if (!isVideo.value || videoInfo.value || videoBadgeLoading || props.preview) return;
+  const path = props.photo?.path;
+  if (!path) return;
+  videoBadgeLoading = true;
+  try {
+    const info = await loadVideoInfo(path, props.photo.owner);
+    if (props.photo?.path === path) videoInfo.value = info;
+  } catch {
+    /* the corner badge stays hidden until a later hover */
+  } finally {
+    videoBadgeLoading = false;
+  }
+}
 
 function displayText(key) {
   const photo = props.photo;
@@ -189,6 +211,8 @@ function displayText(key) {
     :data-preview-root="preview || undefined"
     :data-flip-id="photo.path || undefined"
     @click="emit('click')"
+    @mouseenter="loadVideoBadge"
+    @pointerenter="loadVideoBadge"
   >
     <div
       ref="imageBoxRef"
@@ -223,6 +247,10 @@ function displayText(key) {
         </svg>
       </div>
 
+      <div
+        v-if="videoBadge"
+        class="pointer-events-none absolute bottom-1.5 left-1.5 z-20 max-w-[80%] truncate rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
+      >{{ videoBadge }}</div>
       <div
         v-if="isVideo"
         class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"

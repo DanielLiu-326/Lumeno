@@ -18,7 +18,8 @@ use backend::ai::{
     api_ai_duplicates, api_ai_index, api_ai_search_similar, api_ai_search_text, api_ai_status,
     api_album_face_crop, api_album_face_hints_get, api_album_faces_adopt_cluster,
     api_album_faces_delete, api_album_faces_get, api_album_faces_merge_clusters,
-    api_album_faces_patch, api_album_faces_remove_center, api_album_faces_split,
+    api_album_faces_patch, api_album_faces_recluster, api_album_faces_remove_center,
+    api_album_faces_split,
 };
 use backend::album::{
     api_albums_collections, api_albums_copy_photo, api_albums_create, api_albums_date_histogram,
@@ -26,7 +27,8 @@ use backend::album::{
     api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_photos_query,
     api_albums_rebuild_index, api_albums_share, api_albums_unshare, api_albums_update,
     api_albums_upload, api_daily_picks, api_darktable_preview, api_dashboard, api_has_xmp,
-    api_on_this_day, api_thumbnail, spawn_thumbnail_prewarmer,
+    api_on_this_day, api_thumbnail, api_video_encode, api_video_file, api_video_info,
+    spawn_thumbnail_prewarmer,
 };
 use backend::auth::{
     Role, SessionManager, UserManager, api_login, api_logout, api_register, api_whoami,
@@ -178,6 +180,12 @@ async fn main() {
             get(api_darktable_preview),
         )
         .route("/api/albums/has_xmp/{*path}", get(api_has_xmp))
+        .route("/api/albums/video_info/{*path}", get(api_video_info))
+        .route("/api/albums/video_encode", post(api_video_encode))
+        .route(
+            "/api/albums/video_file/{codec}/{*path}",
+            get(api_video_file),
+        )
         .route("/api/on-this-day", get(api_on_this_day))
         .route("/api/daily-picks", get(api_daily_picks))
         .route("/api/dashboard", get(api_dashboard))
@@ -190,6 +198,10 @@ async fn main() {
         .route(
             "/api/ai/albums/{album}/face-hints",
             get(api_album_face_hints_get),
+        )
+        .route(
+            "/api/ai/albums/{album}/faces/recluster",
+            post(api_album_faces_recluster),
         )
         .route(
             "/api/ai/albums/{album}/faces/adopt-cluster",

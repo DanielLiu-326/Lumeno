@@ -3,6 +3,7 @@ import { ref, watch, computed } from "vue";
 import { availableLocales, t } from "../i18n/index.js";
 import WallpaperSourceEditor from "./WallpaperSourceEditor.vue";
 import { normalizeWallpaper } from "../utils/wallpaper.js";
+import { codecLabel, normalizeVideoEncodeOrder } from "../utils/videoEncode.js";
 import { ACCENT_PRESETS, accentSwatch, defaultAccent, isPresetAccent, normalizeAccent, snapAccent } from "../utils/accent.js";
 import AppSlider from "./AppSlider.vue";
 import { IconRefresh } from "../utils/icons";
@@ -27,6 +28,7 @@ const props = defineProps({
   userAvatar: { type: String, default: null },
   wallpaper: { type: Object, default: null },
   accent: { type: String, default: "amber" },
+  videoEncodeOrder: { type: Array, default: () => ["av1", "hevc", "h264"] },
   onUpdatePassword: { type: Function, default: null },
   onUploadAvatar: { type: Function, default: null },
   onUploadWallpaper: { type: Function, default: null },
@@ -43,7 +45,12 @@ const emit = defineEmits(["update-settings", "scan-thumbnails", "update-preferen
 const defaultAiCpuThreads = Math.max(1, (typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4) - 1);
 
 const localSettings = ref({});
-const localPreferences = ref({ locale: "en", wallpaper: normalizeWallpaper(null), accent: defaultAccent() });
+const localPreferences = ref({
+  locale: "en",
+  wallpaper: normalizeWallpaper(null),
+  accent: defaultAccent(),
+  videoEncodeOrder: ["av1", "hevc", "h264"],
+});
 const localMembers = ref([]);
 const passwordForm = ref({ current_password: "", new_password: "", confirm_password: "" });
 const avatarInput = ref(null);
@@ -193,6 +200,14 @@ watch(
 );
 
 watch(
+  () => props.videoEncodeOrder,
+  (val) => {
+    localPreferences.value.videoEncodeOrder = normalizeVideoEncodeOrder(val);
+  },
+  { immediate: true }
+);
+
+watch(
   () => props.accent,
   (val) => {
     const normalized = normalizeAccent(val);
@@ -223,7 +238,17 @@ function savePreferences() {
     locale: localPreferences.value.locale,
     wallpaper: normalizeWallpaper(localPreferences.value.wallpaper),
     accent: normalizeAccent(localPreferences.value.accent),
+    video_encode_order: normalizeVideoEncodeOrder(localPreferences.value.videoEncodeOrder),
   });
+}
+
+function moveEncodeOrder(index, delta) {
+  const order = localPreferences.value.videoEncodeOrder.slice();
+  const next = index + delta;
+  if (next < 0 || next >= order.length) return;
+  const [item] = order.splice(index, 1);
+  order.splice(next, 0, item);
+  localPreferences.value.videoEncodeOrder = order;
 }
 
 function onUiScale(value) {
@@ -425,6 +450,38 @@ function promptResetPassword(member) {
                     {{ lang === 'zh' ? t('settings.langChinese') : t('settings.langEnglish') }}
                   </option>
                 </select>
+              </div>
+
+              <div class="flex flex-col gap-2">
+                <div>
+                  <p class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.videoEncodeOrder') }}</p>
+                  <p class="mt-0.5 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.videoEncodeOrderHint') }}</p>
+                </div>
+                <ol class="flex flex-col gap-1.5">
+                  <li
+                    v-for="(codec, index) in localPreferences.videoEncodeOrder"
+                    :key="codec"
+                    class="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
+                    :class="isDark ? 'border-stone-700 text-stone-100' : 'border-stone-200 text-stone-900'"
+                  >
+                    <span class="w-5 tabular-nums" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ index + 1 }}</span>
+                    <span class="min-w-0 flex-1 font-medium">{{ codecLabel(codec) }}</span>
+                    <button
+                      type="button"
+                      class="rounded-md px-2 py-1 text-xs"
+                      :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700 disabled:opacity-40' : 'bg-stone-100 text-stone-700 hover:bg-stone-200 disabled:opacity-40'"
+                      :disabled="index === 0"
+                      @click="moveEncodeOrder(index, -1)"
+                    >{{ t('settings.moveUp') }}</button>
+                    <button
+                      type="button"
+                      class="rounded-md px-2 py-1 text-xs"
+                      :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700 disabled:opacity-40' : 'bg-stone-100 text-stone-700 hover:bg-stone-200 disabled:opacity-40'"
+                      :disabled="index === localPreferences.videoEncodeOrder.length - 1"
+                      @click="moveEncodeOrder(index, 1)"
+                    >{{ t('settings.moveDown') }}</button>
+                  </li>
+                </ol>
               </div>
 
               <div class="flex flex-col gap-2 app-split-t pt-5">

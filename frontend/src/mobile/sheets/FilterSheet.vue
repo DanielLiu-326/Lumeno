@@ -18,6 +18,7 @@ import {
   useAlbumFilters,
 } from "../../composables/useAlbumFilters.js";
 import { useOverlayHistory } from "../useOverlayHistory.js";
+import { useReorderScroll } from "../useReorderScroll.js";
 import { useSheetDrag } from "../useSheetDrag.js";
 import { useSwipeReveal } from "../useSwipeReveal.js";
 import FilterCollections from "../../components/FilterCollections.vue";
@@ -57,6 +58,14 @@ const {
   rowOffset,
   onSwipeDown,
 } = useSwipeReveal(ACTION_WIDTH);
+const {
+  scrollEl,
+  reordering,
+  onTouchStart,
+  onTouchEnd,
+  onChoose,
+  onUnchoose,
+} = useReorderScroll();
 
 const {
   FILTER_REGISTRY,
@@ -151,12 +160,18 @@ function handleResetAll() {
   resetAllFilters();
 }
 
+function handleChoose() {
+  onChoose();
+  lock();
+}
+
 function handleDragStart(event) {
   lock();
   onFilterDragStart(event);
 }
 
 function handleDragEnd() {
+  onUnchoose();
   unlock();
   onFilterReorder();
 }
@@ -220,7 +235,14 @@ function colorKeys(item) {
             />
           </div>
 
-          <div class="mobile-sheet-scroll app-scrollbar flex flex-col pb-3">
+          <div
+            ref="scrollEl"
+            class="mobile-sheet-scroll app-scrollbar is-reorder-list flex flex-col pb-3"
+            :class="{ 'is-reordering': reordering }"
+            @touchstart.passive="onTouchStart"
+            @touchend.passive="onTouchEnd"
+            @touchcancel.passive="onTouchEnd"
+          >
             <VueDraggable
               v-model="filterItems"
               class="flex flex-col"
@@ -234,9 +256,13 @@ function colorKeys(item) {
               :delay="500"
               :delay-on-touch-only="true"
               :touch-start-threshold="16"
-              :fallback-tolerance="16"
+              :fallback-tolerance="0"
+              :scroll="false"
+              :bubble-scroll="false"
               filter=".app-switch, .mobile-filter-logic, .mobile-filter-action, .mobile-filter-actions"
               :prevent-on-filter="false"
+              @choose="handleChoose"
+              @unchoose="onUnchoose"
               @start="handleDragStart"
               @end="handleDragEnd"
               @update="onFilterReorder"

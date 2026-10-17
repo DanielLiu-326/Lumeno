@@ -6,6 +6,7 @@ pub mod filters;
 pub mod helpers;
 pub mod media;
 pub mod types;
+pub mod video_encode;
 
 pub use api::*;
 pub(crate) use api::{AiAlbumScanTarget, collect_accessible_ai_scan_targets};
@@ -18,3 +19,4 @@ pub(crate) use media::{
     collect_album_image_paths, ensure_cached_face_crop, purge_owner_thumbnail_cache,
     write_cached_face_crop_from_image,
 };
+pub use video_encode::{api_video_encode, api_video_file, api_video_info};

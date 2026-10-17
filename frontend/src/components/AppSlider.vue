@@ -11,6 +11,7 @@ const props = defineProps({
   isDark: { type: Boolean, default: false },
   tone: { type: String, default: "amber" },
   ariaLabel: { type: String, default: "" },
+  disabled: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["update:modelValue", "input", "change"]);
@@ -86,6 +87,7 @@ onBeforeUnmount(onPointerUp);
       :step="step"
       :value="modelValue"
       :aria-label="ariaLabel || $attrs['aria-label'] || undefined"
+      :disabled="disabled"
       @input="onInput"
       @change="onChange"
       @pointerdown="onPointerDown"

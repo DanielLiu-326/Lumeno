@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { t } from "../i18n/index.js";
+import { thumbnailPathSegment } from "../utils/mediaKind.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -27,7 +28,7 @@ async function load() {
 
 function thumbUrl(photo, size = 360) {
   const ownerParam = photo.owner ? `&owner=${encodeURIComponent(photo.owner)}` : "";
-  return `/api/thumbnail/${encodeURIComponent(photo.path)}?size=${size}${ownerParam}`;
+  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${ownerParam}`;
 }
 
 function yearsAgo(year) {

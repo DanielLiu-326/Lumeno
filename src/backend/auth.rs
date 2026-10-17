@@ -64,6 +64,28 @@ pub struct UserInfo {
     pub wallpaper: WallpaperPrefs,
     #[serde(default = "default_accent")]
     pub accent: String,
+    #[serde(default = "default_video_encode_order")]
+    pub video_encode_order: Vec<String>,
+}
+
+pub(crate) fn default_video_encode_order() -> Vec<String> {
+    vec!["av1".to_owned(), "hevc".to_owned(), "h264".to_owned()]
+}
+
+pub(crate) fn normalize_video_encode_order(values: &[String]) -> Vec<String> {
+    let mut order = Vec::new();
+    for value in values {
+        let codec = value.trim().to_ascii_lowercase();
+        if matches!(codec.as_str(), "av1" | "hevc" | "h264") && !order.contains(&codec) {
+            order.push(codec);
+        }
+    }
+    for codec in default_video_encode_order() {
+        if !order.contains(&codec) {
+            order.push(codec);
+        }
+    }
+    order
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +178,7 @@ impl UserManager {
                 avatar: None,
                 wallpaper: WallpaperPrefs::default(),
                 accent: default_accent(),
+                video_encode_order: default_video_encode_order(),
             },
         );
         self.save_to_disk(&users_locked);
@@ -333,6 +356,25 @@ impl UserManager {
             return false;
         };
         user.accent = normalize_accent(accent);
+        self.save_to_disk(&users_locked);
+        true
+    }
+
+    pub async fn get_video_encode_order(&self, username: &str) -> Vec<String> {
+        self.users
+            .lock()
+            .await
+            .get(username)
+            .map(|user| normalize_video_encode_order(&user.video_encode_order))
+            .unwrap_or_else(default_video_encode_order)
+    }
+
+    pub async fn set_video_encode_order(&self, username: &str, order: &[String]) -> bool {
+        let mut users_locked = self.users.lock().await;
+        let Some(user) = users_locked.get_mut(username) else {
+            return false;
+        };
+        user.video_encode_order = normalize_video_encode_order(order);
         self.save_to_disk(&users_locked);
         true
     }
@@ -752,6 +794,10 @@ pub async fn api_whoami(
     let user_avatar = cfg.user_manager.get_avatar(&session.username).await;
     let wallpaper = cfg.user_manager.get_wallpaper(&session.username).await;
     let accent = cfg.user_manager.get_accent(&session.username).await;
+    let video_encode_order = cfg
+        .user_manager
+        .get_video_encode_order(&session.username)
+        .await;
     let message = tr(&user_locale, "response.ok");
     Ok(create_response(
         true,
@@ -764,6 +810,7 @@ pub async fn api_whoami(
             "avatar": user_avatar,
             "wallpaper": wallpaper,
             "accent": accent,
+            "video_encode_order": video_encode_order,
         })),
     ))
 }

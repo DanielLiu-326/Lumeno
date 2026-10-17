@@ -18,7 +18,8 @@ mod tasks;
 pub use album_faces_api::{
     api_album_face_crop, api_album_face_hints_get, api_album_faces_adopt_cluster,
     api_album_faces_delete, api_album_faces_get, api_album_faces_merge_clusters,
-    api_album_faces_patch, api_album_faces_remove_center, api_album_faces_split,
+    api_album_faces_patch, api_album_faces_recluster, api_album_faces_remove_center,
+    api_album_faces_split,
 };
 pub use api::{
     api_ai_duplicates, api_ai_index, api_ai_search_similar, api_ai_search_text, api_ai_status,

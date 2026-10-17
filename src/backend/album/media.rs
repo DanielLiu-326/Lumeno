@@ -101,6 +101,19 @@ pub fn is_video_path(path: &std::path::Path) -> bool {
     )
 }
 
+/// Clients append `.webp` so a video thumbnail URL does not end in `.mov`/`.mp4`.
+/// Mobile browsers otherwise refuse to draw that response in an `<img>`.
+pub(crate) fn thumbnail_source_path(path: &str) -> &str {
+    let Some(stem) = path.strip_suffix(".webp") else {
+        return path;
+    };
+    if is_video_path(std::path::Path::new(stem)) {
+        stem
+    } else {
+        path
+    }
+}
+
 pub fn is_album_media_path(path: &std::path::Path) -> bool {
     is_image_path(path) || is_video_path(path)
 }
@@ -245,17 +258,23 @@ fn darktable_preview_cache_path(
         .join(format!("{cache_key}.jpg"))
 }
 
-fn scale_darktable_preview(master: &std::path::Path, dest: &std::path::Path, size: u32) -> Result<(), String> {
+fn scale_darktable_preview(
+    master: &std::path::Path,
+    dest: &std::path::Path,
+    size: u32,
+) -> Result<(), String> {
     let image = image::open(master).map_err(|error| error.to_string())?;
     let scaled = apply_max_edge(image, size);
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("create darktable cache dir failed: {error}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create darktable cache dir failed: {error}"))?;
     }
     let tmp = dest.with_extension("part");
     scaled
         .save_with_format(&tmp, image::ImageFormat::Jpeg)
         .map_err(|error| format!("save darktable preview failed: {error}"))?;
-    std::fs::rename(&tmp, dest).map_err(|error| format!("rename darktable preview failed: {error}"))?;
+    std::fs::rename(&tmp, dest)
+        .map_err(|error| format!("rename darktable preview failed: {error}"))?;
     Ok(())
 }
 
@@ -1021,6 +1040,7 @@ pub async fn api_thumbnail(
     query: Query<ThumbnailQuery>,
     Extension(cfg): Extension<Arc<AppState>>,
 ) -> Result<Response<Body>, AppError> {
+    let path = thumbnail_source_path(&path).to_string();
     let Some((username, root_path)) = cfg.get_session_and_root(&token).await else {
         return Err(AppError::unauthorized(locale.as_str()));
     };
@@ -1128,7 +1148,12 @@ pub async fn api_thumbnail(
     )
     .await?;
 
-    serve_image_file(&cache_path, "image/webp", "private, max-age=31536000, immutable").await
+    serve_image_file(
+        &cache_path,
+        "image/webp",
+        "private, max-age=31536000, immutable",
+    )
+    .await
 }
 
 // ── Darktable preview / export ───────────────────────────────────────────────
@@ -1243,13 +1268,8 @@ pub async fn api_darktable_preview(
                     .await
                     .map_err(|error| error.message)?;
                 tokio::task::spawn_blocking(move || {
-                    save_decoded_outputs(
-                        image,
-                        master_blocking,
-                        0,
-                        image::ImageFormat::Jpeg,
-                    )
-                    .map_err(|e| format!("save darktable preview failed: {e}"))
+                    save_decoded_outputs(image, master_blocking, 0, image::ImageFormat::Jpeg)
+                        .map_err(|e| format!("save darktable preview failed: {e}"))
                 })
                 .await
                 .map_err(|e| format!("darktable preview join failed: {e}"))?
@@ -1543,6 +1563,18 @@ mod tests {
         assert!(is_image_path(&jpg));
         assert!(is_album_media_path(&jpg));
         assert!(!is_video_path(&jpg));
+        assert_eq!(
+            super::thumbnail_source_path("albums/a/clip.MOV.webp"),
+            "albums/a/clip.MOV"
+        );
+        assert_eq!(
+            super::thumbnail_source_path("albums/a/clip.mp4"),
+            "albums/a/clip.mp4"
+        );
+        assert_eq!(
+            super::thumbnail_source_path("albums/a/still.webp"),
+            "albums/a/still.webp"
+        );
         assert!(!is_album_media_path(&txt));
     }
 

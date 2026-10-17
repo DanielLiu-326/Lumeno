@@ -4,6 +4,7 @@ import {
   IconArrowLeft, IconCamera, IconCheck, IconClose, IconPencil, IconSparkles,
 } from "../utils/icons";
 import { t } from "../i18n/index.js";
+import { thumbnailPathSegment } from "../utils/mediaKind.js";
 import LazyImage from "./LazyImage.vue";
 import FaceAvatar from "./FaceAvatar.vue";
 import { personDisplayCover, parseAlbumPhotoPath, personPhotoCount } from "../utils/faceCrop.js";
@@ -131,7 +132,7 @@ async function confirmSplit() {
 
 function photoThumb(path, owner) {
   const ownerParam = owner ? `&owner=${encodeURIComponent(owner)}` : "";
-  return `/api/thumbnail/${encodeURIComponent(path)}?size=360${ownerParam}`;
+  return `/api/thumbnail/${thumbnailPathSegment(path)}?size=360${ownerParam}`;
 }
 </script>
 

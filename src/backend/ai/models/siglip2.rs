@@ -116,8 +116,8 @@ impl Siglip2Text {
 
         #[cfg(ai_onnx_generated)]
         {
-            let tokenizer_path = tokenizer_path
-                .ok_or_else(|| "siglip2 tokenizer missing".to_string())?;
+            let tokenizer_path =
+                tokenizer_path.ok_or_else(|| "siglip2 tokenizer missing".to_string())?;
             let tokenizer = Tokenizer::from_file(tokenizer_path)
                 .map_err(|error| format!("load siglip2 tokenizer: {error}"))?;
             // Token embedding gather must not run on Vulkan: the table is 750 MiB

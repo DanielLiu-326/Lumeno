@@ -77,6 +77,7 @@ function goBack() {
       :user-avatar="app.userAvatar"
       :wallpaper="app.userWallpaper"
       :accent="app.userAccent"
+      :video-encode-order="app.userVideoEncodeOrder"
       :on-update-password="app.updatePassword"
       :on-upload-avatar="app.uploadAvatar"
       :on-upload-wallpaper="app.uploadWallpaper"

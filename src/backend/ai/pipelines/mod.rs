@@ -14,4 +14,5 @@ mod finalize;
 mod index;
 pub(crate) mod scan;
 
+pub(crate) use face::rebuild_album_face_clusters;
 pub(crate) use index::{AiIndexPipeline, IndexPipelineError};

@@ -2244,6 +2244,16 @@ html.dark .mobile-filter-front .mobile-filter-body {
     touch-action: pan-y;
 }
 
+.mobile-sheet-scroll.is-reorder-list,
+.mobile-sheet-scroll.is-reorder-list .mobile-filter-head,
+.mobile-sheet-scroll.is-reorder-list .mobile-filter-front {
+    touch-action: none;
+}
+
+.mobile-sheet-scroll.is-reordering {
+    overflow: hidden;
+}
+
 .mobile-filter-logic {
     flex-shrink: 0;
     min-height: 2rem;

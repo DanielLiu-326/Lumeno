@@ -6,6 +6,7 @@ import { compileAlbumFilterClauses, loadFilterItemsFromStorage, partitionFilterC
 import { defaultWallpaper, normalizeWallpaper } from "../utils/wallpaper.js";
 import { defaultAccent, loadCachedAccent, normalizeAccent } from "../utils/accent.js";
 import { downloadFileByUrl } from "../utils/downloadFile.js";
+import { setVideoEncodeOrder } from "../utils/videoEncode.js";
 
 const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 100;
@@ -94,6 +95,11 @@ export function useAlbumApp() {
     const userAvatar = ref(null);
     const userWallpaper = ref(defaultWallpaper());
     const userAccent = ref(loadCachedAccent());
+    const userVideoEncodeOrder = ref(setVideoEncodeOrder());
+
+    function applyVideoEncodeOrder(order) {
+        userVideoEncodeOrder.value = setVideoEncodeOrder(order);
+    }
     const members = ref([]);
     const settings = ref({});
     const aiStatus = ref(null);
@@ -253,6 +259,7 @@ export function useAlbumApp() {
                 userAvatar.value = whoami.data?.avatar || null;
                 userWallpaper.value = normalizeWallpaper(whoami.data?.wallpaper);
                 userAccent.value = normalizeAccent(whoami.data?.accent);
+                applyVideoEncodeOrder(whoami.data?.video_encode_order);
                 setLocale(userLocale.value);
             } catch { userRole.value = "user"; }
             await refreshList();
@@ -1799,6 +1806,7 @@ export function useAlbumApp() {
             userLocale.value = payload.data?.locale || locale.value;
             userWallpaper.value = normalizeWallpaper(payload.data?.wallpaper);
             userAccent.value = normalizeAccent(payload.data?.accent);
+            applyVideoEncodeOrder(payload.data?.video_encode_order);
             setLocale(userLocale.value);
         } catch {
             userLocale.value = locale.value;
@@ -1872,6 +1880,8 @@ export function useAlbumApp() {
     const albumFaceHintsLoading = ref(false);
     const albumFacesEditable = ref(true);
     const albumFacesOwner = ref("");
+    const albumClusterSimilarity = ref(0.62);
+    const albumClusterReclustering = ref(false);
 
     const albumFaceSuggestionsDisplay = computed(() => {
         const base = albumFaceSuggestions.value || {};
@@ -1908,6 +1918,7 @@ export function useAlbumApp() {
             albumFaceSuggestions.value = { clusters: [], noise_face_ids: [] };
             albumFaceHints.value = {};
             albumFacesOwner.value = "";
+            albumClusterSimilarity.value = 0.62;
             return;
         }
         if (!silent) albumPeopleLoading.value = true;
@@ -1919,12 +1930,15 @@ export function useAlbumApp() {
             albumFaceSuggestions.value = data.suggestions || { clusters: [], noise_face_ids: [] };
             albumFacesEditable.value = data.editable !== false;
             albumFacesOwner.value = data.owner || currentUser.value || "";
+            const similarity = Number(data.cluster_similarity);
+            albumClusterSimilarity.value = Number.isFinite(similarity) ? similarity : 0.62;
         } catch (error) {
             if (currentAlbum.value !== albumName) return;
             albumPeople.value = [];
             albumFaceSuggestions.value = { clusters: [], noise_face_ids: [] };
             albumFaceHints.value = {};
             albumFacesOwner.value = "";
+            albumClusterSimilarity.value = 0.62;
             setMessage(error.message, "error");
         } finally {
             if (!silent && currentAlbum.value === albumName) albumPeopleLoading.value = false;
@@ -1933,6 +1947,31 @@ export function useAlbumApp() {
             await refreshFaceHintsForAlbum(albumName);
         } else {
             void refreshFaceHintsForAlbum(albumName);
+        }
+    }
+
+    async function reclusterAlbumFaces(similarity) {
+        if (!currentAlbum.value || albumClusterReclustering.value) return;
+        const albumName = currentAlbum.value;
+        albumClusterReclustering.value = true;
+        try {
+            const payload = await apiFetch(
+                `/api/ai/albums/${encodeURIComponent(albumName)}/faces/recluster`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ similarity }),
+                },
+            );
+            if (currentAlbum.value !== albumName) return;
+            const saved = Number(payload.data?.cluster_similarity);
+            albumClusterSimilarity.value = Number.isFinite(saved) ? saved : similarity;
+            setMessage(payload.message || t("people.reclusterDone"));
+            await refreshPeopleForAlbum(albumName, { silent: true, awaitHints: true });
+        } catch (error) {
+            setMessage(error.message, "error");
+        } finally {
+            albumClusterReclustering.value = false;
         }
     }
 
@@ -2073,6 +2112,7 @@ export function useAlbumApp() {
             userLocale.value = payload.data?.locale || locale.value;
             userWallpaper.value = normalizeWallpaper(payload.data?.wallpaper);
             userAccent.value = normalizeAccent(payload.data?.accent);
+            applyVideoEncodeOrder(payload.data?.video_encode_order);
             setLocale(userLocale.value);
             setMessage(payload.message || t("msg.settingsSaved"));
         } catch (error) {
@@ -2203,6 +2243,7 @@ export function useAlbumApp() {
         userAvatar.value = null;
         userWallpaper.value = defaultWallpaper();
         userAccent.value = defaultAccent();
+        applyVideoEncodeOrder();
         userLocale.value = navigator.language.startsWith("zh") ? "zh" : "en";
         setLocale(userLocale.value);
         members.value = [];
@@ -2265,6 +2306,7 @@ export function useAlbumApp() {
             userAvatar.value = payload.data?.avatar || null;
             userWallpaper.value = normalizeWallpaper(payload.data?.wallpaper);
             userAccent.value = normalizeAccent(payload.data?.accent);
+            applyVideoEncodeOrder(payload.data?.video_encode_order);
             setLocale(userLocale.value);
             loggedIn.value = true;
         } catch {
@@ -2409,7 +2451,10 @@ export function useAlbumApp() {
         albumFaceHintsLoading,
         albumFacesEditable,
         albumFacesOwner,
+        albumClusterSimilarity,
+        albumClusterReclustering,
         refreshPeopleForAlbum,
+        reclusterAlbumFaces,
         refreshFaceHintsForAlbum,
         filterAlbumByPerson,
         adoptAlbumCluster,
@@ -2475,6 +2520,7 @@ export function useAlbumApp() {
         userAvatar,
         userWallpaper,
         userAccent,
+        userVideoEncodeOrder,
         userRole,
         isAdmin,
         webdavShares,
