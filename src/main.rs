@@ -287,6 +287,7 @@ async fn main() {
         .layer(Extension(app_state.clone()));
 
     let listener = tokio::net::TcpListener::bind("[::]:3000").await.unwrap();
+    print_startup_banner(&app_state);
     spawn_thumbnail_prewarmer(app_state.clone());
     spawn_cache_gc(app_state);
     axum::serve(
@@ -295,6 +296,23 @@ async fn main() {
     )
     .await
     .unwrap();
+}
+
+fn print_startup_banner(state: &AppState) {
+    eprintln!(
+        r#"
+ ██╗     ██╗   ██╗███╗   ███╗███████╗███╗   ██╗ ██████╗
+ ██║     ██║   ██║████╗ ████║██╔════╝████╗  ██║██╔═══██╗
+ ██║     ██║   ██║██╔████╔██║█████╗  ██╔██╗ ██║██║   ██║
+ ██║     ██║   ██║██║╚██╔╝██║██╔══╝  ██║╚██╗██║██║   ██║
+ ███████╗╚██████╔╝██║ ╚═╝ ██║███████╗██║ ╚████║╚██████╔╝
+ ╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝╚═╝  ╚═══╝ ╚═════╝
+"#
+    );
+    eprintln!("Lumeno {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("Listening   http://localhost:3000");
+    eprintln!("Data        {}", state.data_path.display());
+    eprintln!("Resources   {}", state.resources_path.display());
 }
 
 fn generate_bootstrap_password() -> String {
