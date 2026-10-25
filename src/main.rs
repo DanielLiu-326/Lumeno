@@ -13,6 +13,7 @@ use std::sync::Arc;
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod backend;
+mod grade;
 
 use backend::ai::{
     api_ai_duplicates, api_ai_index, api_ai_search_similar, api_ai_search_text, api_ai_status,
@@ -23,7 +24,8 @@ use backend::ai::{
 };
 use backend::album::{
     api_albums_collections, api_albums_copy_photo, api_albums_create, api_albums_date_histogram,
-    api_albums_delete, api_albums_delete_photos, api_albums_export, api_albums_import,
+    api_albums_delete, api_albums_delete_photos, api_albums_download, api_albums_download_file,
+    api_albums_export, api_albums_export_batch, api_albums_export_batch_file, api_albums_import,
     api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_photos_query,
     api_albums_rebuild_index, api_albums_share, api_albums_unshare, api_albums_update,
     api_albums_upload, api_daily_picks, api_darktable_preview, api_dashboard, api_has_xmp,
@@ -39,6 +41,13 @@ use backend::common::{
 use backend::files::{
     api_copy_files, api_delete_files, api_download_file, api_get_file_list, api_move_files,
     api_new_folder, api_rename_file, api_upload, api_upload_feed, web_egui_file, web_file,
+};
+use backend::grade_api::{
+    api_grade_full, api_grade_node, api_grade_open, api_grade_preview, api_grade_profile,
+};
+use backend::grade_resources::{
+    api_grade_resources_delete, api_grade_resources_list, api_grade_resources_lut,
+    api_grade_resources_preset, api_grade_resources_rename,
 };
 use backend::settings::{
     SettingsManager, api_admin_reset_password, api_admin_users_delete, api_admin_users_get,
@@ -175,9 +184,39 @@ async fn main() {
         .route("/api/albums/share", post(api_albums_share))
         .route("/api/albums/unshare", post(api_albums_unshare))
         .route("/api/albums/export", post(api_albums_export))
+        .route("/api/albums/download", post(api_albums_download))
+        .route("/api/albums/download/{id}", get(api_albums_download_file))
+        .route("/api/albums/export_batch", post(api_albums_export_batch))
+        .route(
+            "/api/albums/export_batch/{id}",
+            get(api_albums_export_batch_file),
+        )
         .route(
             "/api/albums/darktable_preview/{*path}",
             get(api_darktable_preview),
+        )
+        .route("/api/grade/open", post(api_grade_open))
+        .route("/api/grade/preview", post(api_grade_preview))
+        .route("/api/grade/node", post(api_grade_node))
+        .route("/api/grade/full", post(api_grade_full))
+        .route("/api/grade/profile", post(api_grade_profile))
+        .route("/api/grade/resources", get(api_grade_resources_list))
+        .route(
+            "/api/grade/resources/lut",
+            post(api_grade_resources_lut)
+                .layer(DefaultBodyLimit::max(256 * 1024 * 1024 + 1024 * 1024)),
+        )
+        .route(
+            "/api/grade/resources/preset",
+            post(api_grade_resources_preset),
+        )
+        .route(
+            "/api/grade/resources/rename",
+            post(api_grade_resources_rename),
+        )
+        .route(
+            "/api/grade/resources/delete",
+            post(api_grade_resources_delete),
         )
         .route("/api/albums/has_xmp/{*path}", get(api_has_xmp))
         .route("/api/albums/video_info/{*path}", get(api_video_info))

@@ -8,7 +8,7 @@ mod formats;
 mod gpu;
 
 pub use auto::AutoImageDecoder;
-pub use cpu::CpuImageDecoder;
+pub use cpu::{CpuImageDecoder, RawGradePixels, decode_raw_for_grade};
 pub use darktable::{DarktableImageDecoder, darktable_export, find_xmp_sidecar};
 pub use formats::{ImageFormat, ImageFormatSet, format_from_path, is_raw_path};
 pub use gpu::GpuDevice;

@@ -321,6 +321,12 @@ pub enum AppError {
     #[error("{0}")]
     TransportError(String),
 
+    #[error("{message}")]
+    GradeRejected {
+        message: String,
+        reason: &'static str,
+    },
+
     #[error("{0}")]
     Unknown(String),
 }
@@ -337,6 +343,13 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let AppError::GradeRejected { message, reason } = &self {
+            return (
+                StatusCode::BAD_REQUEST,
+                create_response(false, message, 2, Some(json!({ "reason": reason }))),
+            )
+                .into_response();
+        }
         let msg = format!("{}", &self);
         let (status, code, msg, success) = match self {
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, 1, msg, false),
@@ -350,6 +363,7 @@ impl IntoResponse for AppError {
             AppError::Expired(_) => (StatusCode::UNAUTHORIZED, 9, msg, false),
             AppError::TransportError(_) => (StatusCode::BAD_REQUEST, 10, msg, false),
             AppError::Forbidden(_) => (StatusCode::FORBIDDEN, 11, msg, false),
+            AppError::GradeRejected { .. } => (StatusCode::BAD_REQUEST, 2, msg, false),
             AppError::Unknown(_) => (StatusCode::INTERNAL_SERVER_ERROR, 10000, msg, false),
         };
 

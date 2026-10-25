@@ -177,6 +177,10 @@ export const IconMoon = icon([
   "M14.53 12.47A6 6 0 017.53 5.47 7 7 0 1014.53 12.47z",
 ]);
 
+export const IconBulb = icon([
+  "M10 2a4.5 4.5 0 00-2.4 8.31c.24.16.4.43.4.72V12.2c0 .44.36.8.8.8h2.4c.44 0 .8-.36.8-.8v-1.17c0-.29.16-.56.4-.72A4.5 4.5 0 0010 2zm-1.1 12.6h2.2a.7.7 0 010 1.4h-2.2a.7.7 0 010-1.4zm.3 2h1.6a.6.6 0 010 1.2H9.2a.6.6 0 010-1.2z",
+]);
+
 export const IconSun = icon([
   "M10 4a1 1 0 011-1h0a1 1 0 010 2h0a1 1 0 01-1-1zm0 12a1 1 0 011-1h0a1 1 0 010 2h0a1 1 0 01-1-1zM5.05 6.46a1 1 0 011.41 0l.01.01a1 1 0 11-1.42 1.41l-.01-.01a1 1 0 010-1.41zm8.48 8.48a1 1 0 011.41 0l.01.01a1 1 0 11-1.42 1.41l-.01-.01a1 1 0 010-1.41zM4 10a1 1 0 011-1h0a1 1 0 010 2h0a1 1 0 01-1-1zm12 0a1 1 0 011-1h0a1 1 0 010 2h0a1 1 0 01-1-1zM5.06 15.94a1 1 0 011.41-1.41l.01.01a1 1 0 11-1.42 1.41l-.01-.01zm8.48-8.48a1 1 0 011.41-1.41l.01.01a1 1 0 11-1.42 1.41l-.01-.01zM10 7a3 3 0 100 6 3 3 0 000-6z",
 ]);
@@ -336,6 +340,66 @@ export const IconStar = icon([
 export const IconFilter = icon([
   "M3 3a1 1 0 011-1h12a1 1 0 011 1v3a1 1 0 01-.293.707L12 11.414V15a1 1 0 01-.293.707l-2 2A1 1 0 018 17v-5.586L3.293 6.707A1 1 0 013 6V3z",
 ]);
+
+// Annular color wheel: coplanar ring, per-sector radial gradient, one larger sector.
+let gradeIconUid = 0;
+
+export const IconGrade = defineComponent({
+  inheritAttrs: false,
+  setup() {
+    const uid = `ig${++gradeIconUid}`;
+    return { uid };
+  },
+  render() {
+    const uid = this.uid;
+    // Coplanar ring (r_out=8.2, r_in=4). Large sector 96° from top; five others 52.8°.
+    const sectors = [
+      { d: "M 10 1.8 A 8.2 8.2 0 0 1 18.155 10.857 L 13.978 10.418 A 4 4 0 0 0 10 6 Z", c0: "#fca5a5", c1: "#ef4444" },
+      { d: "M 18.155 10.857 A 8.2 8.2 0 0 1 14.248 17.014 L 12.072 13.421 A 4 4 0 0 0 13.978 10.418 Z", c0: "#fdba74", c1: "#f97316" },
+      { d: "M 14.248 17.014 A 8.2 8.2 0 0 1 6.981 17.624 L 8.528 13.719 A 4 4 0 0 0 12.072 13.421 Z", c0: "#fde047", c1: "#eab308" },
+      { d: "M 6.981 17.624 A 8.2 8.2 0 0 1 2.102 12.205 L 6.147 11.076 A 4 4 0 0 0 8.528 13.719 Z", c0: "#86efac", c1: "#22c55e" },
+      { d: "M 2.102 12.205 A 8.2 8.2 0 0 1 3.468 5.042 L 6.814 7.582 A 4 4 0 0 0 6.147 11.076 Z", c0: "#7dd3fc", c1: "#0ea5e9" },
+      { d: "M 3.468 5.042 A 8.2 8.2 0 0 1 10 1.8 L 10 6 A 4 4 0 0 0 6.814 7.582 Z", c0: "#c4b5fd", c1: "#8b5cf6" },
+    ];
+    // Radial-ish gradient along each sector mid-angle (outer → inner).
+    const grads = [
+      { x1: 15.606, y1: 4.952, x2: 13.21, y2: 7.109 },
+      { x1: 16.37, y1: 14.042, x2: 13.647, y2: 12.315 },
+      { x1: 10.631, y1: 17.518, x2: 10.361, y2: 14.305 },
+      { x1: 4.394, y1: 15.048, x2: 6.79, y2: 12.891 },
+      { x1: 2.59, y1: 8.586, x2: 5.757, y2: 9.191 },
+      { x1: 6.646, y1: 3.243, x2: 8.079, y2: 6.131 },
+    ];
+    return h(
+      "svg",
+      { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 20 20", fill: "none", ...this.$attrs },
+      [
+        h(
+          "defs",
+          null,
+          sectors.map((s, i) =>
+            h(
+              "linearGradient",
+              {
+                id: `${uid}-${i}`,
+                gradientUnits: "userSpaceOnUse",
+                x1: grads[i].x1,
+                y1: grads[i].y1,
+                x2: grads[i].x2,
+                y2: grads[i].y2,
+              },
+              [
+                h("stop", { offset: "0%", "stop-color": s.c0 }),
+                h("stop", { offset: "100%", "stop-color": s.c1 }),
+              ],
+            ),
+          ),
+        ),
+        ...sectors.map((s, i) => h("path", { d: s.d, fill: `url(#${uid}-${i})` })),
+      ],
+    );
+  },
+});
 
 export const IconDatabase = icon([
   { "fill-rule": "evenodd", "clip-rule": "evenodd", d: "M3 5a2 2 0 012-2h10a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V5zm11 1H6v3h8V6zM6 11v3h3v-3H6z" },

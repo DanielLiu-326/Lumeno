@@ -3,7 +3,7 @@ use std::sync::Once;
 
 use async_trait::async_trait;
 use image::{DynamicImage, RgbImage};
-use rsraw::{BIT_DEPTH_8, RawImage, ThumbFormat};
+use rsraw::{BIT_DEPTH_8, BIT_DEPTH_16, RawImage, ThumbFormat};
 
 use super::exif::apply_exif_from_bytes;
 use super::formats::{ImageFormat, ImageFormatSet, format_from_hint_or_path, require_format};
@@ -125,6 +125,145 @@ pub(super) fn select_backend_for_format(
         }
         _ => DecoderBackendKind::Cpu,
     })
+}
+
+/// LibRaw `output_color` 0 leaves camera RGB. The grade profile node applies the matrix.
+const LIBRAW_OUTPUT_CAMERA: i32 = 0;
+
+/// Pixels handed to the grade working space.
+pub enum RawGradePixels {
+    /// 16-bit linear camera RGB. Camera white balance is already applied.
+    /// `to_working` is the embedded camera matrix composed into linear Rec.2020.
+    Camera {
+        width: u32,
+        height: u32,
+        samples: Vec<u16>,
+        baseline_ev: f32,
+        to_working: [f32; 9],
+        camera_name: String,
+    },
+    /// Embedded preview that LibRaw cannot demosaic (Nikon HE/HE*). Still 8-bit sRGB.
+    Srgb(DynamicImage),
+}
+
+/// Decode a camera RAW for grading: linear camera RGB at 16 bits.
+/// The working-space matrix is returned beside the pixels, not applied here.
+pub fn decode_raw_for_grade(path: &Path) -> Result<RawGradePixels, DecodeError> {
+    let bytes = std::fs::read(path).map_err(|error| DecodeError {
+        code: "read_failed",
+        message: error.to_string(),
+    })?;
+    let mut raw = RawImage::open(&bytes).map_err(|error| DecodeError {
+        code: "libraw_failed",
+        message: error.to_string(),
+    })?;
+    if matches!(raw.as_ref().makernotes.nikon.NEFCompression, 13 | 14) {
+        return Ok(RawGradePixels::Srgb(decode_nikon_he_preview(
+            &mut raw, &bytes, true,
+        )?));
+    }
+    raw.set_use_camera_wb(true);
+    raw.set_use_camera_matrix(true);
+    {
+        let params = &mut raw.as_mut().params;
+        params.output_color = LIBRAW_OUTPUT_CAMERA;
+        params.gamm[0] = 1.0;
+        params.gamm[1] = 1.0;
+        params.no_auto_bright = 1;
+    }
+    let to_working = crate::grade::rec2020_from_rgb_cam(raw.as_ref().color.rgb_cam);
+    let camera_name = camera_label(&raw);
+    raw.unpack().map_err(|error| DecodeError {
+        code: "libraw_failed",
+        message: error.to_string(),
+    })?;
+    let baseline_ev = raw_baseline_ev(&raw);
+    let processed = raw.process::<BIT_DEPTH_16>().map_err(|error| DecodeError {
+        code: "libraw_failed",
+        message: error.to_string(),
+    })?;
+    samples_from_processed(&processed).map(|samples| RawGradePixels::Camera {
+        width: processed.width(),
+        height: processed.height(),
+        samples,
+        baseline_ev,
+        to_working,
+        camera_name,
+    })
+}
+
+/// Exposure offset, in stops, that puts this camera's linear raw near the
+/// sigmoid middle-gray pivot. LibRaw records it and does not apply it.
+fn raw_baseline_ev(raw: &rsraw::RawImage) -> f32 {
+    let data = raw.as_ref();
+    let mut ev = 0.0;
+    let baseline = data.color.dng_levels.baseline_exposure;
+    if baseline.is_finite() && baseline > -100.0 {
+        ev += baseline;
+    }
+    let shift = data.makernotes.common.ExposureCalibrationShift;
+    if shift.is_finite() {
+        ev += shift;
+    }
+    ev.clamp(-5.0, 5.0)
+}
+
+fn camera_label(raw: &rsraw::RawImage) -> String {
+    let mut label = format!("{} {}", raw.make().trim(), raw.model().trim());
+    label.retain(|ch| !ch.is_control());
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.chars().count() > 64 {
+        label.chars().take(64).collect()
+    } else if label.is_empty() {
+        "Camera".to_string()
+    } else {
+        label
+    }
+}
+
+fn samples_from_processed(
+    processed: &rsraw::ProcessedImage<BIT_DEPTH_16>,
+) -> Result<Vec<u16>, DecodeError> {
+    let width = processed.width();
+    let height = processed.height();
+    let colors = processed.colors() as usize;
+    if colors != 3 && colors != 4 {
+        return Err(DecodeError {
+            code: "libraw_pixel_layout",
+            message: format!("unexpected libraw color count: {colors} (expected 3 or 4)"),
+        });
+    }
+    if processed.bits() != 16 {
+        return Err(DecodeError {
+            code: "libraw_pixel_layout",
+            message: format!("expected 16-bit camera RGB, got {} bits", processed.bits()),
+        });
+    }
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(colors))
+        .ok_or_else(|| DecodeError {
+            code: "libraw_dimensions_overflow",
+            message: "libraw output dimensions overflow".to_string(),
+        })?;
+    let pixels: &[u16] = processed;
+    if pixels.len() != expected {
+        return Err(DecodeError {
+            code: "libraw_pixel_layout",
+            message: format!(
+                "unexpected libraw RGB buffer size: got {} expected {expected}",
+                pixels.len()
+            ),
+        });
+    }
+    if colors == 3 {
+        return Ok(pixels.to_vec());
+    }
+    let mut rgb = Vec::with_capacity(expected / 4 * 3);
+    for chunk in pixels.chunks_exact(4) {
+        rgb.extend_from_slice(&chunk[..3]);
+    }
+    Ok(rgb)
 }
 
 fn decode_libraw_path(path: &Path, apply_exif: bool) -> Result<DynamicImage, DecodeError> {

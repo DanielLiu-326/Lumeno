@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod decoder;
+pub mod download;
 pub mod filters;
 pub mod helpers;
 pub mod media;
@@ -10,6 +11,10 @@ pub mod video_encode;
 
 pub use api::*;
 pub(crate) use api::{AiAlbumScanTarget, collect_accessible_ai_scan_targets};
+pub use download::{
+    api_albums_download, api_albums_download_file, api_albums_export_batch,
+    api_albums_export_batch_file,
+};
 pub(crate) use helpers::{migrate_json_sidecar, scan_json_sidecars};
 pub use media::{
     api_albums_export, api_darktable_preview, api_has_xmp, api_thumbnail,

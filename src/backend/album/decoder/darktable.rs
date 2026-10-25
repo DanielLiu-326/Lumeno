@@ -181,6 +181,14 @@ async fn run_darktable_cli(path: &Path, options: DecodeOptions) -> Result<Vec<u8
     Ok(bytes)
 }
 
+struct ConfigCleanup(std::path::PathBuf);
+
+impl Drop for ConfigCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Export via darktable-cli with optional XMP grading, max width and JPEG quality.
 ///
 /// Isolated `--configdir` starts with empty `metadata_flags` (no EXIF). Explicitly set
@@ -197,6 +205,7 @@ pub async fn darktable_export(
     let config_dir =
         std::env::temp_dir().join(format!("darktable-config-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&config_dir).await.ok();
+    let _config_cleanup = ConfigCleanup(config_dir.clone());
 
     let started = std::time::Instant::now();
     let mut cmd = tokio::process::Command::new("darktable-cli");
@@ -220,6 +229,7 @@ pub async fn darktable_export(
     }
     cmd.arg("--library")
         .arg(":memory:")
+        .kill_on_drop(true)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
@@ -237,7 +247,6 @@ pub async fn darktable_export(
         source.display()
     );
 
-    let _ = tokio::fs::remove_dir_all(&config_dir).await;
     if !status.success() {
         let _ = tokio::fs::remove_file(output).await;
         return Err(DecodeError {

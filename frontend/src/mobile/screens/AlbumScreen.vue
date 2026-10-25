@@ -15,7 +15,7 @@ import {
   THUMB_MAX,
 } from "../../utils/photoCardLayout.js";
 import {
-  IconAlertCircle, IconArrowLeft, IconCamera, IconCheck, IconClose, IconDatabase, IconDots, IconTrash,
+  IconAlertCircle, IconArrowLeft, IconCamera, IconCheck, IconClose, IconDatabase, IconDots, IconDownload, IconTrash,
   IconFilter, IconGear, IconImage, IconImport, IconList, IconRefresh, IconSearch,
   IconSort, IconWand, IconZoomIn, IconZoomOut,
 } from "../../utils/icons";
@@ -57,6 +57,18 @@ const selecting = computed(() => !!panel.value?.selectMode && !panel.value?.inSp
 const selectedCount = computed(() => Number(panel.value?.selectedPhotoCount || 0));
 const selectActions = computed(() => [
   {
+    id: "export",
+    label: t("albums.exportSelected"),
+    icon: IconDownload,
+    disabled: selectedCount.value === 0 || !!panel.value?.exportSelectionPending,
+  },
+  {
+    id: "download",
+    label: t("albums.downloadSelected"),
+    icon: IconDownload,
+    disabled: selectedCount.value === 0 || !!panel.value?.downloadSelectionPending,
+  },
+  {
     id: "delete",
     label: t("albums.deleteSelected"),
     icon: IconTrash,
@@ -81,7 +93,7 @@ const moreActions = computed(() => {
   if (!isShared.value && !p?.inSpecialView) {
     items.push({ id: "import", label: t("albums.import"), icon: IconImport });
   }
-  if (p?.currentAlbumCanDelete && !p?.inSpecialView) {
+  if (!p?.inSpecialView) {
     items.push({ id: "select", label: t("albums.select"), icon: IconCheck });
   }
   items.push({ id: "rebuild", label: t("albums.rebuildIndex"), icon: IconDatabase });
@@ -167,6 +179,8 @@ function submitSearch() {
 
 function onSelectAction(action) {
   selectMenuOpen.value = false;
+  if (action?.id === "export") panel.value?.openExportSelection?.();
+  if (action?.id === "download") panel.value?.downloadSelected?.();
   if (action?.id === "delete") panel.value?.confirmDeleteSelected?.();
 }
 

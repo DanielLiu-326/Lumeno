@@ -1,14 +1,14 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, Transition } from "vue";
 import {
-  IconFolderAdd, IconRefresh, IconStar, IconStarOff, IconFilter, IconDatabase,
+  IconFolderAdd, IconRefresh, IconStar, IconStarOff, IconFilter, IconGrade, IconDatabase,
   IconCamera, IconClose, IconChevronLeft, IconChevronRight, IconExpand, IconCollapse,
   IconViewOriginal,
   IconArrowLeft, IconTrash, IconPencil, IconPlus, IconImage, IconCheck,
   IconImport, IconZoomIn, IconZoomOut, IconDownload, IconSparkles, IconSearch,   IconWand,
   IconGrid, IconList, IconGear, IconAlertCircle, IconSort,
 } from "../utils/icons";
-import { t } from "../i18n/index.js";
+import { locale, t } from "../i18n/index.js";
 import { albumCoverUrl } from "../utils/albumCover.js";
 import { downloadFileByUrl } from "../utils/downloadFile.js";
 import { gradedThumbEpoch, gradedThumbQuery, markGradedThumb } from "../utils/gradedThumb.js";
@@ -25,6 +25,9 @@ import VirtualGrid from "./VirtualGrid.vue";
 import LazyImage from "./LazyImage.vue";
 import { VList } from "virtua/vue";
 import PhotoCard from "./PhotoCard.vue";
+import PhotoMetaPanel from "./PhotoMetaPanel.vue";
+import GradeWorkspace from "./GradeWorkspace.vue";
+import GradeResources from "./grade/GradeResources.vue";
 import ViewSettingsDialog from "./ViewSettingsDialog.vue";
 import AppDialog from "./AppDialog.vue";
 import AppSlider from "./AppSlider.vue";
@@ -172,6 +175,10 @@ const thumbnailPopoverOpen = ref(false);
 const thumbnailBtnRef = ref(null);
 const thumbnailPopoverStyle = ref({});
 const viewSettingsOpen = ref(false);
+const gradeView = ref(false);
+const resourcesOpen = ref(false);
+const gradePhoto = ref(null);
+let gradeEnrichToken = 0;
 const viewLayout = ref(loadViewLayout(props.currentUser, { mobile: props.embedded }));
 const zoomChromeLock = ref(null);
 const thumbnailSize = computed({
@@ -559,9 +566,12 @@ const exporting = ref(false);
 const exportForm = ref({ format: "jpeg", quality: 95, maxWidth: 0, applyXmp: false });
 // The photo the export dialog targets (grid menu photo wins over the detail photo),
 // plus its XMP state and whether the current settings allow a direct original copy.
+const exportSelection = ref(false);
+const exportSelectionPending = ref(false);
 const exportPhoto = computed(() => menuPhoto.value || detailPhoto.value);
-const exportHasXmp = computed(() => (menuPhoto.value ? menuHasXmp.value : hasXmpSidecar.value));
+const exportHasXmp = computed(() => exportSelection.value || (menuPhoto.value ? menuHasXmp.value : hasXmpSidecar.value));
 const exportDirectCopy = computed(() => {
+  if (exportSelection.value) return false;
   const photo = exportPhoto.value;
   if (!photo || exportForm.value.applyXmp) return false;
   if (exportForm.value.maxWidth) return false;
@@ -1092,6 +1102,7 @@ function onAlbumBack() {
 
 watch(showingDesktopSearch, (on) => {
   if (!on) return;
+  gradeView.value = false;
   thumbnailPopoverOpen.value = false;
   viewSettingsOpen.value = false;
   selectMode.value = false;
@@ -1157,6 +1168,8 @@ function enterAlbum(album) {
 }
 
 function exitAlbum() {
+  gradeView.value = false;
+  gradePhoto.value = null;
   albumHeroId.value = props.currentAlbum;
   selectMode.value = false;
   selectedPhotoPaths.value.clear();
@@ -1330,6 +1343,7 @@ function onPhotoMenuAction(action) {
     downloadPhotoFile(photo);
     menuPhoto.value = null;
   } else if (action.id === "export") {
+    exportSelection.value = false;
     exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: menuHasXmp.value };
     showExportDialog.value = true;
   } else if (action.id === "cover") {
@@ -1388,12 +1402,79 @@ function clearSelection() {
 }
 
 function confirmDeleteSelected() {
+  if (!currentAlbumCanDelete.value) return;
   const count = selectedPhotoPaths.value.size;
   if (!count) return;
   if (!window.confirm(t('msg.confirmDeletePhotos', { count }))) return;
   emit("delete-photos", [...selectedPhotoPaths.value]);
   selectMode.value = false;
   selectedPhotoPaths.value = new Set();
+}
+
+const downloadSelectionPending = ref(false);
+
+function albumFolderName(albumKey) {
+  const raw = String(albumKey || "");
+  const slash = raw.indexOf("/");
+  return slash >= 0 ? raw.slice(slash + 1) : raw;
+}
+
+function selectedAlbumRequest() {
+  const owner = currentAlbumOwner.value || props.currentUser;
+  const albumname = albumFolderName(props.currentAlbum);
+  const prefix = `albums/${albumname}/`;
+  const photos = [];
+  for (const path of selectedPhotoPaths.value) {
+    if (!albumname || !String(path).startsWith(prefix)) return null;
+    photos.push(String(path).slice(prefix.length));
+  }
+  if (!owner || photos.length === 0) return null;
+  return { owner, albumname, photos };
+}
+
+function startZipDownload(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function downloadSelected() {
+  if (downloadSelectionPending.value || selectedPhotoPaths.value.size === 0) return;
+  const request = selectedAlbumRequest();
+  if (!request) {
+    alert(t("albums.downloadFailed"));
+    return;
+  }
+  const { owner, albumname, photos } = request;
+  downloadSelectionPending.value = true;
+  try {
+    const res = await fetch("/api/albums/download", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept-Language": locale.value,
+      },
+      body: JSON.stringify({ owner, albumname, photos }),
+    });
+    let payload = {};
+    try {
+      payload = await res.json();
+    } catch {
+      payload = {};
+    }
+    if (!res.ok || !payload.success || !payload.data?.id) {
+      throw new Error(payload.message || t("albums.downloadFailed"));
+    }
+    startZipDownload(`/api/albums/download/${encodeURIComponent(payload.data.id)}`, `${albumname}.zip`);
+  } catch (error) {
+    alert(error.message || t("albums.downloadFailed"));
+  } finally {
+    downloadSelectionPending.value = false;
+  }
 }
 
 function confirmDeleteSinglePhoto() {
@@ -2042,11 +2123,72 @@ function downloadOriginal() {
 }
 
 function openExportDialog() {
+  exportSelection.value = false;
   exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: hasXmpSidecar.value };
   showExportDialog.value = true;
 }
 
+function openExportSelection() {
+  if (exportSelectionPending.value || selectedPhotoPaths.value.size === 0) return;
+  menuPhoto.value = null;
+  exportSelection.value = true;
+  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: true };
+  showExportDialog.value = true;
+}
+
+async function exportSelected() {
+  if (exportSelectionPending.value || exporting.value) return;
+  const request = selectedAlbumRequest();
+  if (!request) {
+    alert(t("albums.exportFailed"));
+    return;
+  }
+  const { owner, albumname, photos } = request;
+  exportSelectionPending.value = true;
+  exporting.value = true;
+  try {
+    const res = await fetch("/api/albums/export_batch", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept-Language": locale.value,
+      },
+      body: JSON.stringify({
+        owner,
+        albumname,
+        photos,
+        format: exportForm.value.format,
+        quality: Number(exportForm.value.quality) || 95,
+        max_width: Number(exportForm.value.maxWidth) || 0,
+        apply_xmp: !!exportForm.value.applyXmp,
+      }),
+    });
+    let payload = {};
+    try {
+      payload = await res.json();
+    } catch {
+      payload = {};
+    }
+    if (!res.ok || !payload.success || !payload.data?.id) {
+      throw new Error(payload.message || t("albums.exportFailed"));
+    }
+    startZipDownload(`/api/albums/export_batch/${encodeURIComponent(payload.data.id)}`, `${albumname}.zip`);
+    showExportDialog.value = false;
+    exportSelection.value = false;
+  } catch (error) {
+    alert(error.message || t("albums.exportFailed"));
+  } finally {
+    exportSelectionPending.value = false;
+    exporting.value = false;
+  }
+}
+
 async function doExport() {
+  if (exportSelection.value) {
+    await exportSelected();
+    return;
+  }
   const photo = menuPhoto.value || detailPhoto.value;
   if (!photo || exporting.value) return;
   exporting.value = true;
@@ -2112,6 +2254,94 @@ function savePhotoMeta() {
   detailPhoto.value.color_label = [...editColorLabels.value];
   detailPhoto.value.tags = tags;
   closeDetail();
+}
+
+function gradeThumb(photo) {
+  if (!photo?.path) return "";
+  return getGridThumbnail(photo);
+}
+
+function pickGradePhoto() {
+  if (detailPhoto.value && !isVideoPhoto(detailPhoto.value)) return detailPhoto.value;
+  return gridPhotos.value.find((photo) => photo?.path && !isVideoPhoto(photo)) || null;
+}
+
+async function useGradePhoto(photo) {
+  if (!photo?.path) {
+    gradePhoto.value = null;
+    return;
+  }
+  const token = ++gradeEnrichToken;
+  const stub = withAlbumOwner(photo);
+  gradePhoto.value = stub;
+  const enriched = await enrichPhotosWithIndexMeta([stub]);
+  if (token !== gradeEnrichToken) return;
+  const next = enriched.find((entry) => entry.path === stub.path) || enriched[0];
+  if (!next || gradePhoto.value?.path !== next.path) return;
+  gradePhoto.value = withAlbumOwner(next);
+}
+
+function toggleGradeView() {
+  thumbnailPopoverOpen.value = false;
+  if (gradeView.value) {
+    gradeView.value = false;
+    return;
+  }
+  if (isMobile.value) return;
+  const photo = pickGradePhoto();
+  if (!photo) {
+    alert(t("grade.noPhoto"));
+    return;
+  }
+  if (detailPhoto.value) {
+    closeDetail();
+    if (detailPhoto.value && !detailClosing.value) return;
+  }
+  gradeView.value = true;
+  void useGradePhoto(photo);
+}
+
+function onGradeSelect(photo) {
+  void useGradePhoto(photo);
+}
+
+function downloadGradePhoto(photo) {
+  if (!photo) return;
+  downloadFileByUrl(getOriginalUrl(photo.path, photo.owner), photo.name).catch((error) => {
+    alert(error.message || "Download failed");
+  });
+}
+
+async function exportGradePhoto(photo) {
+  if (!photo) return;
+  menuPhoto.value = photo;
+  let applyXmp = false;
+  try {
+    const owner = photo.owner || currentAlbumOwner.value;
+    const ownerParam = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+    const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(photo.path)}${ownerParam}`, { credentials: "same-origin" });
+    if (res.ok) {
+      const data = await res.json();
+      applyXmp = !!data.has_xmp;
+    }
+  } catch {
+    applyXmp = false;
+  }
+  exportSelection.value = false;
+  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp };
+  showExportDialog.value = true;
+}
+
+function saveGradeMeta(payload) {
+  emit("update-photo-meta", payload);
+  const apply = (photo) => {
+    if (!photo || photo.path !== payload.path) return;
+    photo.rating = payload.rating;
+    photo.color_label = payload.colorLabel;
+    photo.tags = payload.tags;
+  };
+  apply(gradePhoto.value);
+  apply(props.albumPhotos.find((photo) => photo.path === payload.path));
 }
 
 function photoColorDot(label) { return COLOR_LABELS.find((c) => c.key === label); }
@@ -2187,6 +2417,10 @@ defineExpose({
   selectAllPhotos,
   clearSelection,
   confirmDeleteSelected,
+  downloadSelected,
+  downloadSelectionPending,
+  openExportSelection,
+  exportSelectionPending,
   filterSortPanelOpen,
   filterPanelOpen,
   sortPanelOpen,
@@ -2365,6 +2599,18 @@ defineExpose({
       <div class="relative z-10 flex shrink-0 flex-col">
       <!-- Top toolbar (desktop / non-embedded mobile). Phone shell supplies its own chrome. -->
       <div v-if="!embedded" ref="desktopToolbarRef" class="album-toolbar flex min-w-0 items-center gap-1.5 overflow-x-hidden app-split-b px-2.5 py-2.5 app-frost-toolbar md:gap-2 md:px-4 md:py-3">
+        <template v-if="gradeView">
+          <button class="app-btn app-btn-secondary shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+            @click="gradeView = false">
+            <IconArrowLeft class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('view.gradeBack') }}</span>
+          </button>
+          <div class="min-w-0 flex-1"></div>
+          <button v-if="!isSharedAlbum" class="app-btn app-btn-secondary shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+            @click="resourcesOpen = true">
+            {{ t('grade.resources') }}
+          </button>
+        </template>
+        <template v-else>
         <div class="flex w-0 min-w-min flex-1 items-center gap-1.5 md:gap-2">
         <button class="app-btn app-btn-secondary shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           @click="onAlbumBack">
@@ -2481,7 +2727,7 @@ defineExpose({
           @click="openImportModal">
           <IconImport class="h-3.5 w-3.5" /><span :class="desktopActionLabelClass">{{ t('albums.import') }}</span>
         </button>
-        <button v-if="currentAlbumCanDelete && !inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+        <button v-if="!inSpecialView && !showingDesktopSearch && !(isMobile && mobileSearchOpen)" class="app-btn shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           :class="selectMode ? 'app-btn-accent' : 'app-btn-secondary'"
           :title="t('albums.select')"
           @click="toggleSelectMode">
@@ -2503,11 +2749,17 @@ defineExpose({
         </button>
         <button v-if="!inSpecialView && !showingDesktopSearch && !isMobile" class="app-btn shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           :class="filterSortPanelOpen ? 'app-btn-accent' : 'app-btn-secondary'"
-          :title="t('albums.filterAndSort')"
+          :title="t('albums.filters')"
           @click="toggleFilterSortPanel">
           <IconFilter class="h-3.5 w-3.5" />
-          <span :class="desktopActionLabelClass">{{ t('albums.filterAndSort') }}</span>
-          <span v-if="hasActiveFilters || hasActiveSort" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+          <span :class="desktopActionLabelClass">{{ t('albums.filters') }}</span>
+          <span v-if="hasActiveFilters" class="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+        </button>
+        <button v-if="!inSpecialView && !showingDesktopSearch && !isMobile" class="app-btn app-btn-secondary shrink-0 whitespace-nowrap px-2.5 py-1.5 text-xs md:px-3 md:py-2"
+          :title="t('view.grade')"
+          @click="toggleGradeView">
+          <IconGrade class="h-3.5 w-3.5" />
+          <span :class="desktopActionLabelClass">{{ t('view.grade') }}</span>
         </button>
         <button v-if="!inSpecialView && !showingDesktopSearch && isMobile && !mobileSearchOpen" class="app-btn px-2.5 py-1.5 text-xs md:px-3 md:py-2"
           :class="filterPanelOpen ? 'app-btn-accent' : 'app-btn-secondary'"
@@ -2603,6 +2855,7 @@ defineExpose({
           </teleport>
         </div>
         </div>
+        </template>
       </div>
       <input ref="localFileInput" type="file" class="hidden" multiple accept="image/*,video/*,.raw,.arw,.nef,.cr2,.cr3,.orf,.rw2,.dng,.raf,.srw,.x3f,.3fr,.mef,.pef,.nrw,.rwl,.iiq,.erf,.fff" @change="handleLocalFileChange" />
       <ImportSourceModal
@@ -2621,7 +2874,7 @@ defineExpose({
       />
 
       <!-- Selection action bar -->
-      <div v-if="selectMode && !inSpecialView && !showingDesktopSearch && !embedded" class="flex items-center gap-2 app-split-b px-2.5 py-1.5 app-frost-toolbar md:px-4">
+      <div v-if="selectMode && !inSpecialView && !showingDesktopSearch && !embedded && !gradeView" class="flex items-center gap-2 app-split-b px-2.5 py-1.5 app-frost-toolbar md:px-4">
         <span class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
           {{ t('albums.selectedPhotos', { count: selectedPhotoPaths.size }) }}
         </span>
@@ -2633,6 +2886,20 @@ defineExpose({
           @click="clearSelection">{{ t('albums.deselectAll') }}</button>
         <div class="flex-1"></div>
         <button v-if="selectedPhotoPaths.size > 0"
+          class="inline-flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-medium transition disabled:opacity-40"
+          :class="isDark ? 'bg-emerald-700 text-white hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'"
+          :disabled="exportSelectionPending"
+          @click="openExportSelection">
+          <IconDownload class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.exportSelected') }}</span>
+        </button>
+        <button v-if="selectedPhotoPaths.size > 0"
+          class="inline-flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-medium transition disabled:opacity-40"
+          :class="isDark ? 'bg-stone-700 text-stone-100 hover:bg-stone-600' : 'bg-stone-800 text-white hover:bg-stone-700'"
+          :disabled="downloadSelectionPending"
+          @click="downloadSelected">
+          <IconDownload class="h-3.5 w-3.5" /><span class="hidden md:inline">{{ t('albums.downloadSelected') }}</span>
+        </button>
+        <button v-if="selectedPhotoPaths.size > 0 && currentAlbumCanDelete"
           class="inline-flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-medium transition"
           :class="isDark ? 'bg-rose-700 text-white hover:bg-rose-600' : 'bg-rose-600 text-white hover:bg-rose-700'"
           @click="confirmDeleteSelected">
@@ -2645,7 +2912,7 @@ defineExpose({
       <div class="flex min-h-0 flex-1 overflow-hidden">
         <!-- Desktop filter/sort sidebar -->
         <FilterSidebar
-          v-if="!isMobile && filterSortPanelOpen"
+          v-if="!isMobile && filterSortPanelOpen && !gradeView"
           v-show="!inSpecialView && !showingDesktopSearch"
           :is-dark="isDark"
           :collections="collections"
@@ -2695,10 +2962,25 @@ defineExpose({
           @close="sortPanelOpen = false"
         />
 
+        <GradeWorkspace
+          v-if="gradeView && !isMobile"
+          :photo="gradePhoto"
+          :photos="gridPhotos"
+          :is-dark="isDark"
+          :format-size="formatSize"
+          :available-tags="availableTags"
+          :thumb-for="gradeThumb"
+          @select="onGradeSelect"
+          @download="downloadGradePhoto"
+          @export="exportGradePhoto"
+          @save-meta="saveGradeMeta"
+          @load-more="handlePhotosScrollNearBottom"
+        />
+
         <!-- Photo grid / duplicate groups -->
         <div
           ref="photoPaneRef"
-          v-show="!gridPaused"
+          v-show="!gridPaused && !gradeView"
           class="album-no-drag relative min-h-0 flex-1 overflow-hidden"
           :class="!inSpecialView && !showingDesktopSearch && gridThumbsOnly ? 'p-0' : 'p-2 md:p-3'"
           :style="{ '--photo-gap': `${thumbGapPx}px`, touchAction: pinchLive ? 'none' : 'pan-y' }"
@@ -2880,6 +3162,8 @@ defineExpose({
           </VirtualGrid>
           </template>
         </div>
+
+        <GradeResources v-if="gradeView && resourcesOpen && !isSharedAlbum" :is-dark="isDark" @close="resourcesOpen = false" />
 
         <!-- AI tools modal (desktop) -->
         <teleport v-if="!embedded" to="body">
@@ -3401,105 +3685,30 @@ defineExpose({
             <!-- Meta & editor -->
             <div v-if="!detailFullscreen" class="app-scrollbar mt-3 flex w-full shrink-0 flex-col gap-2.5 overflow-y-auto md:mt-0 md:w-72 md:max-h-none md:gap-3 lg:w-80"
               :class="isMobile ? 'max-h-[42%]' : ''">
-              <h3 class="text-base font-bold">{{ detailPhoto.name }}</h3>
-
-              <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
-                <div v-if="detailPhoto.datetime || detailPhoto.date"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.date') }}</span> {{ detailPhoto.datetime || detailPhoto.date }}</div>
-                <div v-if="detailPhoto.camera_make || detailPhoto.camera_model">
-                  <span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.camera') }}</span>
-                  {{ [detailPhoto.camera_make, detailPhoto.camera_model].filter(Boolean).join(' ') }}
-                </div>
-                <div v-if="detailPhoto.lens"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.lens') }}</span> {{ detailPhoto.lens }}</div>
-                <div v-if="detailPhoto.focal_length"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.focalLength') }}</span> {{ detailPhoto.focal_length }}</div>
-                <div v-if="detailPhoto.aperture"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.aperture') }}</span> {{ detailPhoto.aperture }}</div>
-                <div v-if="detailPhoto.shutter_speed"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.shutter') }}</span> {{ detailPhoto.shutter_speed }}</div>
-                <div v-if="detailPhoto.iso"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">ISO</span> {{ detailPhoto.iso }}</div>
-                <div><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.size') }}</span> {{ formatSize(detailPhoto.size) }}</div>
-                <div v-if="detailDimensions"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.dimensions') }}</span> {{ detailDimensions }}</div>
-                <div v-if="detailDurationLabel"><span class="font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.duration') }}</span> {{ detailDurationLabel }}</div>
-              </div>
-
-              <hr :class="isDark ? 'border-stone-700' : 'border-stone-200'" />
-
-              <!-- Download buttons -->
-              <div class="flex gap-2">
-                <button class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium transition"
-                  :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
-                  @click="downloadOriginal">
-                  <IconDownload class="h-3.5 w-3.5" />{{ t('detail.download') }}
-                </button>
-                <button v-if="!isDetailVideo" class="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium transition"
-                  :class="isDark ? 'bg-emerald-700 text-emerald-100 hover:bg-emerald-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'"
-                  @click="openExportDialog">
-                  <IconDownload class="h-3.5 w-3.5" />{{ t('detail.exportBtn') }}
-                </button>
-              </div>
-
-              <!-- Rating editor -->
-              <div>
-                <p class="mb-1 text-[10px] font-semibold uppercase tracking-wider" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.rating') }}</p>
-                <div class="flex gap-1">
-                  <button v-for="star in 5" :key="star" class="p-0.5 transition"
-                    :class="star <= editRating ? 'text-yellow-400' : (isDark ? 'text-stone-600 hover:text-stone-400' : 'text-stone-300 hover:text-stone-400')"
-                    @click="setDetailRating(star)">
-                    <IconStar class="h-5 w-5" />
-                  </button>
-                </div>
-              </div>
-
-              <!-- Color label editor -->
-              <div>
-                <p class="mb-1 text-[10px] font-semibold uppercase tracking-wider" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.colorLabel') }}</p>
-                <div class="flex gap-2">
-                  <button v-for="cl in COLOR_LABELS" :key="cl.key"
-                    class="h-6 w-6 rounded-full transition"
-                    :class="[cl.color, editColorLabels.includes(cl.key) ? `ring-2 ${cl.ring} ring-offset-1` : 'opacity-50 hover:opacity-100']"
-                    :style="isDark && editColorLabels.includes(cl.key) ? 'ring-offset-color: #1c1917' : ''"
-                    @click="setDetailColorLabel(cl.key)"></button>
-                </div>
-              </div>
-
-              <!-- Tags editor -->
-              <div>
-                <p class="mb-1 text-[10px] font-semibold uppercase tracking-wider" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.tags') }}</p>
-                <TagChips v-model="editTags" :available="availableTags" editable :is-dark="isDark" />
-              </div>
-
-              <!-- Set as album cover + Add to album + Delete -->
-              <div class="flex flex-wrap gap-2">
-                <button v-if="currentAlbumCanWrite && !isDetailVideo" class="flex-1 rounded-xl px-4 py-2 text-xs font-medium transition"
-                  :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
-                  @click="setCoverFromPhoto(detailPhoto)">
-                  {{ t('detail.setAsCover') }}
-                </button>
-                <button
-                  class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
-                  :class="isDark ? 'bg-sky-900/60 text-sky-200 hover:bg-sky-800' : 'bg-sky-100 text-sky-700 hover:bg-sky-200'"
-                  @click="openAddToAlbumModal(detailPhoto)">
-                  <IconImage class="h-3.5 w-3.5" />{{ t('detail.addToAlbum') }}
-                </button>
-                <button
-                  v-if="!isDetailVideo"
-                  class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
-                  :class="isDark ? 'bg-violet-900/60 text-violet-200 hover:bg-violet-800' : 'bg-violet-100 text-violet-700 hover:bg-violet-200'"
-                  :title="t('detail.findSimilar')"
-                  @click="findSimilarFromDetail">
-                  <IconSparkles class="h-3.5 w-3.5" />{{ t('detail.findSimilar') }}
-                </button>
-                <button v-if="currentAlbumCanDelete"
-                  class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
-                  :class="isDark ? 'bg-rose-900/60 text-rose-200 hover:bg-rose-800' : 'bg-rose-100 text-rose-700 hover:bg-rose-200'"
-                  @click="confirmDeleteSinglePhoto">
-                  <IconTrash class="h-3.5 w-3.5" />{{ t('detail.delete') }}
-                </button>
-              </div>
-
-              <button class="mt-auto rounded-xl px-4 py-2.5 text-sm font-medium transition md:py-2"
-                :class="isDark ? 'bg-stone-100 text-stone-900 hover:bg-white' : 'bg-stone-900 text-white hover:bg-stone-800'"
-                @click="savePhotoMeta">
-                {{ t('detail.save') }}
-              </button>
-              <div class="h-[var(--safe-bottom,0px)] md:hidden"></div>
+              <PhotoMetaPanel
+                :photo="detailPhoto"
+                :is-dark="isDark"
+                :format-size="formatSize"
+                :dimensions="detailDimensions || ''"
+                :duration-label="detailDurationLabel || ''"
+                :rating="editRating"
+                :color-label-keys="editColorLabels"
+                :tags="editTags"
+                :available-tags="availableTags"
+                :can-write="currentAlbumCanWrite"
+                :can-delete="currentAlbumCanDelete"
+                :is-video="isDetailVideo"
+                @download="downloadOriginal"
+                @export="openExportDialog"
+                @set-rating="setDetailRating"
+                @toggle-color="setDetailColorLabel"
+                @update:tags="editTags = $event"
+                @set-cover="setCoverFromPhoto(detailPhoto)"
+                @add-to-album="openAddToAlbumModal(detailPhoto)"
+                @find-similar="findSimilarFromDetail"
+                @delete="confirmDeleteSinglePhoto"
+                @save="savePhotoMeta"
+              />
             </div>
           </div>
         </div>
@@ -3523,10 +3732,10 @@ defineExpose({
       @select="onPhotoMenuAlbum"
     />
 
-    <AppDialog :show="showExportDialog" :z-index="145" @close="showExportDialog = false; menuPhoto = null">
+    <AppDialog :show="showExportDialog" :z-index="145" @close="showExportDialog = false; exportSelection = false; menuPhoto = null">
         <div class="app-dialog-panel app-dialog-panel-dense w-full max-w-sm rounded-2xl border p-5"
           :class="isDark ? 'text-stone-100' : 'text-stone-900'">
-          <h3 class="mb-4 text-base font-bold">{{ t('detail.exportTitle') }}</h3>
+          <h3 class="mb-4 text-base font-bold">{{ exportSelection ? t('albums.exportSelected') : t('detail.exportTitle') }}</h3>
 
           <!-- Format -->
           <div class="mb-3">
@@ -3575,7 +3784,7 @@ defineExpose({
           <div class="flex gap-2">
             <button class="flex-1 rounded-xl px-4 py-2 text-sm font-medium transition"
               :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
-              @click="showExportDialog = false">{{ t('share.close') }}</button>
+              @click="showExportDialog = false; exportSelection = false">{{ t('share.close') }}</button>
             <button class="flex-1 rounded-xl px-4 py-2 text-sm font-medium transition"
               :class="isDark ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-emerald-600 text-white hover:bg-emerald-700'"
               :disabled="exporting"

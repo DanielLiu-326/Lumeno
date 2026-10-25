@@ -5,6 +5,8 @@ pub mod auth;
 pub mod common;
 pub mod constants;
 pub mod files;
+pub mod grade_api;
+pub mod grade_resources;
 pub mod i18n;
 pub mod settings;
 pub mod tasks;

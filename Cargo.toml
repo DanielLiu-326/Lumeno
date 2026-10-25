@@ -1,3 +1,5 @@
+cargo-features = ["profile-rustflags"]
+
 [package]
 name = "lumeno"
 version = "0.1.0"
@@ -58,3 +60,8 @@ sha2 = "0.11.0"
 
 [patch.crates-io]
 rsraw-sys = { path = "vendor/rsraw-sys" }
+
+# Release code may use AVX2 and FMA. x86-64-v3, not native: the build machine
+# has AVX-512, and that must not be required on the NAS.
+[profile.release]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

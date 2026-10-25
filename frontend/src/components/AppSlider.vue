@@ -12,11 +12,16 @@ const props = defineProps({
   tone: { type: String, default: "amber" },
   ariaLabel: { type: String, default: "" },
   disabled: { type: Boolean, default: false },
+  /** One slider step per wheel notch. Stops the event so a parent scroller stays put. */
+  wheel: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["update:modelValue", "input", "change"]);
 
 const dragging = ref(false);
+const wheeling = ref(false);
+let wheelAcc = 0;
+let wheelTimer = 0;
 const span = computed(() => {
   const range = props.max - props.min;
   return range === 0 ? 1 : range;
@@ -57,17 +62,55 @@ function onPointerUp() {
   window.removeEventListener("pointercancel", onPointerUp);
 }
 
-onBeforeUnmount(onPointerUp);
+function stepSize() {
+  const step = Number(props.step);
+  return Number.isFinite(step) && step > 0 ? step : 1;
+}
+
+function onWheel(event) {
+  if (!props.wheel || props.disabled) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const raw = event.deltaY || event.deltaX;
+  const dy = event.deltaMode === 1 ? raw * 16 : event.deltaMode === 2 ? raw * 120 : raw;
+  if (!dy) return;
+  if (wheelAcc && Math.sign(dy) !== Math.sign(wheelAcc)) wheelAcc = 0;
+  wheelAcc += dy;
+  if (Math.abs(wheelAcc) < 40) return;
+  const dir = wheelAcc > 0 ? -1 : 1;
+  wheelAcc = 0;
+  const size = stepSize();
+  const current = Number(props.modelValue);
+  const base = Number.isFinite(current) ? current : props.min;
+  const steps = Math.round((base - props.min) / size);
+  const next = Math.min(props.max, Math.max(props.min, props.min + (steps + dir) * size));
+  const places = Math.min(6, (String(size).split(".")[1] || "").length);
+  const rounded = Number(next.toFixed(places));
+  if (rounded === base) return;
+  wheeling.value = true;
+  window.clearTimeout(wheelTimer);
+  wheelTimer = window.setTimeout(() => {
+    wheeling.value = false;
+  }, 140);
+  emit("update:modelValue", rounded);
+  emit("input", rounded);
+}
+
+onBeforeUnmount(() => {
+  onPointerUp();
+  window.clearTimeout(wheelTimer);
+});
 </script>
 
 <template>
   <div
     class="app-slider"
     :class="[
-      dragging ? 'is-dragging' : '',
+      dragging || wheeling ? 'is-dragging' : '',
       tone === 'ghost' ? 'is-ghost' : '',
       isDark ? 'is-dark' : '',
     ]"
+    @wheel.prevent="onWheel"
   >
     <div class="app-slider-track">
       <div class="app-slider-fill" :style="{ width: `${percent}%` }" />
