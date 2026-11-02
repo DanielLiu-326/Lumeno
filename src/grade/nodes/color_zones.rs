@@ -242,17 +242,27 @@ fn eval(points: &[Point], hue: f32, interpolation: Interpolation) -> f32 {
         Interpolation::Cubic | Interpolation::Centripetal => {
             let prev = points[(index + n - 1) % n];
             let next = points[(index + 2) % n];
-            // Catmull-Rom; centripetal weights tangents by segment length so
-            // unevenly spaced points do not overshoot.
-            let m0 = if interpolation == Interpolation::Centripetal {
-                (p1.value - prev.value) / 2.0
+            let x_prev = if index == 0 {
+                prev.hue - 360.0
             } else {
-                (p1.value - prev.value) / 2.0
+                prev.hue
             };
-            let m1 = if interpolation == Interpolation::Centripetal {
-                (next.value - p0.value) / 2.0
+            let x_next = if index + 2 < n {
+                next.hue
             } else {
-                (next.value - p0.value) / 2.0
+                next.hue + 360.0
+            };
+            let (m0, m1) = if interpolation == Interpolation::Centripetal {
+                // Non-uniform Catmull-Rom: tangents are scaled by the segment
+                // lengths, so an unevenly spaced point does not overshoot.
+                let h_prev = (x0 - x_prev).max(1e-3);
+                let h_next = (x_next - x1).max(1e-3);
+                (
+                    (p1.value - prev.value) / (h_prev + span) * span,
+                    (next.value - p0.value) / (span + h_next) * span,
+                )
+            } else {
+                ((p1.value - prev.value) / 2.0, (next.value - p0.value) / 2.0)
             };
             let t2 = t * t;
             let t3 = t2 * t;
@@ -427,6 +437,35 @@ mod tests {
         let wrapped = eval(&points, 300.0, Interpolation::Linear);
         assert!(wrapped < 0.0 && wrapped > -50.0, "wrapped={wrapped}");
         assert!((eval(&points, 360.0, Interpolation::Linear) - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn centripetal_and_cubic_differ_on_uneven_spacing() {
+        let points = vec![
+            Point {
+                hue: 0.0,
+                value: 0.0,
+            },
+            Point {
+                hue: 20.0,
+                value: 60.0,
+            },
+            Point {
+                hue: 300.0,
+                value: -20.0,
+            },
+        ];
+        let cubic = eval(&points, 10.0, Interpolation::Cubic);
+        let centripetal = eval(&points, 10.0, Interpolation::Centripetal);
+        assert!(
+            (cubic - centripetal).abs() > 0.5,
+            "cubic={cubic} centripetal={centripetal}"
+        );
+        for point in &points {
+            assert!(
+                (eval(&points, point.hue, Interpolation::Centripetal) - point.value).abs() < 1e-3
+            );
+        }
     }
 
     #[test]

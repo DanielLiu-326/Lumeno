@@ -413,7 +413,7 @@ export default {
     "grade.colorZonesLightness": "Lightness",
     "grade.colorZonesChroma": "Chroma",
     "grade.colorZonesHue": "Hue",
-    "grade.colorZonesHint": "Drag a point to shape the curve; click to add, double-click to remove.",
+    "grade.colorZonesHint": "Drag a point to move it; press an empty spot and drag to add one; double-click or right-click to delete.",
     "grade.colorZonesReset": "Reset",
     "grade.lutNone": "None",
     "grade.lutEmpty": "No LUTs in the library yet",

@@ -413,7 +413,7 @@ export default {
     "grade.colorZonesLightness": "明度",
     "grade.colorZonesChroma": "彩度",
     "grade.colorZonesHue": "色相",
-    "grade.colorZonesHint": "拖动控制点调整曲线；单击添加，双击删除。",
+    "grade.colorZonesHint": "拖动控制点移动；在空白处按下并拖动可新增控制点；双击或右键删除。",
     "grade.colorZonesReset": "重置",
     "grade.lutNone": "未选择",
     "grade.lutEmpty": "资源库里还没有 LUT",
