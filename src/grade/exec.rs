@@ -15,6 +15,7 @@ use super::buffer::{self, DisplayBuffer, ImageSize, LinearBuffer, WorkingSpace};
 use super::color::{self, encode_u8, luma, rec2020_to_linear_srgb, srgb_to_linear};
 use super::document::{self, Document};
 use super::error::GradeError;
+use super::pipeline::Pipeline;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Space {
@@ -235,7 +236,7 @@ fn render_pipeline(
         cancel,
     };
     let mut reran = Vec::new();
-    let order = pipeline_order(doc);
+    let order = Pipeline::compile(doc).order().to_vec();
     // Opening a photo dirties every node, including input, so nothing is kept.
     // An edit dirties one node and its downstream. Keep the frame that enters
     // that node, so the next drag does not rerun its upstream.
@@ -320,23 +321,6 @@ fn render_pipeline(
     )
 }
 
-fn pipeline_order(doc: &Document) -> Vec<String> {
-    let mut order = Vec::new();
-    fn walk(doc: &Document, id: &str, order: &mut Vec<String>) {
-        if order.iter().any(|seen| seen == id) {
-            return;
-        }
-        if let Some(prev) = document::upstream(doc, id) {
-            walk(doc, prev, order);
-        }
-        order.push(id.to_string());
-    }
-    if let Some(export) = doc.nodes.iter().find(|node| node.id == "export") {
-        walk(doc, &export.id, &mut order);
-    }
-    order
-}
-
 pub fn original_preview(source: &Frame) -> Rgba {
     present(source)
 }
@@ -373,6 +357,107 @@ fn present(frame: &Frame) -> Rgba {
         height: frame.height,
         pixels,
     }
+}
+
+/// Bake the view transform (stacked rotation + normalized crop) into a display-referred image.
+/// This is the pixel-space equivalent of how the host preview applies `degrees` and `roi` with
+/// CSS: the source is centered on a canvas large enough for the rotated bounds, rotated clockwise
+/// by `degrees` (screen convention, positive is clockwise), then cropped to `roi`. A full roi with
+/// no rotation returns the image unchanged.
+pub fn bake_view(rgba: &Rgba, degrees: f32, roi: [f32; 4]) -> Rgba {
+    let [rx, ry, rw, rh] = roi;
+    let no_geometry = degrees.abs() < 1e-3
+        && rx <= 1e-4
+        && ry <= 1e-4
+        && (rw - 1.0).abs() < 1e-3
+        && (rh - 1.0).abs() < 1e-3;
+    if no_geometry {
+        return Rgba {
+            width: rgba.width,
+            height: rgba.height,
+            pixels: rgba.pixels.clone(),
+        };
+    }
+    let (w, h) = (rgba.width, rgba.height);
+    if w == 0 || h == 0 {
+        return Rgba {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+    }
+    let wf = w as f32;
+    let hf = h as f32;
+    let rad = degrees.to_radians();
+    let (sin_a, cos_a) = (rad.sin(), rad.cos());
+    let canvas_w = (wf * cos_a.abs() + hf * sin_a.abs()).round().max(1.0);
+    let canvas_h = (wf * sin_a.abs() + hf * cos_a.abs()).round().max(1.0);
+    let rw = rw.clamp(1e-3, 1.0);
+    let rh = rh.clamp(1e-3, 1.0);
+    let out_w = (rw * canvas_w).round().max(1.0) as u32;
+    let out_h = (rh * canvas_h).round().max(1.0) as u32;
+    let src = &rgba.pixels;
+    let src_w = w as usize;
+    let src_h = h as usize;
+    let mut out = vec![0u8; (out_w as usize) * (out_h as usize) * 4];
+    let row_len = (out_w as usize) * 4;
+    for_rows_u8(out_h as usize, row_len, &mut out, |oy, row| {
+        let cy = ry * canvas_h + (oy as f32 + 0.5) * rh * canvas_h / out_h as f32;
+        let dy = cy - canvas_h * 0.5;
+        for ox in 0..out_w as usize {
+            let cx = rx * canvas_w + (ox as f32 + 0.5) * rw * canvas_w / out_w as f32;
+            let dx = cx - canvas_w * 0.5;
+            // Inverse of the forward rotation: image-local coords relative to the image center.
+            let lx = dx * cos_a + dy * sin_a;
+            let ly = -dx * sin_a + dy * cos_a;
+            let px = bilinear_rgba(
+                src,
+                src_w,
+                src_h,
+                lx + (wf - 1.0) * 0.5,
+                ly + (hf - 1.0) * 0.5,
+            );
+            let dst = ox * 4;
+            row[dst..dst + 4].copy_from_slice(&px);
+        }
+    });
+    Rgba {
+        width: out_w,
+        height: out_h,
+        pixels: out,
+    }
+}
+
+fn bilinear_rgba(src: &[u8], w: usize, h: usize, sx: f32, sy: f32) -> [u8; 4] {
+    // Small slack absorbs float noise so an exactly-on-edge sample (e.g. cos(90°))
+    // is not rejected as outside the image.
+    const EPS: f32 = 1e-3;
+    if sx < -EPS || sy < -EPS || sx >= w as f32 + EPS || sy >= h as f32 + EPS {
+        return [0, 0, 0, 0];
+    }
+    let x = sx.clamp(0.0, w as f32 - 1.0);
+    let y = sy.clamp(0.0, h as f32 - 1.0);
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let i00 = (y0 * w + x0) * 4;
+    let i01 = (y0 * w + x1) * 4;
+    let i10 = (y1 * w + x0) * 4;
+    let i11 = (y1 * w + x1) * 4;
+    let mut out = [0u8; 4];
+    for c in 0..4 {
+        let v00 = src[i00 + c] as f32;
+        let v01 = src[i01 + c] as f32;
+        let v10 = src[i10 + c] as f32;
+        let v11 = src[i11 + c] as f32;
+        let top = v00 + (v01 - v00) * fx;
+        let bottom = v10 + (v11 - v10) * fx;
+        out[c] = (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    out
 }
 
 pub(crate) fn value_from_frame(frame: Frame) -> buffer::Value {
@@ -824,5 +909,101 @@ mod tests {
         let rendered = render_cancellable(&doc, &source, &mut cache, &dirty, &cancel);
         assert!(rendered.reran.is_empty());
         assert!(rendered.preview.pixels.is_empty());
+    }
+
+    #[test]
+    fn bake_view_rotates_clockwise_like_css() {
+        // 2x1 image, red left blue right. A 90deg clockwise turn puts red on top, blue below.
+        let src = Rgba {
+            width: 2,
+            height: 1,
+            pixels: vec![255, 0, 0, 255, 0, 0, 255, 255],
+        };
+        let out = bake_view(&src, 90.0, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!((out.width, out.height), (1, 2));
+        assert_eq!(out.pixels[0..4], [255, 0, 0, 255]); // red on top
+        assert_eq!(out.pixels[4..8], [0, 0, 255, 255]); // blue below
+    }
+
+    #[test]
+    fn bake_view_passthrough_without_geometry() {
+        let src = Rgba {
+            width: 2,
+            height: 2,
+            pixels: vec![
+                10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
+            ],
+        };
+        let out = bake_view(&src, 0.0, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(out.pixels, src.pixels);
+    }
+
+    /// Camera RGB above 1 is scene-referred, not an error. Clipping it before
+    /// the camera matrix flips bright yellows to green; keep red above green.
+    #[test]
+    fn camera_bright_yellow_stays_warm() {
+        let camera = crate::grade::document::CameraColor {
+            name: "S5M2".to_string(),
+            to_working: [
+                0.8552234172821045,
+                0.38491445779800415,
+                -0.24013786017894745,
+                -0.05828174576163292,
+                1.4217835664749146,
+                -0.3635018467903137,
+                -0.01867656037211418,
+                -0.2057872712612152,
+                1.2244638204574585,
+            ],
+        };
+        let doc = crate::grade::document::document_with_camera(true, 0.0, Some(camera));
+        let render_camera = |rgb: [f32; 3]| {
+            let frame = Frame {
+                width: 1,
+                height: 1,
+                space: Space::Camera,
+                rgb: Arc::new(vec![rgb[0], rgb[1], rgb[2]]),
+                transform: ViewTransform::default(),
+                roi: Roi::default(),
+            };
+            let mut cache = HashMap::new();
+            let out = render(&doc, &frame, &mut cache, &Default::default());
+            [
+                out.preview.pixels[0],
+                out.preview.pixels[1],
+                out.preview.pixels[2],
+            ]
+        };
+        let mid = render_camera([0.70, 0.52, 0.14]);
+        let bright = render_camera([1.40, 1.05, 0.28]);
+        assert!(
+            bright[0] >= bright[1],
+            "bright yellow went green: rgb={bright:?}"
+        );
+        let sum = |px: [u8; 3]| u32::from(px[0]) + u32::from(px[1]);
+        assert!(
+            sum(bright) > sum(mid),
+            "brightening should raise the yellow, mid={mid:?} bright={bright:?}"
+        );
+    }
+
+    #[test]
+    fn bake_view_crops_the_roi() {
+        // 4x4 solid, crop to the center half. No rotation.
+        let mut pixels = Vec::new();
+        for _ in 0..16 {
+            pixels.extend_from_slice(&[1, 2, 3, 255]);
+        }
+        let src = Rgba {
+            width: 4,
+            height: 4,
+            pixels,
+        };
+        let out = bake_view(&src, 0.0, [0.25, 0.25, 0.5, 0.5]);
+        assert_eq!((out.width, out.height), (2, 2));
+        assert_eq!(
+            out.pixels,
+            vec![1, 2, 3, 255, 1, 2, 3, 255, 1, 2, 3, 255, 1, 2, 3, 255]
+        );
     }
 }

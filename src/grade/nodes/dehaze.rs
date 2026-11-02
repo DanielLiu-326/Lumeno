@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, text};
+use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::exec::{self, Frame};
 use crate::grade::field::{self, FieldSpec};
@@ -50,8 +50,8 @@ impl NodeParam for Dehaze {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -114,12 +114,11 @@ impl Node for Dehaze {
 }
 
 impl Dehaze {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "strength",
-                text(zh, "Strength", "强度"),
+                "grade.field.strength",
                 self.strength,
                 0.0,
                 1.0,
@@ -135,7 +134,7 @@ impl Dehaze {
             ),
             field::slider(
                 "t_min",
-                text(zh, "Floor", "下限"),
+                "grade.field.floor",
                 self.t_min,
                 0.0,
                 0.5,
@@ -143,7 +142,7 @@ impl Dehaze {
             ),
             field::slider(
                 "radius",
-                text(zh, "Radius", "半径"),
+                "grade.field.radius",
                 self.radius,
                 0.0,
                 0.08,

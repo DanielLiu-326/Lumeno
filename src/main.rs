@@ -56,6 +56,9 @@ use backend::settings::{
     api_thumbnail_scan_now, api_wallpaper_get, api_wallpaper_upload, api_webdav_handler,
     api_webdav_shares_get, api_webdav_shares_update,
 };
+use backend::storage::{
+    api_storage_cleanup, api_storage_members, api_storage_report, api_storage_scan,
+};
 use backend::tasks::{
     TaskManager, api_cancel_task, api_clear_finished_tasks, api_get_task_list, api_get_task_status,
     api_pause_task, api_resume_task,
@@ -228,6 +231,10 @@ async fn main() {
         .route("/api/on-this-day", get(api_on_this_day))
         .route("/api/daily-picks", get(api_daily_picks))
         .route("/api/dashboard", get(api_dashboard))
+        .route("/api/storage/report", get(api_storage_report))
+        .route("/api/storage/members", get(api_storage_members))
+        .route("/api/storage/scan", post(api_storage_scan))
+        .route("/api/storage/cleanup", post(api_storage_cleanup))
         .route("/api/ai/status", get(api_ai_status))
         .route("/api/ai/index", post(api_ai_index))
         .route("/api/ai/duplicates", get(api_ai_duplicates))
@@ -325,8 +332,16 @@ async fn main() {
         .layer(Extension(RateLimiter::new()))
         .layer(Extension(app_state.clone()));
 
-    let listener = tokio::net::TcpListener::bind("[::]:3000").await.unwrap();
-    print_startup_banner(&app_state);
+    // Bind address: LISTEN_ADDR, else dual-stack all interfaces on 3000.
+    let listen_addr = std::env::var("LISTEN_ADDR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "[::]:3000".to_string());
+    let listener = tokio::net::TcpListener::bind(&listen_addr)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to bind {listen_addr}: {e}"));
+    print_startup_banner(&app_state, &listen_addr);
     spawn_thumbnail_prewarmer(app_state.clone());
     spawn_cache_gc(app_state);
     axum::serve(
@@ -337,7 +352,7 @@ async fn main() {
     .unwrap();
 }
 
-fn print_startup_banner(state: &AppState) {
+fn print_startup_banner(state: &AppState, listen_addr: &str) {
     eprintln!(
         r#"
  ██╗     ██╗   ██╗███╗   ███╗███████╗███╗   ██╗ ██████╗
@@ -349,7 +364,7 @@ fn print_startup_banner(state: &AppState) {
 "#
     );
     eprintln!("Lumeno {}", env!("CARGO_PKG_VERSION"));
-    eprintln!("Listening   http://localhost:3000");
+    eprintln!("Listening   {listen_addr}");
     eprintln!("Data        {}", state.data_path.display());
     eprintln!("Resources   {}", state.resources_path.display());
 }

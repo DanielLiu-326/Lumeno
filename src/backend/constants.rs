@@ -16,6 +16,15 @@ pub const PREVIEW_THUMBNAIL_SIZE: u32 = THUMBNAIL_SIZE;
 pub const THUMBNAIL_SIZE_MIN: u32 = 64;
 pub const THUMBNAIL_SIZE_MAX: u32 = 1024;
 
+/// Thumbnail edge lengths the clients request. Storage attribution maps cached
+/// files back to their source with exactly this set, so a size missing here only
+/// makes a live thumbnail look unattributed — it is deletable and regenerated on
+/// the next view. `0` is the full-size render. Add a size here when the frontend
+/// starts asking for a new one.
+pub const THUMBNAIL_CACHE_SIZES: &[u32] = &[
+    0, 96, 160, 240, 256, 320, 360, 400, 512, 640, 800, 1024, 1600,
+];
+
 /// AI face-crop edge length written at detection save time (`face-crops/…webp`).
 pub const FACE_CROP_SIZE: u32 = 256;
 

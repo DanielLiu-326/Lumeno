@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, text};
+use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{self, InputDesc, OutputDesc};
 use crate::grade::color::rec2020_to_linear_srgb;
 use crate::grade::exec::{Frame, Roi, Space, ViewTransform, map_rgb};
@@ -65,8 +65,8 @@ impl NodeParam for Sigmoid {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -129,12 +129,11 @@ impl Node for Sigmoid {
 }
 
 impl Sigmoid {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "contrast",
-                text(zh, "Contrast", "对比"),
+                "grade.field.contrast",
                 self.contrast,
                 0.1,
                 10.0,
@@ -142,7 +141,7 @@ impl Sigmoid {
             ),
             field::slider(
                 "skew",
-                text(zh, "Skew", "偏移"),
+                "grade.field.skew",
                 self.skew,
                 -1.0,
                 1.0,
@@ -150,7 +149,7 @@ impl Sigmoid {
             ),
             field::slider(
                 "white",
-                text(zh, "White", "目标白"),
+                "grade.field.white",
                 self.white,
                 20.0,
                 1600.0,
@@ -158,7 +157,7 @@ impl Sigmoid {
             ),
             field::slider(
                 "black",
-                text(zh, "Black", "目标黑"),
+                "grade.field.black",
                 self.black,
                 0.0,
                 15.0,

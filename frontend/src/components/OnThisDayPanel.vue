@@ -1,7 +1,8 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { t } from "../i18n/index.js";
-import { thumbnailPathSegment } from "../utils/mediaKind.js";
+import { httpFetch } from "../utils/http";
+import { photoThumbnailUrl } from "../utils/thumbnailUrl.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -16,7 +17,7 @@ const currentYear = new Date().getFullYear();
 async function load() {
   loading.value = true;
   try {
-    const res = await fetch("/api/on-this-day");
+    const res = await httpFetch("/api/on-this-day");
     if (res.ok) {
       const data = await res.json();
       groups.value = data.groups || [];
@@ -24,11 +25,6 @@ async function load() {
   } finally {
     loading.value = false;
   }
-}
-
-function thumbUrl(photo, size = 360) {
-  const ownerParam = photo.owner ? `&owner=${encodeURIComponent(photo.owner)}` : "";
-  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${ownerParam}`;
 }
 
 function yearsAgo(year) {
@@ -90,7 +86,7 @@ onMounted(load);
             @click="openPhoto(photo, group)"
           >
             <img
-              :src="thumbUrl(photo)"
+              :src="photoThumbnailUrl(photo)"
               loading="lazy"
               decoding="async"
               alt=""

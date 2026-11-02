@@ -135,7 +135,8 @@ pub async fn queue_owner_ai_index(
     let has_index = cfg
         .ai_service
         .store()
-        .owner_has_current_index(owner.as_str());
+        .owner_has_current_index(owner.as_str())
+        .await;
     if !ai_enabled && !has_index {
         return None;
     }

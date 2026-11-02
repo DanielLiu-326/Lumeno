@@ -1,5 +1,5 @@
 <script setup>
-import { IconDownload, IconImage, IconSparkles, IconStar, IconTrash } from "../utils/icons";
+import { IconDownload, IconGrade, IconImage, IconSparkles, IconStar, IconTrash } from "../utils/icons";
 import { t } from "../i18n/index.js";
 import { COLOR_LABELS } from "../utils/photoCardLayout.js";
 import TagChips from "./TagChips.vue";
@@ -18,6 +18,7 @@ defineProps({
   canDelete: { type: Boolean, default: false },
   isVideo: { type: Boolean, default: false },
   actions: { type: Boolean, default: true },
+  showTune: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -31,6 +32,7 @@ const emit = defineEmits([
   "find-similar",
   "delete",
   "save",
+  "tune",
 ]);
 </script>
 
@@ -130,10 +132,17 @@ const emit = defineEmits([
     </div>
 
     <div v-if="actions" class="flex flex-wrap gap-2">
-      <button v-if="canWrite && !isVideo" class="flex-1 rounded-xl px-4 py-2 text-xs font-medium transition"
+      <button v-if="showTune && !isVideo"
+        class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
+        :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
+        :title="t('view.grade')"
+        @click="emit('tune')">
+        <IconGrade class="h-3.5 w-3.5" />{{ t('view.grade') }}
+      </button>
+      <button v-if="canWrite && !isVideo" class="inline-flex flex-1 items-center justify-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"
         :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-800 hover:bg-stone-300'"
         @click="emit('set-cover')">
-        {{ t('detail.setAsCover') }}
+        <IconImage class="h-3.5 w-3.5" />{{ t('detail.setAsCover') }}
       </button>
       <button
         class="inline-flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-medium transition"

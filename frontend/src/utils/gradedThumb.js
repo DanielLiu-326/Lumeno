@@ -31,9 +31,9 @@ try {
   /* ignore corrupt storage */
 }
 
-export function gradedThumbQuery(owner, path) {
-  const rev = revs.get(storageId(owner, path));
-  return rev ? `&graded=${rev}` : "";
+/** Cache-busting revision for a grid thumb, or 0 when it was never replaced. */
+export function gradedThumbRev(owner, path) {
+  return revs.get(storageId(owner, path)) || 0;
 }
 
 /** Remember that this photo's grid thumb is the darktable render. */

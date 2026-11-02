@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, ref, watch } from "vue";
 import { t } from "../../i18n/index.js";
+import { httpJson, postJson } from "../../utils/http";
 import { IconCheck, IconClose, IconFolder, IconImage, IconPencil, IconTrash } from "../../utils/icons";
 import AppDialog from "../AppDialog.vue";
 
@@ -31,12 +32,7 @@ async function load() {
   error.value = "";
   confirmHash.value = "";
   try {
-    const res = await fetch(`/api/grade/resources?kind=${kind.value}`, { credentials: "same-origin" });
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok || !payload.success) {
-      error.value = payload.message || t("grade.resourcesFailed");
-      return;
-    }
+    const payload = await httpJson(`/api/grade/resources?kind=${kind.value}`);
     items.value = payload.data?.items || [];
   } catch (err) {
     error.value = err.message || t("grade.resourcesFailed");
@@ -72,12 +68,7 @@ async function onFile(event) {
     for (const file of files) {
       const body = new FormData();
       body.append("file", file, file.name);
-      const res = await fetch(url, { method: "POST", credentials: "same-origin", body });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.success) {
-        error.value = payload.message || t("grade.resourcesFailed");
-        break;
-      }
+      const payload = await httpJson(url, { method: "POST", body });
       if (payload.data && payload.data.created === false) existed += 1;
     }
     if (existed) notice.value = t("grade.resourcesExists");
@@ -104,17 +95,11 @@ async function saveRename(item) {
   busy.value = true;
   error.value = "";
   try {
-    const res = await fetch("/api/grade/resources/rename", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind: kind.value, hash: item.hash, display_name: displayName }),
+    await postJson("/api/grade/resources/rename", {
+      kind: kind.value,
+      hash: item.hash,
+      display_name: displayName,
     });
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok || !payload.success) {
-      error.value = payload.message || t("grade.resourcesFailed");
-      return;
-    }
     renaming.value = "";
     await load();
   } catch (err) {
@@ -133,17 +118,10 @@ async function remove(item) {
   busy.value = true;
   error.value = "";
   try {
-    const res = await fetch("/api/grade/resources/delete", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind: kind.value, hash: item.hash }),
+    await postJson("/api/grade/resources/delete", {
+      kind: kind.value,
+      hash: item.hash,
     });
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok || !payload.success) {
-      error.value = payload.message || t("grade.resourcesFailed");
-      return;
-    }
     confirmHash.value = "";
     await load();
   } catch (err) {

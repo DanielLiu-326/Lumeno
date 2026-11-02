@@ -13,7 +13,8 @@ use crate::backend::ai::album_cache::{AlbumAiCache, embedding_cache_key, face_ph
 use crate::backend::ai::duplicate::{compute_duplicate_hash_pair, lookup_photo_phash_async};
 use crate::backend::ai::faces::FACE_DETECTOR_REVISION;
 use crate::backend::ai::models::{
-    AiIndexedAlbumSummary, AiIndexedPhotoRecord, LoadedOwnerIndex, NormalizedAiIndexRequest,
+    AiIndexedAlbumSummary, AiIndexedPhotoRecord, AiItemState, LoadedOwnerIndex,
+    NormalizedAiIndexRequest,
 };
 use crate::backend::album::helpers::{load_existing_album_index, read_exif_cache_if_present};
 use crate::backend::album::media::preview_thumbnail_cache_path;
@@ -50,13 +51,13 @@ struct PreparedScanPhoto {
     content_signature: String,
     width: Option<u32>,
     height: Option<u32>,
-    scan_state: String,
+    scan_state: AiItemState,
     hash_preview: Option<PathBuf>,
-    reused_hash: Option<(String, Option<u64>, bool, Option<String>)>,
+    reused_hash: Option<(AiItemState, Option<u64>, bool, Option<String>)>,
     skipped_hash_error: Option<String>,
-    image_embedding_state: String,
+    image_embedding_state: AiItemState,
     embedding: Option<Vec<f32>>,
-    face_embedding_state: String,
+    face_embedding_state: AiItemState,
     reused_from_generation: Option<String>,
 }
 
@@ -137,7 +138,7 @@ pub(crate) async fn run(
     let face_work = if faces_requested {
         indexed_photos
             .iter()
-            .filter(|photo| photo.face_embedding_state != "skipped")
+            .filter(|photo| photo.face_embedding_state != AiItemState::Skipped)
             .count()
     } else {
         0
@@ -373,9 +374,9 @@ impl ScanContext<'_> {
                 reusable_record,
             );
             let scan_state = if reusable_record.is_some() {
-                "reused".to_string()
+                AiItemState::Reused
             } else {
-                "discovered".to_string()
+                AiItemState::Discovered
             };
             let (hash_preview, reused_hash, skipped_hash_error) = {
                 let cached_phash = if self.duplicates_requested && !target.cache_id.is_empty() {
@@ -393,7 +394,7 @@ impl ScanContext<'_> {
                 if let Some(phash) = cached_phash {
                     (
                         None,
-                        Some(("ready".to_string(), Some(phash), true, None)),
+                        Some((AiItemState::Ready, Some(phash), true, None)),
                         None,
                     )
                 } else if self.duplicates_requested {
@@ -428,7 +429,7 @@ impl ScanContext<'_> {
                 None
             };
             let (image_embedding_state, embedding) = if let Some(vector) = reused_embedding {
-                ("ready".to_string(), Some(vector))
+                (AiItemState::Ready, Some(vector))
             } else if self.image_requested {
                 // Prefer preview thumbs (THUMBNAIL_SIZE) for SigLIP (256 input); fall back to original.
                 let preview = preview_thumbnail_cache_path(
@@ -449,9 +450,9 @@ impl ScanContext<'_> {
                     photo_path.clone(),
                     decode_path,
                 ));
-                ("pending".to_string(), None)
+                (AiItemState::Pending, None)
             } else {
-                ("skipped".to_string(), None)
+                (AiItemState::Skipped, None)
             };
             // Face reuse must come from faces/*.json (or prior ready state), never from
             // embedding-only file-cache stubs that defaulted to "skipped".
@@ -461,7 +462,7 @@ impl ScanContext<'_> {
                 .iter()
                 .any(|feature| feature == "faces")
             {
-                "skipped".to_string()
+                AiItemState::Skipped
             } else if !target.cache_id.is_empty() {
                 let face_key = face_photo_cache_key(
                     &stable_key,
@@ -476,12 +477,12 @@ impl ScanContext<'_> {
                     target.cache_id.as_str(),
                 );
                 if cache.has_face_photo_async(&face_key).await {
-                    "ready".to_string()
+                    AiItemState::Ready
                 } else {
-                    "pending".to_string()
+                    AiItemState::Pending
                 }
             } else {
-                "pending".to_string()
+                AiItemState::Pending
             };
             let reused_from_generation = reusable_record.and_then(|record| {
                 self.previous_index
@@ -517,7 +518,7 @@ impl ScanContext<'_> {
         &self,
         album_name: &str,
         prepared: &[PreparedScanPhoto],
-    ) -> Result<Vec<Option<(String, Option<u64>, bool, Option<String>)>>, PipelineError> {
+    ) -> Result<Vec<Option<(AiItemState, Option<u64>, bool, Option<String>)>>, PipelineError> {
         let hash_phase = format!("hashing · {album_name}");
         let hash_concurrency = std::thread::available_parallelism()
             .map(|value| value.get())
@@ -618,7 +619,7 @@ fn commit_prepared_photos(
     provider_revision: &Option<String>,
     indexed_at_unix_ms: u128,
     prepared: Vec<PreparedScanPhoto>,
-    hash_results: Vec<Option<(String, Option<u64>, bool, Option<String>)>>,
+    hash_results: Vec<Option<(AiItemState, Option<u64>, bool, Option<String>)>>,
     indexed_photos: &mut Vec<AiIndexedPhotoRecord>,
     indexed_embeddings: &mut HashMap<String, Vec<f32>>,
     photo_disk_paths: &mut HashMap<String, PathBuf>,
@@ -630,7 +631,7 @@ fn commit_prepared_photos(
             } else if let Some(computed) = computed_hash {
                 computed
             } else {
-                ("skipped".to_string(), None, false, photo.skipped_hash_error)
+                (AiItemState::Skipped, None, false, photo.skipped_hash_error)
             };
         photo_disk_paths.insert(photo.stable_key.clone(), photo.photo_path);
         if let Some(vector) = photo.embedding {

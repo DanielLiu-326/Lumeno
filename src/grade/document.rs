@@ -254,45 +254,30 @@ pub fn upstream<'a>(doc: &'a Document, id: &str) -> Option<&'a str> {
         .map(|edge| edge.from_node.as_str())
 }
 
-pub fn title(locale: &str, id: &str) -> &'static str {
-    let zh = locale.starts_with("zh");
-    match (zh, id) {
-        (true, "input") => "输入",
-        (false, "input") => "Input",
-        (true, "white-balance") => "白平衡",
-        (false, "white-balance") => "White Balance",
-        (true, "demosaic") => "去马赛克",
-        (false, "demosaic") => "Demosaic",
-        (true, "input-color-profile") => "输入色彩配置",
-        (false, "input-color-profile") => "Input Color Profile",
-        (true, "exposure") => "曝光",
-        (false, "exposure") => "Exposure",
-        (true, "local-contrast") => "局部对比",
-        (false, "local-contrast") => "Local Contrast",
-        (true, "dehaze") => "去雾",
-        (false, "dehaze") => "Dehaze",
-        (true, "velvia") => "增色",
-        (false, "velvia") => "Velvia",
-        (true, "denoise") => "降噪",
-        (false, "denoise") => "Denoise",
-        (true, "sharpen") => "锐化",
-        (false, "sharpen") => "Sharpen",
-        (true, "rotate") => "旋转",
-        (false, "rotate") => "Rotate",
-        (true, "crop") => "裁切",
-        (false, "crop") => "Crop",
-        (true, "sigmoid") => "影调",
-        (false, "sigmoid") => "Sigmoid",
-        (true, "lut") => "LUT",
-        (false, "lut") => "LUT",
-        (true, "export") => "导出",
-        (false, "export") => "Export",
-        _ => "Node",
+/// i18n key for a node title. The library carries no copy; the host translates.
+pub fn title_key(id: &str) -> &'static str {
+    match id {
+        "input" => "grade.node.input",
+        "white-balance" => "grade.node.white_balance",
+        "demosaic" => "grade.node.demosaic",
+        "input-color-profile" => "grade.node.input_color_profile",
+        "exposure" => "grade.node.exposure",
+        "local-contrast" => "grade.node.local_contrast",
+        "dehaze" => "grade.node.dehaze",
+        "velvia" => "grade.node.velvia",
+        "denoise" => "grade.node.denoise",
+        "sharpen" => "grade.node.sharpen",
+        "rotate" => "grade.node.rotate",
+        "crop" => "grade.node.crop",
+        "sigmoid" => "grade.node.sigmoid",
+        "lut" => "grade.node.lut",
+        "export" => "grade.node.export",
+        _ => "grade.node.unknown",
     }
 }
 
-pub fn fields(locale: &str, node: &GradeNode) -> Vec<FieldSpec> {
-    node.param.params().fields(locale)
+pub fn fields(node: &GradeNode) -> Vec<FieldSpec> {
+    node.param.params().fields()
 }
 
 #[cfg(test)]
@@ -420,7 +405,11 @@ mod tests {
         let saved = document_json(&doc);
         let mut fresh = default_document(true);
         apply_saved_document(&mut fresh, &saved).unwrap();
-        let exposure = fresh.nodes.iter().find(|node| node.id == "exposure").unwrap();
+        let exposure = fresh
+            .nodes
+            .iter()
+            .find(|node| node.id == "exposure")
+            .unwrap();
         assert!((exposure.param.params().to_json()["ev"].as_f64().unwrap() - 1.25).abs() < 1e-4);
         assert!(exposure.enabled);
     }

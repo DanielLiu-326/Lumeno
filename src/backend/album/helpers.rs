@@ -49,10 +49,9 @@ pub(crate) async fn read_album_meta(album_dir: &FsPath) -> AlbumMeta {
 
 pub(crate) async fn write_album_meta(album_dir: &FsPath, meta: &AlbumMeta) -> Result<(), AppError> {
     let path = album_meta_path(album_dir);
-    let raw = serde_json::to_string_pretty(meta)
+    let raw = serde_json::to_vec_pretty(meta)
         .map_err(|e| AppError::Unknown(format!("serialize album meta failed: {e}")))?;
-    tokio::fs::write(&path, raw)
-        .await
+    crate::backend::common::write_file_atomic(&path, &raw)
         .map_err(|e| AppError::Unknown(format!("write album meta failed: {e}")))?;
     Ok(())
 }
@@ -62,7 +61,9 @@ pub(crate) fn albums_root(root_path: &FsPath) -> PathBuf {
 }
 
 pub(crate) fn cache_exif_root(data_path: &FsPath) -> PathBuf {
-    data_path.join("cache").join("exif")
+    crate::backend::cache_areas::area("exif")
+        .expect("registered cache area")
+        .root(data_path)
 }
 
 /// Index file path keyed by stable `AlbumMeta.cache` (not directory name).
@@ -88,6 +89,15 @@ pub(crate) fn is_safe_album_cache_id(cache_id: &str) -> bool {
 
 /// Single path segment for per-owner cache dirs. Matches username rules so
 /// `cache/thumbnails/{owner}` cannot escape the thumbnails root.
+/// Cache keys are base64url(sha512): 86 chars of `[A-Za-z0-9_-]`. Anything else is
+/// a user-supplied string that must not become a path component.
+pub(crate) fn is_safe_cache_key(key: &str) -> bool {
+    key.len() == 86
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
 pub(crate) fn is_safe_cache_owner(owner: &str) -> bool {
     !owner.is_empty()
         && owner.len() <= 16

@@ -2,9 +2,12 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { t } from "../../i18n/index.js";
 import { COLOR_LABELS } from "../../utils/photoCardLayout.js";
-import { downloadFileByUrl } from "../../utils/downloadFile.js";
-import { gradedThumbEpoch, gradedThumbQuery, markGradedThumb } from "../../utils/gradedThumb.js";
-import { formatDurationMs, isVideoPhoto, playbackUrl, thumbnailPathSegment } from "../../utils/mediaKind.js";
+import { downloadFileByUrl, saveBlobResponse } from "../../utils/downloadFile.js";
+import { DEFAULT_THUMBNAIL_SIZE, thumbnailUrl } from "../../utils/thumbnailUrl.js";
+import { encodePath } from "../../utils/path.js";
+import { httpFetch, httpJson } from "../../utils/http.js";
+import { gradedThumbEpoch, gradedThumbRev, markGradedThumb } from "../../utils/gradedThumb.js";
+import { formatDurationMs, isVideoPhoto, playbackUrl } from "../../utils/mediaKind.js";
 import { loadVideoInfo, planPlayback, startVideoEncode, watchVideoEncode } from "../../utils/videoEncode.js";
 import {
   IconArrowLeft, IconCamera, IconCheck, IconChevronLeft, IconChevronRight,
@@ -307,17 +310,23 @@ const ownerQuery = computed(() => {
   return owner ? `owner=${encodeURIComponent(owner)}` : "";
 });
 
+function photoOwnerFor(photo) {
+  return photo?.owner || (photo?.path && photo.path === props.photo?.path ? photoOwner.value : "") || photoOwner.value;
+}
+
 function ownerAmpFor(photo) {
-  const owner = photo?.owner || (photo?.path && photo.path === props.photo?.path ? photoOwner.value : "") || photoOwner.value;
+  const owner = photoOwnerFor(photo);
   return owner ? `&owner=${encodeURIComponent(owner)}` : "";
 }
 
-function thumbSrc(photo, size = 360) {
+function thumbSrc(photo, size = DEFAULT_THUMBNAIL_SIZE) {
   if (!photo?.path || String(photo.path).startsWith("__empty")) return "";
   void gradedThumbEpoch.value;
-  const owner = photo.owner || (photo.path === props.photo?.path ? photoOwner.value : "") || photoOwner.value;
-  const graded = size === 360 ? gradedThumbQuery(owner, photo.path) : "";
-  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${ownerAmpFor(photo)}${graded}`;
+  const owner = photoOwnerFor(photo);
+  // Only the grid-sized thumb is swapped by a graded render, so only that one
+  // carries the cache-busting revision.
+  const rev = size === DEFAULT_THUMBNAIL_SIZE ? gradedThumbRev(owner, photo.path) : 0;
+  return thumbnailUrl(photo.path, { size, owner, params: rev ? { graded: rev } : null });
 }
 
 function isSlidePhoto(item) {
@@ -371,20 +380,20 @@ const imageSrc = computed(() => {
   if (!photo?.path) return "";
   const ownerAmp = ownerAmpFor(photo);
   if (darktablePreview.value && hasXmp.value) {
-    return `/api/albums/darktable_preview/${encodeURIComponent(photo.path)}?size=0${ownerAmp}`;
+    return `/api/albums/darktable_preview/${encodePath(photo.path)}?size=0${ownerAmp}`;
   }
   if (imageFallback.value) {
-    return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=800${ownerAmp}`;
+    return thumbnailUrl(photo.path, { size: 800, owner: photoOwnerFor(photo) });
   }
   if (viewOriginal.value) {
     const ext = (photo.name || "").split(".").pop().toLowerCase();
     if (RAW_EXTS.has(ext)) {
-      return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=0${ownerAmp}`;
+      return thumbnailUrl(photo.path, { size: 0, owner: photoOwnerFor(photo) });
     }
     const q = ownerQuery.value ? `?${ownerQuery.value}` : "";
-    return `/api/download/${encodeURIComponent(photo.path)}${q}`;
+    return `/api/download/${encodePath(photo.path)}${q}`;
   }
-  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=1600${ownerAmp}`;
+  return thumbnailUrl(photo.path, { size: 1600, owner: photoOwnerFor(photo) });
 });
 
 const trackStyle = computed(() => ({
@@ -530,7 +539,7 @@ watch(imageSrc, (src) => {
 async function checkXmp(path, owner, fromSlide = false) {
   try {
     const q = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-    const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(path)}${q}`, { credentials: "same-origin" });
+    const res = await httpFetch(`/api/albums/has_xmp/${encodePath(path)}${q}`);
     if (!res.ok || props.photo?.path !== path) return;
     const data = await res.json();
     hasXmp.value = !!data.has_xmp;
@@ -1047,7 +1056,7 @@ function downloadOriginal() {
   // Blob download: a plain <a href> navigation hands the file to Safari's
   // inline viewer on iOS even with an attachment header.
   downloadFileByUrl(
-    `/api/download/${encodeURIComponent(props.photo.path)}${q}`,
+    `/api/download/${encodePath(props.photo.path)}${q}`,
     props.photo.name,
   ).catch((e) => {
     alert(e.message || "Download failed");
@@ -1066,27 +1075,16 @@ async function doExport() {
       apply_xmp: !!exportForm.value.applyXmp,
     };
     if (photoOwner.value) body.owner = photoOwner.value;
-    const res = await fetch("/api/albums/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(err.message || "Export failed");
-      return;
-    }
-    const blob = await res.blob();
-    const disposition = res.headers.get("Content-Disposition") || "";
-    const match = disposition.match(/filename="?([^"]+)"?/i);
-    const filename = match?.[1] || "export.jpg";
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    const res = await httpJson(
+      "/api/albums/export",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      t("albums.exportFailed"),
+    );
+    await saveBlobResponse(res, `export.${exportForm.value.format}`);
     exportOpen.value = false;
   } catch (e) {
     alert(e.message || "Export failed");

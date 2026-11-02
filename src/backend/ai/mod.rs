@@ -57,7 +57,11 @@ pub struct AiService {
 
 impl AiService {
     pub async fn new(settings_manager: &Arc<SettingsManager>, data_path: &Path) -> Arc<Self> {
-        let store = Arc::new(FileAiIndexStore::new(data_path.join("cache").join("ai")));
+        let store = Arc::new(FileAiIndexStore::new(
+            crate::backend::cache_areas::area("ai")
+                .expect("registered cache area")
+                .root(&data_path),
+        ));
         let settings = settings_manager.get_all().await;
         let models_root = data_path
             .parent()

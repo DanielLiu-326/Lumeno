@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, object, req_str, text};
+use super::{Node, NodeParam, object, req_str};
 use crate::grade::buffer::{self, InputDesc, OutputDesc};
 use crate::grade::field::{self, FieldSpec};
 
@@ -36,8 +36,8 @@ impl NodeParam for Input {
         json!({ "source": self.source })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -92,12 +92,7 @@ impl Node for Input {
 }
 
 impl Input {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
-        vec![field::readonly(
-            "source",
-            text(zh, "Source", "来源"),
-            self.source,
-        )]
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
+        vec![field::readonly("source", "grade.field.source", self.source)]
     }
 }

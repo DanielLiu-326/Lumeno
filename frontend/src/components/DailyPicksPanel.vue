@@ -1,7 +1,8 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { t } from "../i18n/index.js";
-import { thumbnailPathSegment } from "../utils/mediaKind.js";
+import { httpFetch } from "../utils/http";
+import { photoThumbnailUrl } from "../utils/thumbnailUrl.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -15,7 +16,7 @@ const loading = ref(true);
 async function load() {
   loading.value = true;
   try {
-    const res = await fetch("/api/daily-picks");
+    const res = await httpFetch("/api/daily-picks");
     if (res.ok) {
       const data = await res.json();
       photos.value = data.photos || [];
@@ -23,11 +24,6 @@ async function load() {
   } finally {
     loading.value = false;
   }
-}
-
-function thumbUrl(photo, size = 360) {
-  const ownerParam = photo.owner ? `&owner=${encodeURIComponent(photo.owner)}` : "";
-  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${ownerParam}`;
 }
 
 function openPhoto(photo) {
@@ -73,7 +69,7 @@ onMounted(load);
           @click="openPhoto(photo)"
         >
           <img
-            :src="thumbUrl(photo)"
+            :src="photoThumbnailUrl(photo)"
             loading="lazy"
             decoding="async"
             alt=""

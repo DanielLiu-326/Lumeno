@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, req_str, text};
+use super::{Node, NodeParam, clamp_f, object, req_f, req_str};
 use crate::grade::buffer::{self, InputDesc, OutputDesc};
 use crate::grade::field::{self, FieldSpec};
 
@@ -66,8 +66,8 @@ impl NodeParam for Export {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -123,12 +123,11 @@ impl Node for Export {
 }
 
 impl Export {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::choice(
                 "format",
-                text(zh, "Format", "格式"),
+                "grade.field.format",
                 match self.format {
                     Format::Jpeg => 0,
                     Format::Webp => 1,
@@ -136,12 +135,16 @@ impl Export {
                     Format::Tiff => 3,
                 },
                 &["jpeg", "webp", "png", "tiff"],
-                zh,
-                &["JPEG", "WebP", "PNG", "TIFF"],
+                &[
+                    "grade.option.jpeg",
+                    "grade.option.webp",
+                    "grade.option.png",
+                    "grade.option.tiff",
+                ],
             ),
             field::slider(
                 "quality",
-                text(zh, "Quality", "质量"),
+                "grade.field.quality",
                 self.quality as f32,
                 1.0,
                 100.0,
@@ -149,12 +152,12 @@ impl Export {
             ),
             field::slider(
                 "long_edge",
-                text(zh, "Long edge", "长边"),
+                "grade.field.long_edge",
                 self.long_edge as f32,
                 0.0,
                 4096.0,
                 if self.long_edge == 0 {
-                    text(zh, "Full", "原始")
+                    "grade.value.full".to_string()
                 } else {
                     format!("{}px", self.long_edge)
                 },

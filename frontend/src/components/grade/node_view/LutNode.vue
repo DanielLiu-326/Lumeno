@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import { t } from "../../../i18n/index.js";
+import { httpJson } from "../../../utils/http";
 import NodeField from "./NodeField.vue";
 
 const props = defineProps({
@@ -26,12 +27,7 @@ const pickedName = computed(() => {
 async function loadLibrary() {
   failed.value = "";
   try {
-    const res = await fetch("/api/grade/resources?kind=lut", { credentials: "same-origin" });
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok || !payload.success) {
-      failed.value = payload.message || t("grade.resourcesFailed");
-      return;
-    }
+    const payload = await httpJson("/api/grade/resources?kind=lut");
     library.value = payload.data?.items || [];
   } catch (err) {
     failed.value = err.message || t("grade.resourcesFailed");

@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, text};
+use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::exec::{Frame, map_rgb};
 use crate::grade::field::{self, FieldSpec};
@@ -63,8 +63,8 @@ impl NodeParam for Exposure {
         json!({ "ev": self.ev, "black": self.black })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -128,12 +128,11 @@ impl Node for Exposure {
 }
 
 impl Exposure {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "ev",
-                text(zh, "Exposure", "曝光"),
+                "grade.field.exposure",
                 self.ev,
                 -5.0,
                 5.0,
@@ -141,7 +140,7 @@ impl Exposure {
             ),
             field::slider(
                 "black",
-                text(zh, "Black", "黑电平"),
+                "grade.field.black",
                 self.black,
                 -0.1,
                 0.1,

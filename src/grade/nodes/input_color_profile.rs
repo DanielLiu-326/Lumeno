@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, object, req_str, text};
+use super::{Node, NodeParam, object, req_str};
 use crate::grade::buffer::{self, InputDesc, OutputDesc};
 use crate::grade::color::apply_matrix;
 use crate::grade::exec::{Frame, Roi, Space, ViewTransform, map_rgb};
@@ -126,8 +126,8 @@ impl NodeParam for InputColorProfile {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -189,34 +189,32 @@ impl Node for InputColorProfile {
 }
 
 impl InputColorProfile {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         if !self.camera {
             return vec![field::readonly(
                 "name",
-                text(zh, "Profile", "配置"),
-                text(zh, "Already linear Rec.2020", "已是线性 Rec.2020"),
+                "grade.field.profile",
+                "grade.value.already_linear_rec2020",
             )];
         }
         let name = self.active_name();
         let display = if name.is_empty() {
-            text(zh, "Camera", "相机")
+            "grade.value.camera".to_string()
         } else {
             name.to_string()
         };
         vec![
             field::choice(
                 "source",
-                text(zh, "Profile", "配置"),
+                "grade.field.profile",
                 match self.source {
                     Source::Embedded => 0,
                     Source::Imported => 1,
                 },
                 &["Default|embedded", "Imported|imported"],
-                zh,
-                &["默认", "导入"],
+                &["grade.option.default", "grade.option.imported"],
             ),
-            field::readonly("name", text(zh, "Name", "名称"), display),
+            field::readonly("name", "grade.field.name", display),
         ]
     }
 

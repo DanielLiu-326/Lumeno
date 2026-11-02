@@ -493,16 +493,20 @@ impl UserManager {
         Ok(())
     }
 
+    /// Caller holds the users lock, so snapshots are written in the order they
+    /// were taken. Written atomically: a crash can never truncate `users.json`
+    /// into the empty object that would erase every password hash.
     fn save_to_disk(&self, users: &HashMap<String, UserInfo>) {
-        if let Some(ref path) = self.persist_path {
-            let data = serde_json::to_string_pretty(users).unwrap_or_default();
-            let path = path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+        let Some(ref path) = self.persist_path else {
+            return;
+        };
+        match serde_json::to_vec_pretty(users) {
+            Ok(data) => {
+                if let Err(error) = crate::backend::common::write_file_atomic(path, &data) {
+                    eprintln!("failed to persist users: {error}");
                 }
-                let _ = std::fs::write(&path, data);
-            });
+            }
+            Err(error) => eprintln!("failed to serialize users: {error}"),
         }
     }
 }
@@ -516,6 +520,21 @@ pub struct SessionInfo {
     pub role: Role,
     #[serde(default = "default_expires_at")]
     pub expires_at: DateTime<Utc>,
+}
+
+impl SessionInfo {
+    pub fn is_admin(&self) -> bool {
+        self.role == Role::Admin
+    }
+
+    /// Admin-only endpoint guard. The caller picks the localized message because
+    /// settings and member management word the refusal differently.
+    pub fn require_admin(&self, locale: &str, message_key: &str) -> Result<(), AppError> {
+        if self.is_admin() {
+            return Ok(());
+        }
+        Err(AppError::Forbidden(tr(locale, message_key)))
+    }
 }
 
 fn default_expires_at() -> DateTime<Utc> {
@@ -606,29 +625,31 @@ impl SessionManager {
         self.save_to_disk(&locked);
     }
 
+    /// Caller holds the sessions lock; same atomic, ordered write as `users.json`.
     fn save_to_disk(&self, sessions: &HashMap<String, SessionInfo>) {
-        if let Some(ref path) = self.persist_path {
-            let data = sessions
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        serde_json::json!({
-                            "username": v.username,
-                            "role": v.role,
-                            "expires_at": v.expires_at,
-                        }),
-                    )
-                })
-                .collect::<std::collections::HashMap<String, serde_json::Value>>();
-            let data = serde_json::to_string(&data).unwrap_or_default();
-            let path = path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+        let Some(ref path) = self.persist_path else {
+            return;
+        };
+        let data = sessions
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    serde_json::json!({
+                        "username": v.username,
+                        "role": v.role,
+                        "expires_at": v.expires_at,
+                    }),
+                )
+            })
+            .collect::<std::collections::HashMap<String, serde_json::Value>>();
+        match serde_json::to_vec_pretty(&data) {
+            Ok(bytes) => {
+                if let Err(error) = crate::backend::common::write_file_atomic(path, &bytes) {
+                    eprintln!("failed to persist sessions: {error}");
                 }
-                let _ = std::fs::write(&path, data);
-            });
+            }
+            Err(error) => eprintln!("failed to serialize sessions: {error}"),
         }
     }
 }
@@ -672,12 +693,8 @@ pub async fn api_login(
 ) -> impl IntoResponse {
     type Result = std::result::Result<Json<serde_json::Value>, AppError>;
 
-    if !rate_limiter.check(addr.ip()).await {
-        return Result::Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.rate_limited",
-        )))
-        .into_response();
+    if let Err(error) = rate_limiter.check_for(addr.ip(), locale.as_str()).await {
+        return Result::Err(error).into_response();
     }
 
     let LoginPayload {
@@ -744,12 +761,7 @@ pub async fn api_register(
     Extension(cfg): Extension<Arc<AppState>>,
     payload: Json<RegisterPayload>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if !rate_limiter.check(addr.ip()).await {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.rate_limited",
-        )));
-    }
+    rate_limiter.check_for(addr.ip(), locale.as_str()).await?;
     let RegisterPayload {
         username,
         passphrase,
@@ -832,4 +844,31 @@ pub async fn api_logout(
                 .into_body(),
         )
         .unwrap()
+}
+
+#[cfg(test)]
+mod admin_guard_tests {
+    use super::{Role, SessionInfo};
+
+    #[test]
+    fn require_admin_allows_admins_and_refuses_users() {
+        let admin = SessionInfo::new("root".to_string(), Role::Admin, false);
+        assert!(admin.is_admin());
+        assert!(
+            admin
+                .require_admin("en", "error.admin_only_settings")
+                .is_ok()
+        );
+
+        let user = SessionInfo::new("bob".to_string(), Role::User, false);
+        assert!(!user.is_admin());
+        let error = user
+            .require_admin("en", "error.admin_only_settings")
+            .expect_err("a normal user must be refused");
+        assert!(matches!(
+            error,
+            crate::backend::common::AppError::Forbidden(_)
+        ));
+        assert!(!error.to_string().is_empty());
+    }
 }

@@ -157,20 +157,22 @@ pub(crate) fn bit_depth_from_pix_fmt(pix: &str) -> u32 {
     8
 }
 
-fn source_cache_key(relative: &str, len: u64, mtime: u64) -> String {
+pub(crate) fn source_cache_key(relative: &str, len: u64, mtime: u64) -> String {
     let mut hasher = Sha512::new();
     hasher.update(format!("video-encode-v1|{relative}|{len}|{mtime}").as_bytes());
     URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
-fn encode_root(data_path: &FsPath, owner: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn encode_root(data_path: &FsPath, owner: &str) -> Result<PathBuf, AppError> {
     if !super::helpers::is_safe_cache_owner(owner) {
         return Err(AppError::BadRequest("invalid cache owner".to_owned()));
     }
-    Ok(data_path.join("cache").join("video-encode").join(owner))
+    Ok(crate::backend::cache_areas::area("video-encode")
+        .expect("registered cache area")
+        .owner_dir(data_path, owner))
 }
 
-fn encode_file(
+pub(crate) fn encode_file(
     data_path: &FsPath,
     owner: &str,
     codec: &str,
@@ -184,7 +186,7 @@ fn encode_file(
         .join(format!("{key}.mp4")))
 }
 
-fn probe_file(data_path: &FsPath, owner: &str, key: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn probe_file(data_path: &FsPath, owner: &str, key: &str) -> Result<PathBuf, AppError> {
     if key.contains(['/', '\\']) {
         return Err(AppError::BadRequest("invalid probe path".to_owned()));
     }

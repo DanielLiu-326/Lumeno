@@ -14,7 +14,7 @@ use super::album_cache::{
     AlbumAiCache, DEFAULT_NEAR_DUPLICATE_DISTANCE, DUPLICATES_INDEX_VERSION, PhashCacheFile,
     phash_cache_key,
 };
-use super::models::AiIndexedPhotoRecord;
+use super::models::{AiIndexedPhotoRecord, AiItemState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AiDuplicatePhotoItem {
@@ -130,10 +130,10 @@ fn compute_photo_phash_image(image: &DynamicImage) -> u64 {
 pub(crate) fn compute_duplicate_hash_pair(
     photo_path: &Path,
     preview: Option<&Path>,
-) -> (String, Option<u64>, bool, Option<String>) {
+) -> (AiItemState, Option<u64>, bool, Option<String>) {
     match compute_photo_phash_preferring_preview(photo_path, preview) {
-        Ok(phash) => ("ready".to_string(), Some(phash), true, None),
-        Err(error) => ("error".to_string(), None, false, Some(error)),
+        Ok(phash) => (AiItemState::Ready, Some(phash), true, None),
+        Err(error) => (AiItemState::Error, None, false, Some(error)),
     }
 }
 
@@ -383,7 +383,7 @@ pub(crate) async fn publish_duplicates_index_async(
         {
             photo.duplicate_phash_u64 = Some(phash);
             photo.duplicate_phash_valid = true;
-            photo.duplicate_hash_state = "ready".to_string();
+            photo.duplicate_hash_state = AiItemState::Ready;
         }
     }
     let groups = build_near_duplicate_groups(&album_photos, max_distance);
@@ -499,12 +499,12 @@ mod tests {
             width: Some(1),
             height: Some(1),
             provider_revision: None,
-            scan_state: "ready".into(),
-            image_embedding_state: "ready".into(),
-            duplicate_hash_state: "ready".into(),
+            scan_state: AiItemState::Ready,
+            image_embedding_state: AiItemState::Ready,
+            duplicate_hash_state: AiItemState::Ready,
             duplicate_phash_u64: Some(phash),
             duplicate_phash_valid: true,
-            face_embedding_state: "ready".into(),
+            face_embedding_state: AiItemState::Ready,
             reused_from_generation: None,
             record_error: None,
             indexed_at_unix_ms: 0,

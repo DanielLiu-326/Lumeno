@@ -115,10 +115,14 @@ pub async fn api_grade_resources_delete(
     let kind = kind_or_reject(&locale, &body.kind)?;
     let locale_code = locale.as_str().to_string();
     let hash = body.hash;
+    let cache_id = (kind == crate::grade::ResourceKind::Lut).then(|| format!("lut:{hash}"));
     tokio::task::spawn_blocking(move || delete_resource(&root, kind, &hash))
         .await
         .map_err(|error| AppError::Unknown(error.to_string()))?
         .map_err(|error| resource_error(&locale_code, error))?;
+    if let Some(cache_id) = cache_id {
+        crate::grade::cube::forget_lut(&cache_id);
+    }
     Ok(create_response(true, "", 0, None))
 }
 

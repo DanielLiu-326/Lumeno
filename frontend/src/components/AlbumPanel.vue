@@ -8,11 +8,15 @@ import {
   IconImport, IconZoomIn, IconZoomOut, IconDownload, IconSparkles, IconSearch,   IconWand,
   IconGrid, IconList, IconGear, IconAlertCircle, IconSort,
 } from "../utils/icons";
-import { locale, t } from "../i18n/index.js";
+import { t } from "../i18n/index.js";
 import { albumCoverUrl } from "../utils/albumCover.js";
-import { downloadFileByUrl } from "../utils/downloadFile.js";
-import { gradedThumbEpoch, gradedThumbQuery, markGradedThumb } from "../utils/gradedThumb.js";
-import { formatDurationMs, isVideoPhoto, playbackUrl, thumbnailPathSegment } from "../utils/mediaKind.js";
+import { DEFAULT_THUMBNAIL_SIZE, thumbnailUrl } from "../utils/thumbnailUrl.js";
+import { encodePath } from "../utils/path.js";
+import { httpFetch, httpJson, postJson } from "../utils/http";
+import { downloadFileByUrl, saveBlobResponse } from "../utils/downloadFile.js";
+import { gradedThumbEpoch, gradedThumbRev, markGradedThumb } from "../utils/gradedThumb.js";
+import { formatDurationMs, isVideoPhoto, playbackUrl } from "../utils/mediaKind.js";
+import { useAlbumThumbnailGrid } from "../composables/useAlbumThumbnailGrid.js";
 import { loadVideoInfo, planPlayback, startVideoEncode, watchVideoEncode } from "../utils/videoEncode.js";
 import ImportSourceModal from "./ImportSourceModal.vue";
 import CloudFilePicker from "./CloudFilePicker.vue";
@@ -32,15 +36,7 @@ import ViewSettingsDialog from "./ViewSettingsDialog.vue";
 import AppDialog from "./AppDialog.vue";
 import AppSlider from "./AppSlider.vue";
 import TagChips from "./TagChips.vue";
-import {
-  COLOR_LABELS,
-  THUMB_DEFAULT,
-  THUMB_DETAILS_MIN,
-  THUMB_MAX,
-  hasBelowInfo,
-  loadViewLayout,
-  saveViewLayout,
-} from "../utils/photoCardLayout.js";
+import { COLOR_LABELS, THUMB_DEFAULT, THUMB_DETAILS_MIN } from "../utils/photoCardLayout.js";
 
 const props = defineProps({
   isDark: { type: Boolean, default: false },
@@ -79,10 +75,10 @@ const props = defineProps({
   albumFacesOwner: { type: String, default: "" },
   albumClusterSimilarity: { type: Number, default: 0.62 },
   albumClusterReclustering: { type: Boolean, default: false },
-  onCreateAlbum: { type: Function, default: null },
-  onUpdateAlbum: { type: Function, default: null },
-  onShareAlbum: { type: Function, default: null },
-  onUnshareAlbum: { type: Function, default: null },
+  onCreateAlbum: { type: Function, required: true },
+  onUpdateAlbum: { type: Function, required: true },
+  onShareAlbum: { type: Function, required: true },
+  onUnshareAlbum: { type: Function, required: true },
   /** In-modal AI search; must not switch albumViewMode. */
   onSearchTextInModal: { type: Function, default: null },
   /** In-modal duplicates load; must not switch albumViewMode. */
@@ -96,13 +92,9 @@ const props = defineProps({
 });
 
 const emit = defineEmits([
-  "create-album",
   "refresh-albums",
   "select-album",
-  "update-album",
   "delete-album",
-  "share-album",
-  "unshare-album",
   "show-duplicates",
   "show-photos",
   "find-similar",
@@ -127,6 +119,39 @@ const emit = defineEmits([
   "merge-album-cluster",
   "detail-photo",
 ]);
+
+const {
+  photoGridRef,
+  viewLayout,
+  zoomChromeLock,
+  thumbnailSize,
+  forcedThumbsOnly,
+  thumbsOnlyLook,
+  hideCardOverlays,
+  gridCompact,
+  gridHideOverlays,
+  gridThumbsOnly,
+  thumbMaxIdx,
+  thumbZoomClasses,
+  thumbZoomGaps,
+  thumbGapPx,
+  thumbGridClass,
+  thumbnailPopoverOpen,
+  thumbnailBtnRef,
+  thumbnailPopoverStyle,
+  toggleThumbnailPopover,
+  setViewCompact,
+  thumbSizeToastOpen,
+  showThumbSizeToast,
+  stepThumbnailSize,
+  onThumbSizeWheel,
+  viewSettingsOpen,
+  openViewSettings,
+  setViewLayout,
+} = useAlbumThumbnailGrid({
+  currentUser: () => props.currentUser,
+  embedded: () => props.embedded,
+});
 
 const importSourceModalOpen = ref(false);
 const cloudPickerOpen = ref(false);
@@ -171,103 +196,11 @@ const aiToolsPickerOpen = ref(false);
 const aiToolsInitialSection = ref("faces");
 const mobileSearchOpen = ref(false);
 const mobileSearchInputRef = ref(null);
-const thumbnailPopoverOpen = ref(false);
-const thumbnailBtnRef = ref(null);
-const thumbnailPopoverStyle = ref({});
-const viewSettingsOpen = ref(false);
 const gradeView = ref(false);
 const resourcesOpen = ref(false);
 const gradePhoto = ref(null);
 let gradeEnrichToken = 0;
-const viewLayout = ref(loadViewLayout(props.currentUser, { mobile: props.embedded }));
-const zoomChromeLock = ref(null);
-const thumbnailSize = computed({
-  get: () => viewLayout.value.thumbnailSize,
-  set: (value) => {
-    if (!zoomChromeLock.value) {
-      zoomChromeLock.value = {
-        compact: thumbsOnlyLook.value,
-        thumbsOnly: thumbsOnlyLook.value,
-        hideOverlays: hideCardOverlays.value,
-      };
-    }
-    viewLayout.value.thumbnailSize = value;
-    nextTick(() => {
-      if (!photoGridRef.value?.isZoomBusy?.()) zoomChromeLock.value = null;
-    });
-  },
-});
-const forcedThumbsOnly = computed(() => thumbnailSize.value < THUMB_DETAILS_MIN);
-const thumbsOnlyLook = computed(() =>
-  viewLayout.value.compact || forcedThumbsOnly.value || !hasBelowInfo(viewLayout.value),
-);
-const hideCardOverlays = computed(() => forcedThumbsOnly.value);
-const gridCompact = computed(() => zoomChromeLock.value?.compact ?? thumbsOnlyLook.value);
-const gridHideOverlays = computed(() => zoomChromeLock.value?.hideOverlays ?? hideCardOverlays.value);
-const gridThumbsOnly = computed(() => zoomChromeLock.value?.thumbsOnly ?? thumbsOnlyLook.value);
-
-function toggleThumbnailPopover() {
-  thumbnailPopoverOpen.value = !thumbnailPopoverOpen.value;
-  if (thumbnailPopoverOpen.value && thumbnailBtnRef.value) {
-    const rect = thumbnailBtnRef.value.getBoundingClientRect();
-    const pw = 288;
-    let left = rect.left + rect.width / 2 - pw / 2;
-    if (left + pw > window.innerWidth - 8) left = window.innerWidth - 8 - pw;
-    if (left < 8) left = 8;
-    thumbnailPopoverStyle.value = {
-      position: 'fixed',
-      top: `${rect.bottom + 4}px`,
-      left: `${left}px`,
-    };
-  }
-}
-
-function setViewCompact(compact) {
-  if (!compact && thumbnailSize.value < THUMB_DETAILS_MIN) {
-    viewLayout.value = {
-      ...viewLayout.value,
-      compact: false,
-      thumbnailSize: THUMB_DETAILS_MIN,
-    };
-    return;
-  }
-  viewLayout.value = { ...viewLayout.value, compact };
-}
-
-const thumbSizeToastOpen = ref(false);
-let thumbWheelAcc = 0;
-let thumbToastTimer = 0;
-
-function showThumbSizeToast() {
-  thumbSizeToastOpen.value = true;
-  window.clearTimeout(thumbToastTimer);
-  thumbToastTimer = window.setTimeout(() => {
-    thumbSizeToastOpen.value = false;
-  }, 1400);
-}
-
-function stepThumbnailSize(event) {
-  const raw = event.deltaY;
-  const dy = event.deltaMode === 1 ? raw * 16 : event.deltaMode === 2 ? raw * 120 : raw;
-  if (dy && thumbWheelAcc && Math.sign(dy) !== Math.sign(thumbWheelAcc)) {
-    thumbWheelAcc = 0;
-  }
-  thumbWheelAcc += dy;
-  if (Math.abs(thumbWheelAcc) < 36) return false;
-  const dir = thumbWheelAcc > 0 ? -1 : 1;
-  thumbWheelAcc = 0;
-  const next = nextDistinctThumbSize(thumbnailSize.value, dir);
-  if (next === thumbnailSize.value) return false;
-  thumbnailSize.value = next;
-  return true;
-}
-
-function onThumbSizeWheel(event) {
-  stepThumbnailSize(event);
-}
-
 const photoPaneRef = ref(null);
-const photoGridRef = ref(null);
 const pinchLive = ref(false);
 let pinchSession = null;
 
@@ -415,28 +348,6 @@ function onThumbToastWheel(event) {
   showThumbSizeToast();
 }
 
-function openViewSettings() {
-  thumbnailPopoverOpen.value = false;
-  viewSettingsOpen.value = true;
-}
-
-function setViewLayout(layout) {
-  viewLayout.value = layout;
-}
-
-watch(photoPaneRef, (el, prev) => {
-  unbindPhotoPaneGestures(prev);
-  bindPhotoPaneGestures(el);
-}, { flush: "post" });
-
-watch(viewLayout, (layout) => {
-  saveViewLayout(props.currentUser, layout, { mobile: props.embedded });
-}, { deep: true });
-
-watch(() => props.currentUser, (user) => {
-  viewLayout.value = loadViewLayout(user, { mobile: props.embedded });
-});
-
 const detailPhoto = ref(null);
 const detailPanelRef = ref(null);
 watch(detailPhoto, (p) => {
@@ -563,7 +474,7 @@ const darktablePreview = ref(false);
 const hasXmpSidecar = ref(false);
 const showExportDialog = ref(false);
 const exporting = ref(false);
-const exportForm = ref({ format: "jpeg", quality: 95, maxWidth: 0, applyXmp: false });
+const exportForm = ref({ format: "jpeg", quality: 95, maxWidth: 0, applyXmp: false, applyGrade: false });
 // The photo the export dialog targets (grid menu photo wins over the detail photo),
 // plus its XMP state and whether the current settings allow a direct original copy.
 const exportSelection = ref(false);
@@ -573,7 +484,7 @@ const exportHasXmp = computed(() => exportSelection.value || (menuPhoto.value ? 
 const exportDirectCopy = computed(() => {
   if (exportSelection.value) return false;
   const photo = exportPhoto.value;
-  if (!photo || exportForm.value.applyXmp) return false;
+  if (!photo || exportForm.value.applyXmp || exportForm.value.applyGrade) return false;
   if (exportForm.value.maxWidth) return false;
   const srcExt = (photo.name.split(".").pop() || "").toLowerCase();
   switch (exportForm.value.format) {
@@ -723,11 +634,11 @@ function albumEnterDeferMs() {
 
 async function runAlbumViewTransition(mutate) {
   if (!canAlbumVt || prefersReducedMotion()) {
-    mutate();
+    await mutate();
     return;
   }
   const transition = document.startViewTransition(async () => {
-    mutate();
+    await mutate();
     await nextTick();
   });
   try {
@@ -759,30 +670,17 @@ async function submitAlbumDialog() {
   if (!form.name.trim()) return;
   let success = true;
   if (albumDialogMode.value === "create") {
-    if (props.onCreateAlbum) {
-      success = await props.onCreateAlbum({
-        name: form.name.trim(),
-        description: form.description,
-      });
-    } else {
-      emit("create-album", { name: form.name.trim(), description: form.description });
-    }
+    success = await props.onCreateAlbum({
+      name: form.name.trim(),
+      description: form.description,
+    });
   } else {
-    if (props.onUpdateAlbum) {
-      success = await props.onUpdateAlbum({
-        dirName: form.dirName,
-        name: form.name.trim(),
-        description: form.description,
-        cover: form.cover,
-      });
-    } else {
-      emit("update-album", {
-        dirName: form.dirName,
-        name: form.name.trim(),
-        description: form.description,
-        cover: form.cover,
-      });
-    }
+    success = await props.onUpdateAlbum({
+      dirName: form.dirName,
+      name: form.name.trim(),
+      description: form.description,
+      cover: form.cover,
+    });
   }
   if (success !== false) {
     showAlbumDialog.value = false;
@@ -836,11 +734,7 @@ async function submitShare() {
       canWrite: shareForm.value.canWrite,
       canDelete: shareForm.value.canDelete,
     };
-    if (props.onShareAlbum) {
-      success = await props.onShareAlbum(payload);
-    } else {
-      emit("share-album", payload);
-    }
+    success = await props.onShareAlbum(payload);
     if (success !== false) {
       shareForm.value = { username: "", canWrite: false, canDelete: false };
       syncShareDialogAlbum();
@@ -879,12 +773,8 @@ async function updateSharePermission(share, field, value) {
       canWrite,
       canDelete,
     };
-    if (props.onShareAlbum) {
-      await props.onShareAlbum(payload);
-      syncShareDialogAlbum();
-    } else {
-      emit("share-album", payload);
-    }
+    await props.onShareAlbum(payload);
+    syncShareDialogAlbum();
   } finally {
     shareMutationPending.value = false;
   }
@@ -894,12 +784,8 @@ async function removeShare(album, username) {
   if (shareMutationPending.value) return;
   shareMutationPending.value = true;
   try {
-    if (props.onUnshareAlbum) {
-      await props.onUnshareAlbum({ dirName: album.dir_name, username });
-      syncShareDialogAlbum();
-    } else {
-      emit("unshare-album", { dirName: album.dir_name, username });
-    }
+    await props.onUnshareAlbum({ dirName: album.dir_name, username });
+    syncShareDialogAlbum();
   } finally {
     shareMutationPending.value = false;
   }
@@ -1162,8 +1048,13 @@ function closeMobileSearch() {
 
 function enterAlbum(album) {
   albumHeroId.value = album.dir_name;
-  runAlbumViewTransition(() => {
-    emit("select-album", { dirName: album.dir_name, deferMs: albumEnterDeferMs() });
+  runAlbumViewTransition(async () => {
+    // Let the album-open animation paint before the grid fetch saturates the frame.
+    const defer = albumEnterDeferMs();
+    if (defer > 0) {
+      await new Promise((resolve) => setTimeout(resolve, defer));
+    }
+    emit("select-album", { dirName: album.dir_name });
   });
 }
 
@@ -1284,7 +1175,7 @@ async function openPhotoMenu(photo) {
   try {
     const owner = photo.owner || currentAlbumOwner.value;
     const ownerParam = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-    const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(photo.path)}${ownerParam}`, { credentials: "same-origin" });
+    const res = await httpFetch(`/api/albums/has_xmp/${encodePath(photo.path)}${ownerParam}`);
     if (!res.ok || token !== menuXmpToken || menuPhoto.value?.path !== photo.path) return;
     const data = await res.json();
     menuHasXmp.value = !!data.has_xmp;
@@ -1344,7 +1235,7 @@ function onPhotoMenuAction(action) {
     menuPhoto.value = null;
   } else if (action.id === "export") {
     exportSelection.value = false;
-    exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: menuHasXmp.value };
+    exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: menuHasXmp.value, applyGrade: false };
     showExportDialog.value = true;
   } else if (action.id === "cover") {
     setCoverFromPhoto(photo);
@@ -1433,12 +1324,11 @@ function selectedAlbumRequest() {
 }
 
 function startZipDownload(url, filename) {
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  // Same blob path as every other download: a plain anchor would open the ZIP in
+  // Safari's inline viewer on iOS.
+  downloadFileByUrl(url, filename).catch((error) => {
+    alert(error.message || t("albums.downloadFailed"));
+  });
 }
 
 async function downloadSelected() {
@@ -1451,23 +1341,9 @@ async function downloadSelected() {
   const { owner, albumname, photos } = request;
   downloadSelectionPending.value = true;
   try {
-    const res = await fetch("/api/albums/download", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept-Language": locale.value,
-      },
-      body: JSON.stringify({ owner, albumname, photos }),
-    });
-    let payload = {};
-    try {
-      payload = await res.json();
-    } catch {
-      payload = {};
-    }
-    if (!res.ok || !payload.success || !payload.data?.id) {
-      throw new Error(payload.message || t("albums.downloadFailed"));
+    const payload = await postJson("/api/albums/download", { owner, albumname, photos });
+    if (!payload.data?.id) {
+      throw new Error(t("albums.downloadFailed"));
     }
     startZipDownload(`/api/albums/download/${encodeURIComponent(payload.data.id)}`, `${albumname}.zip`);
   } catch (error) {
@@ -1538,76 +1414,6 @@ const hasActiveSort = computed(() => props.sort.length > 0);
 
 function applyFilters() { emit("apply-filters"); }
 
-// ── Thumbnail size helpers ──
-const THUMB_GRID_COLS = [
-  "grid-cols-1 sm:grid-cols-1 lg:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-2",
-  "grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3",
-  "grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5",
-  "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7",
-  "grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8",
-  "grid-cols-4 sm:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10",
-  "grid-cols-5 sm:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 2xl:grid-cols-12",
-  "grid-cols-6 sm:grid-cols-7 lg:grid-cols-10 xl:grid-cols-12 2xl:grid-cols-14",
-  "grid-cols-7 sm:grid-cols-8 lg:grid-cols-12 xl:grid-cols-14 2xl:grid-cols-16",
-  "grid-cols-8 sm:grid-cols-10 lg:grid-cols-14 xl:grid-cols-16 2xl:grid-cols-18",
-];
-const TW_BREAKPOINTS = { sm: 640, md: 768, lg: 1024, xl: 1280, "2xl": 1536 };
-
-function parseGridCols(spec, width = window.innerWidth) {
-  let cols = 1;
-  const re = /(?:^|\s)(?:(sm|md|lg|xl|2xl):)?grid-cols-(\d+)/g;
-  let match = re.exec(spec);
-  while (match) {
-    const bp = match[1];
-    const count = Number(match[2]);
-    if (!bp || width >= (TW_BREAKPOINTS[bp] || 0)) cols = count;
-    match = re.exec(spec);
-  }
-  return Math.max(1, cols);
-}
-
-function thumbColsForSize(size) {
-  const spec = THUMB_GRID_COLS[THUMB_MAX - size] || THUMB_GRID_COLS[3];
-  return parseGridCols(spec);
-}
-
-function nextDistinctThumbSize(from, dir) {
-  const startCols = thumbColsForSize(from);
-  let size = from;
-  while (true) {
-    const next = size + dir;
-    if (next < 0 || next > THUMB_MAX) return size;
-    size = next;
-    if (thumbColsForSize(size) !== startCols) return size;
-  }
-}
-const THUMB_GAP_PX = [4, 6, 6, 8, 8, 8, 8, 10, 10, 10];
-
-const thumbMaxIdx = THUMB_MAX;
-const thumbZoomClasses = Array.from(
-  { length: THUMB_MAX + 1 },
-  (_, size) => `grid ${THUMB_GRID_COLS[THUMB_MAX - size]} items-start gap-[var(--photo-gap)]`,
-);
-const thumbZoomGaps = computed(() => Array.from(
-  { length: THUMB_MAX + 1 },
-  (_, size) => {
-    const thumbsOnly = viewLayout.value.compact
-      || size < THUMB_DETAILS_MIN
-      || !hasBelowInfo(viewLayout.value);
-    return thumbsOnly ? 0 : (THUMB_GAP_PX[THUMB_MAX - size] ?? 6);
-  },
-));
-const thumbGapPx = computed(() => {
-  if (thumbsOnlyLook.value) return 0;
-  const idx = thumbMaxIdx - thumbnailSize.value;
-  return THUMB_GAP_PX[idx] ?? 6;
-});
-const thumbGridClass = computed(() => {
-  const idx = thumbMaxIdx - thumbnailSize.value;
-  const cols = THUMB_GRID_COLS[idx] || THUMB_GRID_COLS[3];
-  return `${cols} items-start gap-[var(--photo-gap)]`;
-});
-
 const DUP_PREVIEW_LIMIT = 12;
 const dupExpanded = ref({});
 
@@ -1647,10 +1453,8 @@ function handlePhotosScrollNearBottom() {
   emit("load-more-photos");
 }
 
-function getThumbnail(path, size = 320, owner = null) {
-  const resolvedOwner = owner || currentAlbumOwner.value;
-  const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
-  return `/api/thumbnail/${thumbnailPathSegment(path)}?size=${size}${ownerParam}`;
+function getThumbnail(path, size = DEFAULT_THUMBNAIL_SIZE, owner = null) {
+  return thumbnailUrl(path, { size, owner: owner || currentAlbumOwner.value });
 }
 
 function gridThumbOwner(photo) {
@@ -1660,7 +1464,11 @@ function gridThumbOwner(photo) {
 function getGridThumbnail(photo) {
   void gradedThumbEpoch.value;
   const owner = gridThumbOwner(photo);
-  return getThumbnail(photo.path, 360, owner) + gradedThumbQuery(owner, photo.path);
+  return thumbnailUrl(photo.path, {
+    size: DEFAULT_THUMBNAIL_SIZE,
+    owner,
+    params: { graded: gradedThumbRev(owner, photo.path) },
+  });
 }
 
 const detailPhotoList = computed(() => detailNavPhotos.value || props.albumPhotos);
@@ -2027,13 +1835,13 @@ function onDetailImageError() {
 function getOriginalUrl(path, owner = null) {
   const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
   const ownerParam = resolvedOwner ? `?owner=${encodeURIComponent(resolvedOwner)}` : "";
-  return `/api/download/${encodeURIComponent(path)}${ownerParam}`;
+  return `/api/download/${encodePath(path)}${ownerParam}`;
 }
 
 function getDarktablePreviewUrl(path, size = 1600, owner = null) {
   const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
   const ownerParam = resolvedOwner ? `&owner=${encodeURIComponent(resolvedOwner)}` : "";
-  return `/api/albums/darktable_preview/${encodeURIComponent(path)}?size=${size}${ownerParam}`;
+  return `/api/albums/darktable_preview/${encodePath(path)}?size=${size}${ownerParam}`;
 }
 
 let detailRequestToken = 0;
@@ -2043,7 +1851,7 @@ async function checkXmpSidecar(path, owner = null) {
   try {
     const resolvedOwner = owner ?? detailPhoto.value?.owner ?? currentAlbumOwner.value;
     const ownerParam = resolvedOwner ? `?owner=${encodeURIComponent(resolvedOwner)}` : "";
-    const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(path)}${ownerParam}`, { credentials: "same-origin" });
+    const res = await httpFetch(`/api/albums/has_xmp/${encodePath(path)}${ownerParam}`);
     if (token !== detailRequestToken) return;
     if (res.ok) {
       const data = await res.json();
@@ -2124,15 +1932,23 @@ function downloadOriginal() {
 
 function openExportDialog() {
   exportSelection.value = false;
-  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: hasXmpSidecar.value };
+  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: hasXmpSidecar.value, applyGrade: false };
   showExportDialog.value = true;
+}
+
+// The two grading switches are alternatives: turning one on turns the other off.
+function onToggleApplyXmp() {
+  if (exportForm.value.applyXmp) exportForm.value.applyGrade = false;
+}
+function onToggleApplyGrade() {
+  if (exportForm.value.applyGrade) exportForm.value.applyXmp = false;
 }
 
 function openExportSelection() {
   if (exportSelectionPending.value || selectedPhotoPaths.value.size === 0) return;
   menuPhoto.value = null;
   exportSelection.value = true;
-  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: true };
+  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: true, applyGrade: false };
   showExportDialog.value = true;
 }
 
@@ -2147,31 +1963,18 @@ async function exportSelected() {
   exportSelectionPending.value = true;
   exporting.value = true;
   try {
-    const res = await fetch("/api/albums/export_batch", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept-Language": locale.value,
-      },
-      body: JSON.stringify({
-        owner,
-        albumname,
-        photos,
-        format: exportForm.value.format,
-        quality: Number(exportForm.value.quality) || 95,
-        max_width: Number(exportForm.value.maxWidth) || 0,
-        apply_xmp: !!exportForm.value.applyXmp,
-      }),
+    const payload = await postJson("/api/albums/export_batch", {
+      owner,
+      albumname,
+      photos,
+      format: exportForm.value.format,
+      quality: Number(exportForm.value.quality) || 95,
+      max_width: Number(exportForm.value.maxWidth) || 0,
+      apply_xmp: !!exportForm.value.applyXmp,
+      apply_grade: !!exportForm.value.applyGrade,
     });
-    let payload = {};
-    try {
-      payload = await res.json();
-    } catch {
-      payload = {};
-    }
-    if (!res.ok || !payload.success || !payload.data?.id) {
-      throw new Error(payload.message || t("albums.exportFailed"));
+    if (!payload.data?.id) {
+      throw new Error(t("albums.exportFailed"));
     }
     startZipDownload(`/api/albums/export_batch/${encodeURIComponent(payload.data.id)}`, `${albumname}.zip`);
     showExportDialog.value = false;
@@ -2199,31 +2002,23 @@ async function doExport() {
       quality: exportForm.value.quality,
       max_width: exportForm.value.maxWidth || 0,
       apply_xmp: !!exportForm.value.applyXmp,
+      apply_grade: !!exportForm.value.applyGrade,
     };
     if (photo.owner || currentAlbumOwner.value) {
       body.owner = photo.owner || currentAlbumOwner.value;
     }
-    const res = await fetch("/api/albums/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(err.message || "Export failed");
-      return;
-    }
-    const blob = await res.blob();
-    const disposition = res.headers.get("Content-Disposition") || "";
-    const match = disposition.match(/filename="?([^"]+)"?/);
-    const filename = match ? match[1] : `export.${exportForm.value.format}`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    // The success body is the file itself; `httpJson` passes the response through
+    // and throws the server's message for a JSON error.
+    const res = await httpJson(
+      "/api/albums/export",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      t("albums.exportFailed"),
+    );
+    await saveBlobResponse(res, `export.${exportForm.value.format}`);
     showExportDialog.value = false;
     menuPhoto.value = null;
   } catch (e) {
@@ -2315,20 +2110,21 @@ function downloadGradePhoto(photo) {
 async function exportGradePhoto(photo) {
   if (!photo) return;
   menuPhoto.value = photo;
-  let applyXmp = false;
+  let hasXmp = false;
   try {
     const owner = photo.owner || currentAlbumOwner.value;
     const ownerParam = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-    const res = await fetch(`/api/albums/has_xmp/${encodeURIComponent(photo.path)}${ownerParam}`, { credentials: "same-origin" });
+    const res = await httpFetch(`/api/albums/has_xmp/${encodePath(photo.path)}${ownerParam}`);
     if (res.ok) {
       const data = await res.json();
-      applyXmp = !!data.has_xmp;
+      hasXmp = !!data.has_xmp;
     }
   } catch {
-    applyXmp = false;
+    hasXmp = false;
   }
+  menuHasXmp.value = hasXmp;
   exportSelection.value = false;
-  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp };
+  exportForm.value = { format: "jpeg", quality: 95, maxWidth: 0, applyXmp: false, applyGrade: true };
   showExportDialog.value = true;
 }
 
@@ -2385,7 +2181,7 @@ function getAddableAlbumCover(album) {
 
 function setCoverFromPhoto(photo) {
   if (!currentAlbumObj.value || !currentAlbumCanWrite.value || !photo?.path) return;
-  emit("update-album", {
+  void props.onUpdateAlbum({
     dirName: currentAlbumObj.value.dir_name,
     cover: photo.path,
   });
@@ -3698,8 +3494,10 @@ defineExpose({
                 :can-write="currentAlbumCanWrite"
                 :can-delete="currentAlbumCanDelete"
                 :is-video="isDetailVideo"
+                :show-tune="!isMobile && !isDetailVideo"
                 @download="downloadOriginal"
                 @export="openExportDialog"
+                @tune="toggleGradeView"
                 @set-rating="setDetailRating"
                 @toggle-color="setDetailColorLabel"
                 @update:tags="editTags = $event"
@@ -3765,16 +3563,27 @@ defineExpose({
               :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
           </div>
 
-          <!-- Apply XMP grading -->
-          <div class="mb-4 flex items-center justify-between gap-3">
-            <label class="text-xs font-medium" :class="exportHasXmp ? (isDark ? 'text-stone-300' : 'text-stone-600') : (isDark ? 'text-stone-600' : 'text-stone-400')">
-              {{ t('detail.exportApplyXmp') }}
-              <span v-if="!exportHasXmp" class="ml-1 font-normal opacity-70">{{ t('detail.noXmp') }}</span>
-            </label>
-            <label class="app-switch">
-              <input type="checkbox" v-model="exportForm.applyXmp" :disabled="!exportHasXmp" />
-              <span class="app-switch-track"></span>
-            </label>
+          <!-- Grading -->
+          <div class="mb-4 space-y-3">
+            <div class="flex items-center justify-between gap-3">
+              <label class="text-xs font-medium" :class="exportHasXmp ? (isDark ? 'text-stone-300' : 'text-stone-600') : (isDark ? 'text-stone-600' : 'text-stone-400')">
+                {{ t('detail.exportApplyXmp') }}
+                <span v-if="!exportHasXmp" class="ml-1 font-normal opacity-70">{{ t('detail.noXmp') }}</span>
+              </label>
+              <label class="app-switch">
+                <input type="checkbox" v-model="exportForm.applyXmp" :disabled="!exportHasXmp" @change="onToggleApplyXmp" />
+                <span class="app-switch-track"></span>
+              </label>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <label class="text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
+                {{ t('detail.exportApplyGrade') }}
+              </label>
+              <label class="app-switch">
+                <input type="checkbox" v-model="exportForm.applyGrade" @change="onToggleApplyGrade" />
+                <span class="app-switch-track"></span>
+              </label>
+            </div>
           </div>
           <p v-if="exportDirectCopy" class="mb-3 text-[11px] leading-snug" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
             {{ t('detail.exportDirectHint') }}

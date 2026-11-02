@@ -8,7 +8,7 @@
 //! - `duplicates_index.json` (near-duplicate cliques; written at index time)
 //! - `face_index.json` (DBSCAN suggestions; written once after face indexing)
 //! - `face_hint.json` (named-person merge hints; refreshed on index / faces.json edits)
-//! - `clusters.json` (legacy alias; still written for older readers)
+//! - `clusters.json` (legacy alias: read as a fallback, never written)
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use std::time::UNIX_EPOCH;
 
 use super::embedding::cosine_similarity;
 use super::people::{ClusterFace, cluster_faces};
+use crate::backend::album::helpers::is_safe_cache_key;
 
 pub use crate::backend::constants::{
     DEFAULT_CLUSTER_EPS, DEFAULT_CLUSTER_MIN_SAMPLES, DEFAULT_NEAR_DUPLICATE_DISTANCE,
@@ -399,8 +400,13 @@ impl AlbumAiCache {
         self.root.join("phash")
     }
 
-    pub fn face_crop_path_by_id(&self, face_id: &str) -> PathBuf {
-        self.face_crops_dir().join(format!("{face_id}.webp"))
+    /// `None` when `face_id` is not a cache key. Face ids arrive from the client,
+    /// so joining them unchecked would allow escaping `face-crops/`.
+    pub fn face_crop_path_by_id(&self, face_id: &str) -> Option<PathBuf> {
+        if !is_safe_cache_key(face_id) {
+            return None;
+        }
+        Some(self.face_crops_dir().join(format!("{face_id}.webp")))
     }
 
     /// Cache path for named-person appearances (`faces.json`), keyed by source|box hash.
@@ -445,17 +451,6 @@ impl AlbumAiCache {
         self.faces_dir().join(format!("{key}.json"))
     }
 
-    #[cfg(test)]
-    pub fn ensure_dirs(&self) -> Result<(), String> {
-        std::fs::create_dir_all(self.embeddings_dir())
-            .map_err(|e| format!("create embeddings dir: {e}"))?;
-        std::fs::create_dir_all(self.faces_dir()).map_err(|e| format!("create faces dir: {e}"))?;
-        std::fs::create_dir_all(self.face_crops_dir())
-            .map_err(|e| format!("create face-crops dir: {e}"))?;
-        std::fs::create_dir_all(self.phash_dir()).map_err(|e| format!("create phash dir: {e}"))?;
-        Ok(())
-    }
-
     pub async fn ensure_dirs_async(&self) -> Result<(), String> {
         for dir in [
             self.embeddings_dir(),
@@ -470,15 +465,6 @@ impl AlbumAiCache {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn write_embedding(&self, key: &str, file: &EmbeddingCacheFile) -> Result<(), String> {
-        self.ensure_dirs()?;
-        let path = self.embedding_path(key);
-        let bytes = serde_json::to_vec_pretty(file)
-            .map_err(|e| format!("serialize embedding cache: {e}"))?;
-        atomic_write(&path, &bytes)
-    }
-
     pub async fn write_embedding_async(
         &self,
         key: &str,
@@ -491,14 +477,6 @@ impl AlbumAiCache {
         atomic_write_async(&path, &bytes).await
     }
 
-    #[cfg(test)]
-    pub fn read_embedding(&self, key: &str) -> Option<EmbeddingCacheFile> {
-        let path = self.embedding_path(key);
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-    }
-
     pub async fn read_embedding_async(&self, key: &str) -> Option<EmbeddingCacheFile> {
         let path = self.embedding_path(key);
         let raw = tokio::fs::read_to_string(path).await.ok()?;
@@ -506,44 +484,8 @@ impl AlbumAiCache {
     }
 
     /// Load all per-photo image embedding cache files under `embeddings/`.
-    #[cfg(test)]
-    pub fn list_embeddings(&self) -> Result<Vec<(String, EmbeddingCacheFile)>, String> {
-        let dir = self.embeddings_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let key = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if let Ok(raw) = std::fs::read_to_string(&path)
-                && let Ok(file) = serde_json::from_str::<EmbeddingCacheFile>(&raw)
-            {
-                out.push((key, file));
-            }
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
-    }
-
     pub async fn list_embeddings_async(&self) -> Result<Vec<(String, EmbeddingCacheFile)>, String> {
         list_json_dir_async(&self.embeddings_dir()).await
-    }
-
-    #[cfg(test)]
-    pub fn write_face_photo(&self, key: &str, file: &FacePhotoCacheFile) -> Result<(), String> {
-        self.ensure_dirs()?;
-        let path = self.face_photo_path(key);
-        let bytes =
-            serde_json::to_vec_pretty(file).map_err(|e| format!("serialize face cache: {e}"))?;
-        atomic_write(&path, &bytes)
     }
 
     pub async fn write_face_photo_async(
@@ -559,38 +501,16 @@ impl AlbumAiCache {
     }
 
     /// Validity is the filename key; existence alone means the entry matches that key.
-    #[cfg(test)]
-    pub fn has_face_photo(&self, key: &str) -> bool {
-        self.face_photo_path(key).is_file()
-    }
-
     pub async fn has_face_photo_async(&self, key: &str) -> bool {
         tokio::fs::try_exists(self.face_photo_path(key))
             .await
             .unwrap_or(false)
     }
 
-    #[cfg(test)]
-    pub fn read_face_photo(&self, key: &str) -> Option<FacePhotoCacheFile> {
-        let path = self.face_photo_path(key);
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-    }
-
     pub async fn read_face_photo_async(&self, key: &str) -> Option<FacePhotoCacheFile> {
         let path = self.face_photo_path(key);
         let raw = tokio::fs::read_to_string(path).await.ok()?;
         serde_json::from_str(&raw).ok()
-    }
-
-    #[cfg(test)]
-    pub fn write_phash(&self, key: &str, file: &PhashCacheFile) -> Result<(), String> {
-        self.ensure_dirs()?;
-        let path = self.phash_path(key);
-        let bytes =
-            serde_json::to_vec_pretty(file).map_err(|e| format!("serialize phash cache: {e}"))?;
-        atomic_write(&path, &bytes)
     }
 
     pub async fn write_phash_async(&self, key: &str, file: &PhashCacheFile) -> Result<(), String> {
@@ -601,59 +521,10 @@ impl AlbumAiCache {
         atomic_write_async(&path, &bytes).await
     }
 
-    #[cfg(test)]
-    pub fn read_phash(&self, key: &str) -> Option<PhashCacheFile> {
-        let path = self.phash_path(key);
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-    }
-
     pub async fn read_phash_async(&self, key: &str) -> Option<PhashCacheFile> {
         let path = self.phash_path(key);
         let raw = tokio::fs::read_to_string(path).await.ok()?;
         serde_json::from_str(&raw).ok()
-    }
-
-    /// Load all per-photo pHash cache files under `phash/`.
-    #[cfg(test)]
-    pub fn list_phashes(&self) -> Result<Vec<(String, PhashCacheFile)>, String> {
-        let dir = self.phash_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let key = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if let Ok(raw) = std::fs::read_to_string(&path)
-                && let Ok(file) = serde_json::from_str::<PhashCacheFile>(&raw)
-            {
-                out.push((key, file));
-            }
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
-    }
-
-    #[cfg(test)]
-    pub async fn list_phashes_async(&self) -> Result<Vec<(String, PhashCacheFile)>, String> {
-        list_json_dir_async(&self.phash_dir()).await
-    }
-
-    #[cfg(test)]
-    pub fn write_duplicates_index_json(&self, value: &serde_json::Value) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root).map_err(|e| format!("create album ai root: {e}"))?;
-        let bytes = serde_json::to_vec_pretty(value)
-            .map_err(|e| format!("serialize duplicates_index: {e}"))?;
-        atomic_write(&self.duplicates_index_path(), &bytes)
     }
 
     pub async fn write_duplicates_index_json_async(
@@ -682,33 +553,6 @@ impl AlbumAiCache {
     }
 
     /// Load all face photo cache files under `faces/`.
-    #[cfg(test)]
-    pub fn list_face_photos(&self) -> Result<Vec<(String, FacePhotoCacheFile)>, String> {
-        let dir = self.faces_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let key = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if let Ok(raw) = std::fs::read_to_string(&path)
-                && let Ok(file) = serde_json::from_str::<FacePhotoCacheFile>(&raw)
-            {
-                out.push((key, file));
-            }
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
-    }
-
     pub async fn list_face_photos_async(
         &self,
     ) -> Result<Vec<(String, FacePhotoCacheFile)>, String> {
@@ -717,18 +561,8 @@ impl AlbumAiCache {
 
     /// Persist DBSCAN suggestion clusters after face indexing completes.
     ///
-    /// Writes `face_index.json` (canonical) and mirrors to legacy `clusters.json`.
-    #[cfg(test)]
-    pub fn write_face_index(&self, file: &ClustersCacheFile) -> Result<(), String> {
-        let file = clusters_without_hints(file);
-        std::fs::create_dir_all(&self.root).map_err(|e| format!("create album ai root: {e}"))?;
-        let bytes =
-            serde_json::to_vec_pretty(&file).map_err(|e| format!("serialize face_index: {e}"))?;
-        atomic_write(&self.face_index_path(), &bytes)?;
-        // Keep legacy filename in sync for older tools / partial upgrades.
-        atomic_write(&self.clusters_path(), &bytes)
-    }
-
+    /// Only `face_index.json` is written; the legacy `clusters.json` name is read
+    /// as a fallback for caches written by older versions, never produced.
     pub async fn write_face_index_async(&self, file: &ClustersCacheFile) -> Result<(), String> {
         let file = clusters_without_hints(file);
         tokio::fs::create_dir_all(&self.root)
@@ -756,18 +590,6 @@ impl AlbumAiCache {
 
     /// Read precomputed DBSCAN suggestions. Prefers `face_index.json`, falls back to
     /// legacy `clusters.json`.
-    #[cfg(test)]
-    pub fn read_face_index(&self) -> Option<ClustersCacheFile> {
-        for path in [self.face_index_path(), self.clusters_path()] {
-            if let Ok(raw) = std::fs::read_to_string(&path)
-                && let Ok(file) = serde_json::from_str::<ClustersCacheFile>(&raw)
-            {
-                return Some(file);
-            }
-        }
-        None
-    }
-
     pub async fn read_face_index_async(&self) -> Option<ClustersCacheFile> {
         for path in [self.face_index_path(), self.clusters_path()] {
             if let Ok(raw) = tokio::fs::read_to_string(&path).await
@@ -778,31 +600,6 @@ impl AlbumAiCache {
         }
         None
     }
-
-    #[cfg(test)]
-    pub fn write_clusters(&self, file: &ClustersCacheFile) -> Result<(), String> {
-        self.write_face_index(file)
-    }
-
-    #[cfg(test)]
-    pub fn read_clusters(&self) -> Option<ClustersCacheFile> {
-        self.read_face_index()
-    }
-}
-
-#[cfg(test)]
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("no parent for {}", path.display()))?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("create parent dir: {e}"))?;
-    let tmp = parent.join(format!(
-        ".{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("cache")
-    ));
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write tmp {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
-    Ok(())
 }
 
 async fn atomic_write_async(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -1174,6 +971,31 @@ fn pick_representative(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn face_crop_paths_refuse_traversal_ids() {
+        let cache = AlbumAiCache::new(std::path::Path::new("/data/cache/ai"), "alice", "album");
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../../../bob/albums/x/face-crops/abc",
+            "abc.webp",
+            "a/b",
+            "a\\b",
+            &"z".repeat(85),
+            &"z".repeat(87),
+        ] {
+            assert!(
+                cache.face_crop_path_by_id(bad).is_none(),
+                "accepted unsafe face id {bad:?}"
+            );
+        }
+        let good = "A1b2C3d4E5".to_string() + &"x".repeat(76);
+        let path = cache.face_crop_path_by_id(&good).expect("valid cache key");
+        assert!(path.starts_with(cache.face_crops_dir()));
+        assert!(path.ends_with(format!("{good}.webp")));
+    }
+
     use super::*;
     use uuid::Uuid;
 
@@ -1215,6 +1037,31 @@ mod tests {
         cache.write_embedding_async(&key, &file).await.unwrap();
         let loaded = cache.read_embedding_async(&key).await.unwrap();
         assert_eq!(loaded.decode_vector().unwrap(), vec![1.0, 0.0, 0.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn face_index_reads_legacy_clusters_file_only_as_fallback() {
+        let dir = temp_dir();
+        let cache = AlbumAiCache::new(&dir, "daniel", "raw");
+        let mut legacy = ClustersCacheFile::empty();
+        legacy.algorithm = "legacy-dbscan".to_string();
+        cache.ensure_dirs_async().await.unwrap();
+        // A cache written by an older version: only `clusters.json` exists.
+        std::fs::write(cache.clusters_path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(!cache.face_index_path().exists());
+        let loaded = cache
+            .read_face_index_async()
+            .await
+            .expect("legacy clusters.json is still readable");
+        assert_eq!(loaded.algorithm, "legacy-dbscan");
+
+        // Once the canonical file exists it wins; nothing mirrors back.
+        let canonical = ClustersCacheFile::empty();
+        cache.write_face_index_async(&canonical).await.unwrap();
+        assert!(cache.face_index_path().is_file());
+        let loaded = cache.read_face_index_async().await.unwrap();
+        assert_eq!(loaded.algorithm, "dbscan");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

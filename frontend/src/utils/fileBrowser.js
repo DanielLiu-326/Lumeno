@@ -1,4 +1,5 @@
-import { isVideoPhoto, thumbnailPathSegment } from "./mediaKind.js";
+import { isVideoPhoto } from "./mediaKind.js";
+import { thumbnailUrl as buildThumbnailUrl } from "./thumbnailUrl.js";
 
 export function isImageEntry(entry) {
   if (!entry || entry.is_dir) {
@@ -12,9 +13,12 @@ export function hasThumbnail(entry) {
   return isImageEntry(entry) || isVideoPhoto(entry);
 }
 
-export function thumbnailUrl(pathOrEntry, size = 256) {
+/** File-browser rows are small; the shared builder keeps the URL format. */
+export const FILE_BROWSER_THUMBNAIL_SIZE = 256;
+
+export function thumbnailUrl(pathOrEntry, size = FILE_BROWSER_THUMBNAIL_SIZE) {
   const path = typeof pathOrEntry === "string"
     ? pathOrEntry
     : pathOrEntry?.fullPath || "";
-  return `/api/thumbnail/${thumbnailPathSegment(path)}?size=${size}`;
+  return buildThumbnailUrl(path, { size });
 }

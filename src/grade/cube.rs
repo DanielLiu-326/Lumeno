@@ -113,23 +113,67 @@ impl ParsedCube {
     }
 }
 
+/// Parsed cubes are large: a 256³ table is ~200 MB as `f32`. Keep a few of them,
+/// never more than the byte budget, and drop the least recently used first.
+const LUT_CACHE_MAX_ENTRIES: usize = 4;
+const LUT_CACHE_MAX_BYTES: usize = 512 * 1024 * 1024;
+
+struct CachedLut {
+    lut: Arc<ParsedCube>,
+    bytes: usize,
+    last_used: std::time::Instant,
+}
+
 pub fn remember_lut(id: &str, lut: Arc<ParsedCube>) {
-    cache()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .insert(id.to_string(), lut);
+    if id.is_empty() {
+        return;
+    }
+    let bytes = lut.table.len() * std::mem::size_of::<f32>();
+    let mut map = cache().lock().unwrap_or_else(|err| err.into_inner());
+    map.insert(
+        id.to_string(),
+        CachedLut {
+            lut,
+            bytes,
+            last_used: std::time::Instant::now(),
+        },
+    );
+    loop {
+        let total: usize = map.values().map(|entry| entry.bytes).sum();
+        if map.len() <= LUT_CACHE_MAX_ENTRIES && total <= LUT_CACHE_MAX_BYTES {
+            break;
+        }
+        let victim = map
+            .iter()
+            .filter(|(key, _)| key.as_str() != id)
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| key.clone());
+        match victim {
+            Some(key) => {
+                map.remove(&key);
+            }
+            None => break,
+        }
+    }
 }
 
 pub fn lookup_lut(id: &str) -> Option<Arc<ParsedCube>> {
+    let mut map = cache().lock().unwrap_or_else(|err| err.into_inner());
+    let entry = map.get_mut(id)?;
+    entry.last_used = std::time::Instant::now();
+    Some(entry.lut.clone())
+}
+
+/// Drop a cube the app just deleted, so the parsed copy does not outlive the blob.
+pub fn forget_lut(id: &str) {
     cache()
         .lock()
         .unwrap_or_else(|err| err.into_inner())
-        .get(id)
-        .cloned()
+        .remove(id);
 }
 
-fn cache() -> &'static Mutex<HashMap<String, Arc<ParsedCube>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<ParsedCube>>>> = OnceLock::new();
+fn cache() -> &'static Mutex<HashMap<String, CachedLut>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedLut>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -140,7 +184,15 @@ fn axis(value: f32, min: f32, max: f32, last: f32) -> f32 {
     ((value - min) / (max - min) * last).clamp(0.0, last)
 }
 
-fn tetra(c0: [f32; 3], c1: [f32; 3], c2: [f32; 3], c3: [f32; 3], d1: f32, d2: f32, d3: f32) -> [f32; 3] {
+fn tetra(
+    c0: [f32; 3],
+    c1: [f32; 3],
+    c2: [f32; 3],
+    c3: [f32; 3],
+    d1: f32,
+    d2: f32,
+    d3: f32,
+) -> [f32; 3] {
     [
         c0[0] + d1 * (c1[0] - c0[0]) + d2 * (c2[0] - c1[0]) + d3 * (c3[0] - c2[0]),
         c0[1] + d1 * (c1[1] - c0[1]) + d2 * (c2[1] - c1[1]) + d3 * (c3[1] - c2[1]),

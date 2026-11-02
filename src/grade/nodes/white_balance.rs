@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, req_str, text};
+use super::{Node, NodeParam, clamp_f, object, req_f, req_str};
 use crate::grade::buffer::{self, InputDesc, OutputDesc};
 use crate::grade::color;
 use crate::grade::exec::{Frame, map_rgb};
@@ -71,8 +71,8 @@ impl NodeParam for WhiteBalance {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -135,24 +135,26 @@ impl Node for WhiteBalance {
 }
 
 impl WhiteBalance {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         let mut fields = vec![field::choice(
             "mode",
-            text(zh, "Mode", "模式"),
+            "grade.field.mode",
             match self.mode {
                 Mode::AsShot => 0,
                 Mode::Temperature => 1,
                 Mode::Gains => 2,
             },
             &["as shot|as_shot", "temperature|temperature", "gains|gains"],
-            zh,
-            &["相机白平衡", "色温", "通道增益"],
+            &[
+                "grade.option.as_shot",
+                "grade.option.temperature",
+                "grade.option.gains",
+            ],
         )];
         if self.mode == Mode::Temperature {
             fields.push(field::slider(
                 "temperature",
-                text(zh, "Temperature", "色温"),
+                "grade.field.temperature",
                 self.temperature,
                 2000.0,
                 12000.0,
@@ -160,7 +162,7 @@ impl WhiteBalance {
             ));
             fields.push(field::slider(
                 "tint",
-                text(zh, "Tint", "色调"),
+                "grade.field.tint",
                 self.tint,
                 -100.0,
                 100.0,

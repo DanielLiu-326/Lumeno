@@ -66,27 +66,20 @@ pub(crate) fn slider(
     }
 }
 
+/// `labels` are i18n keys, one per wire value; the host translates them.
 pub(crate) fn choice(
     key: &str,
-    label: String,
+    label: impl Into<String>,
     choice: i32,
     values: &[&str],
-    zh: bool,
-    zh_labels: &[&str],
+    labels: &[&str],
 ) -> FieldSpec {
-    let labels: Vec<String> = if zh {
-        zh_labels.iter().map(|label| (*label).to_string()).collect()
-    } else {
-        values
-            .iter()
-            .map(|value| value.split('|').next().unwrap_or(value).to_string())
-            .collect()
-    };
+    let labels: Vec<String> = labels.iter().map(|label| (*label).to_string()).collect();
     let display = labels.get(choice as usize).cloned().unwrap_or_default();
     let opt = |index: usize| labels.get(index).cloned().unwrap_or_default();
     FieldSpec {
         key: key.into(),
-        label,
+        label: label.into(),
         kind: FieldKind::Choice,
         value: choice as f32,
         min: 0.0,

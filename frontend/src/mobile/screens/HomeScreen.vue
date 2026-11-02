@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 import { t } from "../../i18n/index.js";
 import { formatSize } from "../../utils/format";
 import { albumCoverUrl } from "../../utils/albumCover.js";
-import { thumbnailPathSegment } from "../../utils/mediaKind.js";
+import { photoThumbnailUrl } from "../../utils/thumbnailUrl.js";
 import { albumLocation } from "../router.js";
 import { ALBUM_APP_KEY, MOBILE_UI_KEY } from "../context.js";
 import Screen from "../layouts/Screen.vue";
@@ -23,12 +23,6 @@ const greeting = computed(() => {
   if (hour < 18) return t("mobile.greetingAfternoon");
   return t("mobile.greetingEvening");
 });
-
-function thumbUrl(photo, size = 360) {
-  if (!photo?.path) return "";
-  const owner = photo.owner ? `&owner=${encodeURIComponent(photo.owner)}` : "";
-  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${owner}`;
-}
 
 function albumCover(album) {
   return albumCoverUrl(album, 480);
@@ -139,7 +133,7 @@ onMounted(() => {
               class="mobile-cover-tile"
               @click="openAlbum(photo)"
             >
-              <img :src="thumbUrl(photo)" alt="" loading="lazy" class="h-full w-full object-cover" />
+              <img :src="photoThumbnailUrl(photo)" alt="" loading="lazy" class="h-full w-full object-cover" />
               <span class="mobile-cover-caption">{{ albumTitle(photo) }}</span>
             </button>
           </div>
@@ -178,7 +172,7 @@ onMounted(() => {
               class="mobile-cover-tile"
               @click="openDiscoveryPhoto(photo, section.photos)"
             >
-              <img :src="thumbUrl(photo)" alt="" loading="lazy" class="h-full w-full object-cover" />
+              <img :src="photoThumbnailUrl(photo)" alt="" loading="lazy" class="h-full w-full object-cover" />
             </button>
           </div>
           <p v-else class="py-6 text-center text-sm opacity-60">{{ section.empty }}</p>

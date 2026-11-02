@@ -3,15 +3,15 @@
 
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, req_str, text};
+use super::{Node, NodeParam, clamp_f, object, req_f, req_str};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::color::{
     self, adobe_to_linear, linear_to_adobe, linear_to_rec709, linear_to_srgb, rec709_to_linear,
     srgb_to_linear,
 };
-use crate::grade::exec::Space;
 use crate::grade::cube::lookup_lut;
 use crate::grade::exec::Frame;
+use crate::grade::exec::Space;
 use crate::grade::field::{self, FieldSpec};
 
 #[derive(Clone)]
@@ -59,8 +59,8 @@ impl NodeParam for Lut {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -128,18 +128,17 @@ impl Node for Lut {
 }
 
 impl Lut {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         let name = if self.lut.is_empty() {
-            text(zh, "None", "未选择")
+            "grade.value.none".to_string()
         } else {
             self.lut.clone()
         };
         vec![
-            field::readonly("lut", text(zh, "LUT", "LUT"), name),
+            field::readonly("lut", "grade.field.lut", name),
             field::slider(
                 "strength",
-                text(zh, "Strength", "强度"),
+                "grade.field.strength",
                 self.strength,
                 0.0,
                 1.0,
@@ -147,7 +146,7 @@ impl Lut {
             ),
             field::choice(
                 "encoding",
-                text(zh, "Color space", "色彩空间"),
+                "grade.field.color_space",
                 space_index(&self.encoding),
                 &[
                     "sRGB|srgb",
@@ -157,14 +156,13 @@ impl Lut {
                     "linear Rec2020 RGB|linear-rec2020",
                     "linear ProPhoto RGB|linear-prophoto",
                 ],
-                zh,
                 &[
-                    "sRGB",
-                    "Adobe RGB",
-                    "gamma Rec709 RGB",
-                    "linear Rec709 RGB",
-                    "linear Rec2020 RGB",
-                    "linear ProPhoto RGB",
+                    "grade.option.srgb",
+                    "grade.option.adobe_rgb",
+                    "grade.option.gamma_rec709",
+                    "grade.option.linear_rec709",
+                    "grade.option.linear_rec2020",
+                    "grade.option.linear_prophoto",
                 ],
             ),
         ]
@@ -249,7 +247,11 @@ fn into_apply_space(encoding: &str, buffer: Space, r: f32, g: f32, b: f32) -> [f
         }
         "gamma-rec709" => {
             let [r, g, b] = color::rec2020_to_linear_srgb(r, g, b);
-            [linear_to_rec709(r), linear_to_rec709(g), linear_to_rec709(b)]
+            [
+                linear_to_rec709(r),
+                linear_to_rec709(g),
+                linear_to_rec709(b),
+            ]
         }
         "linear-rec709" => color::rec2020_to_linear_srgb(r, g, b),
         "linear-prophoto" => color::apply_matrix(&color::REC2020_TO_PROPHOTO, r, g, b),

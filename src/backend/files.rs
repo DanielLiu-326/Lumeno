@@ -13,7 +13,7 @@ use function_name::named;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use headers::{ContentType, HeaderMapExt};
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::any::Any;
@@ -89,6 +89,10 @@ enum ExecControl {
     Cancel,
 }
 
+/// Copy through a sibling temp file and rename on success.
+///
+/// The destination is only replaced once every byte landed: a short write, a read
+/// error or a cancel never leaves a truncated copy that still reports success.
 async fn copy_file_with_progress<'a, T>(
     source: impl AsRef<std::path::Path>,
     destination: impl AsRef<std::path::Path>,
@@ -99,27 +103,54 @@ where
 {
     let source = source.as_ref();
     let destination = destination.as_ref();
+    let parent = destination.parent().unwrap_or_else(|| FsPath::new("."));
+    let temp = parent.join(format!(".lumeno-copy-{}.part", uuid::Uuid::new_v4()));
 
+    let result = copy_into(source, &temp, &mut progress_callback).await;
+    match result {
+        Ok(()) => match tokio::fs::rename(&temp, destination).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp).await;
+                Err(error)
+            }
+        },
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            Err(error)
+        }
+    }
+}
+
+async fn copy_into<'a, T>(
+    source: &FsPath,
+    temp: &FsPath,
+    progress_callback: &mut T,
+) -> tokio::io::Result<()>
+where
+    T: FnMut(u64, u64) -> BoxFuture<'a, ExecControl>,
+{
     let metadata = tokio::fs::metadata(source).await?;
     let total_bytes = metadata.len();
 
     let mut source_file = tokio::fs::File::open(source).await?;
-    let mut dest_file = tokio::fs::File::create(destination).await?;
-    let mut buffer = vec![0u8; 8192];
+    let mut temp_file = tokio::fs::File::create(temp).await?;
+    let mut buffer = vec![0u8; 64 * 1024];
     let mut copied = 0u64;
     loop {
         let bytes_read = source_file.read(&mut buffer).await?;
         if bytes_read == 0 {
             break;
         }
-        dest_file.write(&buffer[..bytes_read]).await?;
+        // `write_all`, not `write`: a short write would silently drop bytes while
+        // progress still reached 100%.
+        temp_file.write_all(&buffer[..bytes_read]).await?;
         copied += bytes_read as u64;
         if progress_callback(copied, total_bytes).await == ExecControl::Cancel {
-            tokio::fs::remove_file(destination).await?;
             return Err(tokio::io::ErrorKind::BrokenPipe.into());
         }
     }
-    dest_file.sync_all().await?;
+    temp_file.sync_all().await?;
     Ok(())
 }
 
@@ -353,11 +384,42 @@ impl Task for MoveFiles {
 
 // ── Upload task ──────────────────────────────────────────────────────────────
 
+/// Bytes accepted for one upload chunk, and the piece size used to hand them to
+/// the upload task. Both bound peak memory per request.
+const UPLOAD_FEED_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const UPLOAD_FEED_PIECE: usize = 1024 * 1024;
+
+/// Removes its file on drop, so every early return cleans up the spool.
+struct TempPath(Option<PathBuf>);
+
+impl TempPath {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn as_path(&self) -> &FsPath {
+        self.0.as_deref().unwrap_or_else(|| FsPath::new(""))
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub(crate) struct UploadFileMeta {
     pub(crate) bytes: u64,
     pub(crate) is_dir: bool,
+    /// Confined host path the bytes are written to.
     pub(crate) path: String,
+    /// Path as the client named it (relative to the upload destination). Chunk
+    /// requests are matched on this, never on a re-derived host path.
+    #[serde(default)]
+    pub(crate) request_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,7 +431,7 @@ pub(crate) struct UploadMetas {
 }
 
 pub(crate) struct UploadChunk {
-    path: PathBuf,
+    request_path: String,
     bytes: Bytes,
 }
 
@@ -420,7 +482,7 @@ impl UploadFiles {
         self
     }
 
-    async fn feed_bytes(&self, file: PathBuf, bytes: Bytes) -> Result<(), AppError> {
+    async fn feed_bytes(&self, request_path: String, bytes: Bytes) -> Result<(), AppError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(AppError::BadRequest(tr("en", "error.task_cancelled")));
         }
@@ -429,7 +491,10 @@ impl UploadFiles {
             return Err(AppError::BadRequest(tr("en", "error.task_cancelled")));
         };
         sender
-            .send(UploadChunk { path: file, bytes })
+            .send(UploadChunk {
+                request_path,
+                bytes,
+            })
             .await
             .map_err(|_| AppError::BadRequest(tr("en", "error.task_finished")))
     }
@@ -489,9 +554,11 @@ impl Task for UploadFiles {
                 return;
             }
 
-            // Determine the effective write path based on conflict action.
-            // Note: chunks always arrive keyed by the *original* path regardless.
-            let (write_path, skip_write) = if path.exists() {
+            // Bytes go to a sibling temp file and are renamed into place only when
+            // the whole file arrived. A cancelled or failed upload therefore never
+            // truncates the destination, and two uploads of the same name cannot
+            // overwrite each other's bytes mid-flight.
+            let (final_path, skip_write) = if path.exists() {
                 match self.conflict {
                     ConflictAction::Overwrite => (path.to_owned(), false),
                     ConflictAction::Skip => (path.to_owned(), true),
@@ -500,12 +567,21 @@ impl Task for UploadFiles {
             } else {
                 (path.to_owned(), false)
             };
+            let temp_path = final_path
+                .parent()
+                .map(|parent| parent.join(format!(".lumeno-upload-{}.part", uuid::Uuid::new_v4())));
+            // Also covers a panic or an early return: the partial file never stays
+            // behind (after a successful rename the path no longer exists).
+            let _temp_guard = temp_path.as_ref().map(|path| TempPath::new(path.clone()));
 
-            // Open the destination file (or a /dev/null-like sink for skip).
             let mut file: Option<tokio::fs::File> = if skip_write {
                 None
             } else {
-                match tokio::fs::File::create(&write_path).await {
+                let Some(temp) = temp_path.as_ref() else {
+                    set_error_and_stop("error file path".to_string()).await;
+                    return;
+                };
+                match tokio::fs::File::create(temp).await {
                     Ok(f) => Some(f),
                     Err(e) => {
                         set_error_and_stop(e.to_string()).await;
@@ -520,11 +596,6 @@ impl Task for UploadFiles {
                     break;
                 }
                 if self.cancel.load(Ordering::Relaxed) {
-                    // Delete the incomplete file for atomicity
-                    drop(file);
-                    if !skip_write {
-                        let _ = tokio::fs::remove_file(&write_path).await;
-                    }
                     break;
                 }
                 let chunk = {
@@ -533,10 +604,6 @@ impl Task for UploadFiles {
                         Ok(Some(chunk)) => chunk,
                         Ok(None) => {
                             if self.cancel.load(Ordering::Relaxed) {
-                                drop(file);
-                                if !skip_write {
-                                    let _ = tokio::fs::remove_file(&write_path).await;
-                                }
                                 break;
                             }
                             set_error_and_stop(format!(
@@ -548,10 +615,6 @@ impl Task for UploadFiles {
                         }
                         Err(_) => {
                             if self.cancel.load(Ordering::Relaxed) {
-                                drop(file);
-                                if !skip_write {
-                                    let _ = tokio::fs::remove_file(&write_path).await;
-                                }
                                 break;
                             }
                             set_error_and_stop(format!(
@@ -564,11 +627,14 @@ impl Task for UploadFiles {
                         }
                     }
                 };
-                if chunk.path != path {
+                if chunk.request_path != file_meta.request_path {
+                    drop(file);
+                    if let Some(temp) = &temp_path {
+                        let _ = tokio::fs::remove_file(temp).await;
+                    }
                     set_error_and_stop(format!(
-                        "expected path{:?}:, request path:{:?}",
-                        path,
-                        chunk.path.as_path()
+                        "upload chunk for {:?} arrived while writing {:?}",
+                        chunk.request_path, file_meta.request_path
                     ))
                     .await;
                     return;
@@ -589,7 +655,39 @@ impl Task for UploadFiles {
                 }
             }
             if self.cancel.load(Ordering::Relaxed) {
+                drop(file);
+                if let Some(temp) = &temp_path {
+                    let _ = tokio::fs::remove_file(temp).await;
+                }
                 break;
+            }
+
+            // Commit only after every byte arrived.
+            if let Some(handle) = file.take() {
+                if let Err(e) = handle.sync_all().await {
+                    let _ = tokio::fs::remove_file(temp_path.as_ref().unwrap()).await;
+                    set_error_and_stop(e.to_string()).await;
+                    return;
+                }
+                drop(handle);
+                let commit_path = if self.conflict == ConflictAction::Rename && final_path.exists()
+                {
+                    find_free_path(&final_path)
+                } else {
+                    final_path.clone()
+                };
+                if self.conflict == ConflictAction::Skip && final_path.exists() {
+                    // It appeared while we were uploading; keep the existing file.
+                    if let Some(temp) = &temp_path {
+                        let _ = tokio::fs::remove_file(temp).await;
+                    }
+                } else if let Some(temp) = &temp_path
+                    && let Err(e) = tokio::fs::rename(temp, &commit_path).await
+                {
+                    let _ = tokio::fs::remove_file(temp).await;
+                    set_error_and_stop(e.to_string()).await;
+                    return;
+                }
             }
             self.base.add_processed_count(1);
         }
@@ -1292,10 +1390,8 @@ pub async fn api_rename_file(
         return Err(AppError::unauthorized(locale.as_str()));
     };
     let path = path.unwrap_or(Path(String::new())).0;
-    let request_new_path = percent_decode_str(&query.new_path)
-        .decode_utf8()
-        .map_err(|_| AppError::BadRequest(tr(locale.as_str(), "error.invalid_new_path_encoding")))?
-        .to_string();
+    // `Query` already percent-decoded this; a second pass would mangle literal `%`.
+    let request_new_path = query.new_path.clone();
     let Ok(old_path) = into_host_path_safely(root_path.as_path(), &path) else {
         return Err(AppError::BadRequest(tr(
             locale.as_str(),
@@ -1516,6 +1612,35 @@ pub async fn api_move_files(
     ))
 }
 
+/// Resolve each upload entry against `dest_path` (already confined to the user root).
+/// `Path::join` leaves `..` in place; `into_host_path_safely` collapses and rejects escape.
+fn confine_upload_files(
+    root_path: &std::path::Path,
+    dest_path: &std::path::Path,
+    files: &[UploadFileMeta],
+    locale: &str,
+) -> Result<Vec<UploadFileMeta>, AppError> {
+    let mut confined = Vec::with_capacity(files.len());
+    for meta in files {
+        if meta.path.trim().is_empty() {
+            return Err(AppError::BadRequest(tr(locale, "error.invalid_path")));
+        }
+        let path = into_host_path_safely(dest_path, &meta.path)?;
+        // The client names chunks relative to the data root (`destination/name`).
+        let request_path = path
+            .strip_prefix(root_path)
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| meta.path.clone());
+        confined.push(UploadFileMeta {
+            bytes: meta.bytes,
+            is_dir: meta.is_dir,
+            path: path.to_string_lossy().into_owned(),
+            request_path,
+        });
+    }
+    Ok(confined)
+}
+
 fn normalize_upload_list(
     base_path: &std::path::Path,
     metas: &[UploadFileMeta],
@@ -1536,6 +1661,7 @@ fn normalize_upload_list(
                         bytes: 0,
                         is_dir: true,
                         path: path_str,
+                        request_path: String::new(),
                     });
                 }
             }
@@ -1581,10 +1707,7 @@ pub async fn api_upload(
 
     let dest_path = into_host_path_safely(root_path.as_path(), &metas.destination)?;
     let mut metas = metas.0;
-    for meta in &mut metas.files {
-        let absolute_path = dest_path.join(std::path::Path::new(&meta.path));
-        meta.path = absolute_path.to_string_lossy().to_string();
-    }
+    metas.files = confine_upload_files(&root_path, &dest_path, &metas.files, locale.as_str())?;
     metas.files = normalize_upload_list(&dest_path, &metas.files);
     let task_name = trf(
         locale.as_str(),
@@ -1619,16 +1742,16 @@ pub async fn api_upload_feed(
     mut multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
     eprintln!("{} called", function_name!());
-    let Some(root_path) = cfg.get_root_path(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
     let Some(username) = cfg.get_username(&token).await else {
         return Err(AppError::unauthorized(locale.as_str()));
     };
     let mut path = String::new();
     let mut task_id = String::new();
-    let mut file_data = Bytes::new();
-    while let Some(field) = multipart
+    // The chunk is spooled to disk instead of being held in memory: one request
+    // used to pin up to the body limit, and the channel behind it held ten more.
+    let mut spool: Option<TempPath> = None;
+    let spool_dir = cfg.user_root_path(&username).join("temp");
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|_| AppError::BadRequest(tr(locale.as_str(), "error.multipart_payload")))?
@@ -1647,13 +1770,54 @@ pub async fn api_upload_feed(
                 })?;
             }
             "file" => {
-                file_data = field.bytes().await.map_err(|_| {
+                if let Some(previous) = spool.take() {
+                    drop(previous);
+                }
+                if let Err(error) = tokio::fs::create_dir_all(&spool_dir).await {
+                    return Err(AppError::Unknown(error.to_string()));
+                }
+                let temp =
+                    TempPath::new(spool_dir.join(format!("upload-feed-{}.part", Uuid::new_v4())));
+                let mut handle = tokio::fs::File::create(temp.as_path()).await.map_err(|_| {
                     AppError::BadRequest(tr(locale.as_str(), "error.multipart_file_data"))
                 })?;
+                let mut written = 0u64;
+                loop {
+                    let chunk = match field.chunk().await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(_) => {
+                            return Err(AppError::BadRequest(tr(
+                                locale.as_str(),
+                                "error.multipart_file_data",
+                            )));
+                        }
+                    };
+                    written += chunk.len() as u64;
+                    if written > UPLOAD_FEED_MAX_BYTES {
+                        return Err(AppError::BadRequest(tr(
+                            locale.as_str(),
+                            "error.multipart_file_data",
+                        )));
+                    }
+                    if let Err(error) = handle.write_all(&chunk).await {
+                        return Err(AppError::Unknown(error.to_string()));
+                    }
+                }
+                if let Err(error) = handle.sync_all().await {
+                    return Err(AppError::Unknown(error.to_string()));
+                }
+                spool = Some(temp);
             }
             _ => {}
         }
     }
+    let Some(spool) = spool else {
+        return Err(AppError::BadRequest(tr(
+            locale.as_str(),
+            "error.multipart_file_data",
+        )));
+    };
     let task_uuid = Uuid::from_str(task_id.as_str())
         .map_err(|_| AppError::BadRequest(tr(locale.as_str(), "error.request_id_missing")))?;
     let Some(task) = cfg.task_mgr.get_task_for_user(&task_uuid, &username).await else {
@@ -1668,8 +1832,29 @@ pub async fn api_upload_feed(
             "error.upload_task_mismatch",
         )));
     };
-    let path = into_host_path_safely(&root_path, &path)?;
-    task.feed_bytes(path, file_data).await?;
+    if path.trim().is_empty() || path.len() > 4096 {
+        return Err(AppError::BadRequest(tr(
+            locale.as_str(),
+            "error.multipart_path",
+        )));
+    }
+    // The chunk only names which file it belongs to; the confined host path came
+    // from `/api/upload` and is the only one ever written.
+    let mut reader = match tokio::fs::File::open(spool.as_path()).await {
+        Ok(reader) => reader,
+        Err(error) => return Err(AppError::Unknown(error.to_string())),
+    };
+    let mut buffer = vec![0u8; UPLOAD_FEED_PIECE];
+    loop {
+        let read = match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => return Err(AppError::Unknown(error.to_string())),
+        };
+        task.feed_bytes(path.clone(), Bytes::copy_from_slice(&buffer[..read]))
+            .await?;
+    }
+    drop(reader);
     let message = tr(locale.as_str(), "response.success");
     Ok(create_response(true, &message, 0, None))
 }
@@ -1678,7 +1863,11 @@ pub async fn api_upload_feed(
 
 #[cfg(test)]
 mod range_tests {
-    use super::parse_byte_range;
+    use super::{
+        ExecControl, UploadFileMeta, confine_upload_files, copy_file_with_progress,
+        parse_byte_range,
+    };
+    use crate::backend::common::into_host_path_safely;
 
     #[test]
     fn parses_open_closed_and_suffix_ranges() {
@@ -1705,5 +1894,100 @@ mod range_tests {
         assert!(parse_byte_range("bytes=-", 1000).is_err());
         assert!(parse_byte_range("items=0-1", 1000).is_err());
         assert!(parse_byte_range("bytes=0-", 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn copy_replaces_atomically_and_cancel_keeps_the_old_file() {
+        use futures::FutureExt;
+
+        let dir = std::env::temp_dir().join(format!("lumeno-copy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("src.bin");
+        let payload = vec![7u8; 200_000];
+        std::fs::write(&source, &payload).unwrap();
+
+        let dest = dir.join("dst.bin");
+        std::fs::write(&dest, b"keep").unwrap();
+        copy_file_with_progress(&source, &dest, |_, _| {
+            async { ExecControl::Continue }.boxed()
+        })
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+
+        let dest2 = dir.join("dst2.bin");
+        std::fs::write(&dest2, b"keep").unwrap();
+        let cancelled = copy_file_with_progress(&source, &dest2, |_, _| {
+            async { ExecControl::Cancel }.boxed()
+        })
+        .await;
+        assert!(cancelled.is_err(), "a cancelled copy reports failure");
+        assert_eq!(
+            std::fs::read(&dest2).unwrap(),
+            b"keep",
+            "the destination is untouched until the copy completes"
+        );
+
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".part"))
+            .count();
+        assert_eq!(leftovers, 0, "temp files are cleaned up");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upload_file_paths_stay_under_destination() {
+        let root =
+            std::env::temp_dir().join(format!("lumeno-upload-confine-{}", uuid::Uuid::new_v4()));
+        let dest = root.join("albums").join("foo");
+        std::fs::create_dir_all(&dest).unwrap();
+        let dest = into_host_path_safely(&root, "albums/foo").unwrap();
+
+        let ok = confine_upload_files(
+            &root,
+            &dest,
+            &[UploadFileMeta {
+                bytes: 1,
+                is_dir: false,
+                path: "dir/a.jpg".into(),
+                request_path: String::new(),
+            }],
+            "en",
+        )
+        .unwrap();
+        assert_eq!(ok[0].path, dest.join("dir/a.jpg").to_string_lossy());
+        assert_eq!(ok[0].request_path, "albums/foo/dir/a.jpg");
+
+        assert!(
+            confine_upload_files(
+                &root,
+                &dest,
+                &[UploadFileMeta {
+                    bytes: 1,
+                    is_dir: true,
+                    path: "../hmac_key.bin".into(),
+                    request_path: String::new(),
+                }],
+                "en",
+            )
+            .is_err()
+        );
+        assert!(
+            confine_upload_files(
+                &root,
+                &dest,
+                &[UploadFileMeta {
+                    bytes: 1,
+                    is_dir: false,
+                    path: "../../other/secret.jpg".into(),
+                    request_path: String::new(),
+                }],
+                "en",
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -6,7 +6,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::super::album::{AiAlbumScanTarget, collect_accessible_ai_scan_targets};
-use super::super::auth::Role;
 use super::super::common::{AppError, AppState, Token, create_response};
 use super::super::i18n::{RequestLocale, tr, trf};
 use super::AiService;
@@ -342,7 +341,7 @@ async fn load_embedding_search_candidates(
                     continue;
                 }
             }
-            let embedding = if record.image_embedding_state == "ready" {
+            let embedding = if record.image_embedding_state.is_ready() {
                 loaded
                     .embeddings
                     .get(&record.embedding_key())
@@ -369,7 +368,7 @@ async fn load_similar_search_candidates(
 ) -> EmbeddingSearchLoad {
     let mut loaded = load_embedding_search_candidates(store, targets, allowed_paths).await;
     loaded.candidates.retain(|(record, embedding)| {
-        record.image_embedding_state == "ready" && embedding.is_some()
+        record.image_embedding_state.is_ready() && embedding.is_some()
     });
     loaded
 }
@@ -471,13 +470,9 @@ pub async fn api_ai_status(
     let enabled = cfg.settings_manager.ai_enabled().await;
     let inference = cfg.ai_service.provider().await;
     let provider_health = inference.health().await;
-    let store = Arc::clone(cfg.ai_service.store());
-    let username = session.username.clone();
-    let owner_status = tokio::task::spawn_blocking(move || store.owner_status(&username))
-        .await
-        .map_err(|e| AppError::Unknown(format!("ai status join: {e}")))?;
+    let owner_status = cfg.ai_service.store().owner_status(&session.username).await;
     let message = tr(locale.as_str(), "response.success");
-    let provider = if session.role == Role::Admin {
+    let provider = if session.is_admin() {
         json!({
             "kind": provider_health.kind,
             "backend": provider_health.backend,

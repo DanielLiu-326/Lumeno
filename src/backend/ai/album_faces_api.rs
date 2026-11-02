@@ -1095,7 +1095,9 @@ pub async fn api_album_face_crop(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let path = cache.face_crop_path_by_id(fid);
+        let Some(path) = cache.face_crop_path_by_id(fid) else {
+            return Err(AppError::NotFound(fid.to_string()));
+        };
         if let Some(entry) = cache.find_face_in_index_async(fid).await {
             (path, entry.source, entry.box_xywh)
         } else if let Some(app) = find_named_appearance_by_face_id(&album_dir, fid).await {
@@ -1131,7 +1133,9 @@ pub async fn api_album_face_crop(
             e.source.replace('\\', "/").trim_start_matches('/') == source
                 && (0..4).all(|i| (e.box_xywh[i] - box_xywh[i]).abs() < 1e-3)
         }) {
-            cache.face_crop_path_by_id(&entry.face_id)
+            cache
+                .face_crop_path_by_id(&entry.face_id)
+                .unwrap_or_else(|| cache.face_crop_path_by_appearance(&source, &box_xywh))
         } else {
             cache.face_crop_path_by_appearance(&source, &box_xywh)
         };

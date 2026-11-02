@@ -9,7 +9,7 @@ import FaceAvatar from "./FaceAvatar.vue";
 import LazyImage from "./LazyImage.vue";
 import VirtualGrid from "./VirtualGrid.vue";
 import { albumPhotoApiPath, personDisplayCover, personPhotoCount } from "../utils/faceCrop.js";
-import { thumbnailPathSegment } from "../utils/mediaKind.js";
+import { thumbnailUrl } from "../utils/thumbnailUrl.js";
 import AppDialog from "./AppDialog.vue";
 import AppSlider from "./AppSlider.vue";
 import FaceClusterSettings from "./FaceClusterSettings.vue";
@@ -453,9 +453,7 @@ function albumPhotoPath(relativeSource) {
 }
 
 function photoThumb(path, owner) {
-  if (!path) return "";
-  const ownerParam = owner ? `&owner=${encodeURIComponent(owner)}` : (props.albumOwner ? `&owner=${encodeURIComponent(props.albumOwner)}` : "");
-  return `/api/thumbnail/${thumbnailPathSegment(path)}?size=360${ownerParam}`;
+  return thumbnailUrl(path, { owner: owner || props.albumOwner });
 }
 
 function basenameFromPath(path) {

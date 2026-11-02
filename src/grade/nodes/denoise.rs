@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, text};
+use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::color::luma;
 use crate::grade::exec::{self, Frame};
@@ -51,8 +51,8 @@ impl NodeParam for Denoise {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -115,12 +115,11 @@ impl Node for Denoise {
 }
 
 impl Denoise {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "luma",
-                text(zh, "Luma", "亮度"),
+                "grade.field.luma",
                 self.luma,
                 0.0,
                 1.0,
@@ -128,7 +127,7 @@ impl Denoise {
             ),
             field::slider(
                 "chroma",
-                text(zh, "Chroma", "色度"),
+                "grade.field.chroma",
                 self.chroma,
                 0.0,
                 1.0,
@@ -136,7 +135,7 @@ impl Denoise {
             ),
             field::slider(
                 "radius",
-                text(zh, "Radius", "半径"),
+                "grade.field.radius",
                 self.radius,
                 0.002,
                 0.05,

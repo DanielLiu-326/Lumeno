@@ -10,7 +10,6 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::Multipart;
 use base64::Engine;
-use percent_encoding::percent_decode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -21,17 +20,23 @@ use crate::backend::album::decoder::{
     format_from_path,
 };
 use crate::backend::album::media::{is_image_path, resolve_photo_owner_root};
-use crate::backend::common::{AppError, AppState, Token, into_host_path_safely};
+use crate::backend::common::{
+    AppError, AppState, ConcurrencyLimiter, Ctx, Token, into_host_path_safely,
+};
 use crate::backend::i18n::{RequestLocale, tr};
 use crate::grade::{
     CameraColor, CancelFlag, Document, FieldKind, FieldSpec, Frame, GradeNode, NodePatch, Rgba,
-    affected, apply_node_params, default_params, document_with_camera, fields,
-    apply_saved_document, document_json, ensure_grade_lut, frame_from_camera_rgb, frame_from_image,
-    params_json, parse_camera_profile, render_cancellable, title, user_root_from_photo,
+    affected, apply_node_params, apply_saved_document, bake_view, default_params, document_json,
+    document_with_camera, ensure_grade_lut, fields, frame_from_camera_rgb, frame_from_image,
+    params_json, parse_camera_profile, render_cancellable, title_key, user_root_from_photo,
 };
 
 const SMALL_EDGE: u32 = 640;
+/// Opens kept across the process. A full-size frame can be hundreds of MB, so
+/// idle sessions are dropped instead of being kept until the cap is hit.
 const SESSION_CAP: usize = 16;
+const SESSION_CAP_PER_TOKEN: usize = 4;
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 static REVS: AtomicU64 = AtomicU64::new(1);
 static SESSIONS: LazyLock<Mutex<HashMap<u64, Arc<Mutex<GradeSession>>>>> =
@@ -40,6 +45,7 @@ static SESSIONS: LazyLock<Mutex<HashMap<u64, Arc<Mutex<GradeSession>>>>> =
 struct GradeSession {
     token: String,
     rev: u64,
+    last_used: std::time::Instant,
     /// Bumped on every parameter edit so an older full-size render is discarded.
     edit_gen: u64,
     doc: Document,
@@ -125,20 +131,21 @@ pub struct FullBody {
 }
 
 pub async fn api_grade_open(
-    locale: RequestLocale,
-    token: Token,
+    ctx: Ctx,
     Extension(cfg): Extension<Arc<AppState>>,
     Json(body): Json<OpenBody>,
 ) -> Result<Json<Value>, AppError> {
-    let source = resolve_source(&locale, &token, &cfg, &body.path, body.owner.as_deref()).await?;
+    let locale = RequestLocale(ctx.locale.clone());
+    let source =
+        resolve_source(&locale, &ctx.token, &cfg, &body.path, body.owner.as_deref()).await?;
     let raw = format_from_path(source.as_path())
         .ok()
         .is_some_and(|format| format.is_camera_raw());
-    let locale_code = locale.as_str().to_string();
-    let token_key = token.0.clone();
+    let locale_code = ctx.locale.clone();
+    let token_key = ctx.token.0.clone();
     let writable = grade_writable(
         &cfg,
-        &token,
+        &ctx.token,
         body.owner.as_deref(),
         &body.path,
         locale.as_str(),
@@ -165,16 +172,12 @@ pub async fn api_grade_open(
 }
 
 pub async fn api_grade_preview(
-    locale: RequestLocale,
-    token: Token,
+    ctx: Ctx,
     Extension(cfg): Extension<Arc<AppState>>,
     Json(body): Json<FullBody>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(_) = cfg.get_session_and_root(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    let token_key = token.0.clone();
-    let locale_code = locale.as_str().to_string();
+    let token_key = ctx.token.0.clone();
+    let locale_code = ctx.locale.clone();
     let prepared = tokio::task::spawn_blocking(move || prepare_preview(token_key, body.rev))
         .await
         .map_err(|error| AppError::Unknown(error.to_string()))?;
@@ -201,16 +204,12 @@ pub async fn api_grade_node(
 }
 
 pub async fn api_grade_full(
-    locale: RequestLocale,
-    token: Token,
+    ctx: Ctx,
     Extension(cfg): Extension<Arc<AppState>>,
     Json(body): Json<FullBody>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(_) = cfg.get_session_and_root(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    let token_key = token.0.clone();
-    let locale_code = locale.as_str().to_string();
+    let token_key = ctx.token.0.clone();
+    let locale_code = ctx.locale.clone();
     let prepared = tokio::task::spawn_blocking(move || prepare_full(token_key, body.rev))
         .await
         .map_err(|error| AppError::Unknown(error.to_string()))?;
@@ -218,14 +217,10 @@ pub async fn api_grade_full(
 }
 
 pub async fn api_grade_profile(
-    locale: RequestLocale,
-    token: Token,
+    ctx: Ctx,
     Extension(cfg): Extension<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<Json<Value>, AppError> {
-    let Some(_) = cfg.get_session_and_root(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
     let mut rev = None;
     let mut file_name = String::new();
     let mut bytes = None;
@@ -249,7 +244,7 @@ pub async fn api_grade_profile(
                     .await
                     .map_err(|error| AppError::BadRequest(error.to_string()))?;
                 if data.len() > 1024 * 1024 {
-                    return Err(grade_error(locale.as_str(), "profile-invalid".into()));
+                    return Err(grade_error(ctx.locale.as_str(), "profile-invalid".into()));
                 }
                 bytes = Some(data);
             }
@@ -257,13 +252,13 @@ pub async fn api_grade_profile(
         }
     }
     let Some(rev) = rev else {
-        return Err(grade_error(locale.as_str(), "stale".into()));
+        return Err(grade_error(ctx.locale.as_str(), "stale".into()));
     };
     let Some(bytes) = bytes else {
-        return Err(grade_error(locale.as_str(), "profile-invalid".into()));
+        return Err(grade_error(ctx.locale.as_str(), "profile-invalid".into()));
     };
-    let locale_code = locale.as_str().to_string();
-    let token_key = token.0.clone();
+    let locale_code = ctx.locale.clone();
+    let token_key = ctx.token.0.clone();
     let locale_for_job = locale_code.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_profile(&token_key, &locale_for_job, rev, &bytes, &file_name)
@@ -332,6 +327,7 @@ fn open_session(
         "nodes": nodes_json(&locale, &doc),
     });
     let session = GradeSession {
+        last_used: std::time::Instant::now(),
         token,
         rev,
         edit_gen: 1,
@@ -346,15 +342,63 @@ fn open_session(
         job_seq: 0,
         inflight: Vec::new(),
     };
+    let token_for_eviction = session.token.clone();
     let mut map = SESSIONS.lock().unwrap_or_else(|err| err.into_inner());
     map.insert(rev, Arc::new(Mutex::new(session)));
+    evict_sessions(&mut map, rev, &token_for_eviction);
+    payload
+}
+
+/// Drop idle opens, then the oldest ones belonging to the same login, then the
+/// least recently used across all logins. Never the open that triggered this.
+fn evict_sessions(map: &mut HashMap<u64, Arc<Mutex<GradeSession>>>, keep: u64, token: &str) {
+    let now = std::time::Instant::now();
+    let expired: Vec<u64> = map
+        .iter()
+        .filter(|(rev, session)| {
+            **rev != keep
+                && session
+                    .lock()
+                    .map(|session| now.duration_since(session.last_used) > SESSION_TTL)
+                    .unwrap_or(false)
+        })
+        .map(|(rev, _)| *rev)
+        .collect();
+    for rev in expired {
+        map.remove(&rev);
+    }
+
+    let mut own: Vec<(u64, std::time::Instant)> = map
+        .iter()
+        .filter_map(|(rev, session)| {
+            let session = session.lock().ok()?;
+            if session.token == token && *rev != keep {
+                Some((*rev, session.last_used))
+            } else {
+                None
+            }
+        })
+        .collect();
+    own.sort_by_key(|(_, last_used)| *last_used);
+    while own.len() >= SESSION_CAP_PER_TOKEN {
+        let (rev, _) = own.remove(0);
+        map.remove(&rev);
+    }
+
     while map.len() > SESSION_CAP {
-        let Some(oldest) = map.keys().copied().filter(|item| *item != rev).min() else {
+        let victim = map
+            .iter()
+            .filter(|(rev, _)| **rev != keep)
+            .filter_map(|(rev, session)| {
+                session.lock().ok().map(|session| (*rev, session.last_used))
+            })
+            .min_by_key(|(_, last_used)| *last_used)
+            .map(|(rev, _)| rev);
+        let Some(rev) = victim else {
             break;
         };
-        map.remove(&oldest);
+        map.remove(&rev);
     }
-    payload
 }
 
 fn lock_session(token: &str, rev: u64) -> Result<Arc<Mutex<GradeSession>>, String> {
@@ -364,10 +408,11 @@ fn lock_session(token: &str, rev: u64) -> Result<Arc<Mutex<GradeSession>>, Strin
         .cloned()
         .ok_or_else(|| "not-open".to_string())?;
     drop(map);
-    let guard = arc.lock().unwrap_or_else(|err| err.into_inner());
+    let mut guard = arc.lock().unwrap_or_else(|err| err.into_inner());
     if guard.token != token {
         return Err("not-open".into());
     }
+    guard.last_used = std::time::Instant::now();
     drop(guard);
     Ok(arc)
 }
@@ -510,11 +555,8 @@ async fn grade_writable(
     let Some(owner) = owner.filter(|name| *name != username) else {
         return Ok(true);
     };
-    let decoded = percent_decode(path.as_bytes())
-        .decode_utf8()
-        .unwrap_or(std::borrow::Cow::Borrowed(path));
-    let Some(album) = decoded
-        .trim_start_matches('/')
+    let path = path.trim_start_matches('/');
+    let Some(album) = path
         .strip_prefix("albums/")
         .and_then(|rest| rest.split('/').next())
         .and_then(sanitize_album_name)
@@ -571,20 +613,32 @@ fn write_grade_sidecar(photo: &std::path::Path, doc: &Document) -> Result<(), ()
 }
 
 fn bind_lut(arc: &Arc<Mutex<GradeSession>>, doc: &Document) -> Result<(), String> {
-    let Some(node) = doc.nodes.iter().find(|node| node.id == "lut" && node.enabled) else {
-        return Ok(());
-    };
-    let params = params_json(node);
-    let id = params.get("lut").and_then(Value::as_str).unwrap_or("");
-    let strength = params.get("strength").and_then(Value::as_f64).unwrap_or(1.0);
-    if id.is_empty() || strength <= 0.0 {
-        return Ok(());
-    }
     let photo = {
         let session = arc.lock().unwrap_or_else(|err| err.into_inner());
         session.path.clone()
     };
-    let Some(root) = user_root_from_photo(&photo) else {
+    bind_lut_for_photo(&photo, doc)
+}
+
+/// Ensure the LUT cube referenced by the document is loaded for this photo's user root.
+fn bind_lut_for_photo(photo: &std::path::Path, doc: &Document) -> Result<(), String> {
+    let Some(node) = doc
+        .nodes
+        .iter()
+        .find(|node| node.id == "lut" && node.enabled)
+    else {
+        return Ok(());
+    };
+    let params = params_json(node);
+    let id = params.get("lut").and_then(Value::as_str).unwrap_or("");
+    let strength = params
+        .get("strength")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
+    if id.is_empty() || strength <= 0.0 {
+        return Ok(());
+    }
+    let Some(root) = user_root_from_photo(photo) else {
         return Ok(());
     };
     ensure_grade_lut(&root, id).map_err(|error| error.to_string())
@@ -727,6 +781,99 @@ fn load_frame(
     Ok((frame_from_image(&image, max_edge), 0.0, None))
 }
 
+/// Render the Lumeno grade document (or the default pipeline when the photo has none) to an
+/// encoded image, full size unless `max_width` is set. The original and XMP stay untouched.
+pub async fn render_grade_export(
+    limiter: &Arc<ConcurrencyLimiter>,
+    source: &std::path::Path,
+    out_ext: &str,
+    quality: u32,
+    max_width: u32,
+) -> Result<Vec<u8>, AppError> {
+    let raw = format_from_path(source)
+        .ok()
+        .is_some_and(|format| format.is_camera_raw());
+    let source = source.to_path_buf();
+    let out_ext = out_ext.to_string();
+    let _permit = limiter.acquire().await;
+    tokio::task::spawn_blocking(move || {
+        let (frame, baseline_ev, camera) =
+            load_frame(&source, raw, 0).map_err(|error| AppError::Unknown(error))?;
+        let mut doc = document_with_camera(raw, baseline_ev, camera);
+        if let Some(saved) = read_grade_sidecar(&source) {
+            let _ = apply_saved_document(&mut doc, &saved);
+        }
+        bind_lut_for_photo(&source, &doc).map_err(AppError::Unknown)?;
+        let dirty: HashSet<String> = doc.nodes.iter().map(|node| node.id.clone()).collect();
+        let mut cache = HashMap::new();
+        let cancel = CancelFlag::new();
+        let rendered = render_cancellable(&doc, &frame, &mut cache, &dirty, &cancel);
+        let preview = bake_view(&rendered.preview, rendered.degrees, rendered.roi);
+        encode_rgba(&preview, &out_ext, quality, max_width)
+            .map_err(|error| AppError::Unknown(error))
+    })
+    .await
+    .map_err(|error| AppError::Unknown(error.to_string()))?
+}
+
+fn encode_rgba(
+    rgba: &Rgba,
+    out_ext: &str,
+    quality: u32,
+    max_width: u32,
+) -> Result<Vec<u8>, String> {
+    let mut img = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.pixels.clone())
+        .ok_or_else(|| "grade export produced an empty image".to_string())?;
+    if max_width > 0 && img.width() > max_width {
+        let scale = max_width as f32 / img.width() as f32;
+        let height = ((img.height() as f32) * scale).round().max(1.0) as u32;
+        img = image::imageops::resize(
+            &img,
+            max_width,
+            height,
+            image::imageops::FilterType::Triangle,
+        );
+    }
+    let mut bytes = Vec::new();
+    match out_ext {
+        "jpg" | "jpeg" => {
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut bytes,
+                quality.clamp(1, 100) as u8,
+            );
+            encoder
+                .encode_image(&img)
+                .map_err(|error| error.to_string())?;
+        }
+        "png" => {
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        "webp" => {
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::WebP,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        "tiff" | "tif" => {
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Tiff,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        other => return Err(format!("unsupported grade export format {other}")),
+    }
+    Ok(bytes)
+}
+
 fn nodes_json(locale: &str, doc: &Document) -> Vec<Value> {
     doc.nodes
         .iter()
@@ -739,14 +886,27 @@ fn node_json(locale: &str, node: &GradeNode) -> Value {
         "id": node.id,
         "enabled": node.enabled,
         "always_on": node.always_on(),
-        "title": title(locale, &node.id),
+        "title": tr(locale, title_key(&node.id)),
         "params": params_json(node),
         "defaults": default_params(node),
-        "fields": fields(locale, node).iter().map(field_json).collect::<Vec<_>>(),
+        "fields": fields(node)
+            .iter()
+            .map(|field| field_json(locale, field))
+            .collect::<Vec<_>>(),
     })
 }
 
-fn field_json(field: &FieldSpec) -> Value {
+/// The grade library only emits `grade.*` keys; numeric/unit displays (e.g.
+/// `72px`) pass through untouched.
+fn grade_text(locale: &str, text: &str) -> String {
+    if text.starts_with("grade.") {
+        tr(locale, text).to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn field_json(locale: &str, field: &FieldSpec) -> Value {
     let options = if field.kind == FieldKind::Choice {
         let labels: Vec<&str> = field
             .choices
@@ -761,19 +921,19 @@ fn field_json(field: &FieldSpec) -> Value {
         labels
             .into_iter()
             .zip(wires)
-            .map(|(label, value)| json!({ "label": label, "value": value }))
+            .map(|(label, value)| json!({ "label": grade_text(locale, label), "value": value }))
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
     json!({
         "key": field.key,
-        "label": field.label,
+        "label": grade_text(locale, &field.label),
         "kind": field.kind.as_str(),
         "value": field.value,
         "min": field.min,
         "max": field.max,
-        "display": field.display,
+        "display": grade_text(locale, &field.display),
         "options": options,
     })
 }
@@ -869,5 +1029,70 @@ fn grade_error(locale: &str, error: String) -> AppError {
     AppError::GradeRejected {
         message: tr(locale, key),
         reason,
+    }
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use crate::backend::i18n::tr;
+    use crate::grade::{
+        CameraColor, FieldKind, default_document, document_with_camera, fields, title_key,
+    };
+
+    /// The grade library only emits `grade.*` keys; every one of them must exist
+    /// in the locale files, or the UI shows the raw key.
+    #[test]
+    fn every_grade_key_the_library_emits_is_translated() {
+        let camera = CameraColor {
+            name: "Test Camera".to_string(),
+            to_working: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        };
+        let documents = [
+            default_document(false),
+            default_document(true),
+            document_with_camera(true, 0.0, Some(camera)),
+        ];
+
+        let mut keys = Vec::new();
+        for doc in &documents {
+            for node in &doc.nodes {
+                keys.push(title_key(&node.id).to_string());
+                for field in fields(node) {
+                    keys.push(field.label.clone());
+                    if field.display.starts_with("grade.") {
+                        keys.push(field.display.clone());
+                    }
+                    if field.kind == FieldKind::Choice {
+                        keys.extend(
+                            field
+                                .choices
+                                .split('|')
+                                .filter(|item| !item.is_empty())
+                                .map(str::to_string),
+                        );
+                    }
+                }
+            }
+        }
+        keys.push(title_key("no-such-node").to_string());
+
+        // Symbols are data, not copy: they read the same in both languages.
+        const NEUTRAL_LABELS: &[&str] = &["X", "Y", "R", "G", "B", "Omega", "Epsilon"];
+        for key in &keys {
+            if NEUTRAL_LABELS.contains(&key.as_str()) {
+                continue;
+            }
+            assert!(key.starts_with("grade."), "not a grade key: {key}");
+            assert_ne!(
+                tr("en", key),
+                format!("en.{key}"),
+                "missing English translation for {key}"
+            );
+            assert_ne!(
+                tr("zh", key),
+                format!("zh.{key}"),
+                "missing Chinese translation for {key}"
+            );
+        }
     }
 }

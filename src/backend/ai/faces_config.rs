@@ -142,21 +142,6 @@ pub fn faces_config_path(album_dir: &Path) -> PathBuf {
     album_dir.join("faces.json")
 }
 
-/// Photo API paths (`albums/{album}/{relative}`) for a person in this album's faces.json.
-#[cfg(test)]
-pub fn collect_person_photo_paths_from_config(
-    album_dir: &Path,
-    album_name: &str,
-    person_ids: &[String],
-) -> HashSet<String> {
-    if person_ids.is_empty() {
-        return HashSet::new();
-    }
-    let wanted: HashSet<&str> = person_ids.iter().map(String::as_str).collect();
-    let config = load_faces_config(album_dir);
-    collect_person_photo_paths_from_loaded(&config, album_name, &wanted)
-}
-
 pub async fn collect_person_photo_paths_from_config_async(
     album_dir: &Path,
     album_name: &str,
@@ -195,19 +180,6 @@ fn collect_person_photo_paths_from_loaded(
     paths
 }
 
-/// Load faces.json. Missing file or incompatible JSON → empty config (no migration).
-#[cfg(test)]
-pub fn load_faces_config(album_dir: &Path) -> FacesConfig {
-    let path = faces_config_path(album_dir);
-    let mut config = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<FacesConfig>(&raw).ok())
-        .filter(|config| config.version == FACES_CONFIG_VERSION)
-        .unwrap_or_default();
-    config.sanitize_covers();
-    config
-}
-
 pub async fn load_faces_config_async(album_dir: &Path) -> FacesConfig {
     let path = faces_config_path(album_dir);
     let Ok(raw) = tokio::fs::read_to_string(path).await else {
@@ -219,20 +191,6 @@ pub async fn load_faces_config_async(album_dir: &Path) -> FacesConfig {
         .unwrap_or_default();
     config.sanitize_covers();
     config
-}
-
-#[cfg(test)]
-pub fn save_faces_config(album_dir: &Path, config: &FacesConfig) -> Result<(), String> {
-    let path = faces_config_path(album_dir);
-    let mut config = config.clone();
-    config.version = FACES_CONFIG_VERSION;
-    config.sanitize_covers();
-    let bytes =
-        serde_json::to_vec_pretty(&config).map_err(|e| format!("serialize faces.json: {e}"))?;
-    let tmp = album_dir.join(".faces.json.tmp");
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("write faces.json tmp: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("commit faces.json: {e}"))?;
-    Ok(())
 }
 
 pub async fn save_faces_config_async(album_dir: &Path, config: &FacesConfig) -> Result<(), String> {
@@ -804,8 +762,8 @@ mod tests {
     use super::*;
     use crate::backend::ai::album_cache::encode_f32_vector_b64;
 
-    #[test]
-    fn faces_config_roundtrip_nested_appearances() {
+    #[tokio::test]
+    async fn faces_config_roundtrip_nested_appearances() {
         let dir = std::env::temp_dir().join(format!("album-faces-cfg-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut config = FacesConfig::default();
@@ -836,8 +794,8 @@ mod tests {
             )
             .unwrap();
 
-        save_faces_config(&dir, &config).unwrap();
-        let loaded = load_faces_config(&dir);
+        save_faces_config_async(&dir, &config).await.unwrap();
+        let loaded = load_faces_config_async(&dir).await;
         assert_eq!(loaded.version, 3);
         assert_eq!(loaded.people.len(), 1);
         assert_eq!(loaded.people[0].centers.len(), 2);
@@ -911,8 +869,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn person_paths_from_config_use_album_prefix() {
+    #[tokio::test]
+    async fn person_paths_from_config_use_album_prefix() {
         let dir = std::env::temp_dir().join(format!("album-faces-paths-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut config = FacesConfig::default();
@@ -930,15 +888,19 @@ mod tests {
                 center,
             )
             .unwrap();
-        save_faces_config(&dir, &config).unwrap();
-        let paths =
-            collect_person_photo_paths_from_config(&dir, "raw", &[config.people[0].id.clone()]);
+        save_faces_config_async(&dir, &config).await.unwrap();
+        let paths = collect_person_photo_paths_from_config_async(
+            &dir,
+            "raw",
+            &[config.people[0].id.clone()],
+        )
+        .await;
         assert!(paths.contains("albums/raw/2026/a.jpg"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn incompatible_or_legacy_faces_json_loads_empty() {
+    #[tokio::test]
+    async fn incompatible_or_legacy_faces_json_loads_empty() {
         let dir = std::env::temp_dir().join(format!("album-faces-legacy-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let legacy = r#"{
@@ -956,12 +918,12 @@ mod tests {
           }]
         }"#;
         std::fs::write(dir.join("faces.json"), legacy).unwrap();
-        let loaded = load_faces_config(&dir);
+        let loaded = load_faces_config_async(&dir).await;
         assert!(loaded.people.is_empty());
         assert_eq!(loaded.version, FACES_CONFIG_VERSION);
 
         std::fs::write(dir.join("faces.json"), "{not json").unwrap();
-        let loaded = load_faces_config(&dir);
+        let loaded = load_faces_config_async(&dir).await;
         assert!(loaded.people.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

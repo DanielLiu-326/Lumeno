@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { IconBulb, IconChevronLeft, IconChevronRight, IconGrade, IconMenu, IconRefresh } from "../utils/icons";
 import { t } from "../i18n/index.js";
+import { httpFetch } from "../utils/http";
 import { formatDurationMs, isVideoPhoto } from "../utils/mediaKind.js";
 import PhotoMetaPanel from "./PhotoMetaPanel.vue";
 import GradeFilmstrip from "./grade/GradeFilmstrip.vue";
@@ -202,10 +203,9 @@ async function openSession() {
   try {
     const body = { path: photo.path };
     if (photo.owner) body.owner = photo.owner;
-    const res = await fetch("/api/grade/open", {
+    const res = await httpFetch("/api/grade/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
       signal: ctrl.signal,
       body: JSON.stringify(body),
     });
@@ -246,10 +246,9 @@ async function requestPreview(revAtStart) {
   const ctrl = new AbortController();
   previewAbort = ctrl;
   try {
-    const res = await fetch("/api/grade/preview", {
+    const res = await httpFetch("/api/grade/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
       signal: ctrl.signal,
       body: JSON.stringify({ rev: revAtStart }),
     });
@@ -386,10 +385,9 @@ async function postNode(node, signal, seq) {
   const sentRev = rev.value;
   if (!photoPath || !sentRev || seq !== patchSeq || signal.aborted) return "stale";
   try {
-    const res = await fetch("/api/grade/node", {
+    const res = await httpFetch("/api/grade/node", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
       signal,
       body: JSON.stringify({
         id: node.id,
@@ -430,10 +428,9 @@ async function requestFull(revAtStart) {
   const ctrl = new AbortController();
   refineAbort = ctrl;
   try {
-    const res = await fetch("/api/grade/full", {
+    const res = await httpFetch("/api/grade/full", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
       signal: ctrl.signal,
       body: JSON.stringify({ rev: revAtStart }),
     });
@@ -542,9 +539,8 @@ async function importProfile(file) {
   loading.value = true;
   error.value = "";
   try {
-    const res = await fetch("/api/grade/profile", {
+    const res = await httpFetch("/api/grade/profile", {
       method: "POST",
-      credentials: "same-origin",
       signal: ctrl.signal,
       body,
     });

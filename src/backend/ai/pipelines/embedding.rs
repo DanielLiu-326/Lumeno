@@ -10,7 +10,7 @@ use crate::backend::constants::AI_EMBED_COST;
 use crate::backend::tasks::{TaskBase, format_subtask, task_file_name};
 
 use super::super::album_cache::{AlbumAiCache, EmbeddingCacheFile, embedding_cache_key};
-use super::super::models::AiIndexedPhotoRecord;
+use super::super::models::{AiIndexedPhotoRecord, AiItemState};
 use super::super::pipeline::{ImageJob, ImagePipeline, PipelineConfig, progress_channel};
 use super::super::provider::{AiInferenceProvider, AiItemError};
 
@@ -180,7 +180,7 @@ pub(crate) async fn run(
 
     // Ensure reused (non-pending) ready embeddings also exist as file cache.
     for photo in indexed_photos.iter() {
-        if photo.image_embedding_state != "ready" || photo.cache_id.is_empty() {
+        if !photo.image_embedding_state.is_ready() || photo.cache_id.is_empty() {
             continue;
         }
         let Some(vector) = indexed_embeddings
@@ -228,11 +228,11 @@ fn apply_embed_result(
     };
     match result {
         Ok(vector) => {
-            photo.image_embedding_state = "ready".to_string();
+            photo.image_embedding_state = AiItemState::Ready;
             indexed_embeddings.insert(embedding_key.to_string(), vector);
         }
         Err(error) => {
-            photo.image_embedding_state = "error".to_string();
+            photo.image_embedding_state = AiItemState::Error;
             photo.record_error = Some(error.to_string());
         }
     }

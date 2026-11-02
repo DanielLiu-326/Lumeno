@@ -19,7 +19,7 @@ use super::super::album_cache::{
     face_id, face_photo_cache_key, hints_from_clusters,
 };
 use super::super::faces::FACE_DETECTOR_REVISION;
-use super::super::models::{AiFaceRecord, AiIndexedPhotoRecord, LoadedOwnerIndex};
+use super::super::models::{AiFaceRecord, AiIndexedPhotoRecord, AiItemState, LoadedOwnerIndex};
 use super::super::people::ClusterFace;
 use super::super::pipeline::{ImageJob, ImagePipeline, PipelineConfig, progress_channel};
 use super::super::provider::AiInferenceProvider;
@@ -91,11 +91,11 @@ pub(crate) async fn run(
         if cancel.load(Ordering::Relaxed) {
             return Err(());
         }
-        if photo.face_embedding_state == "skipped" {
+        if photo.face_embedding_state == AiItemState::Skipped {
             continue;
         }
         if photo.cache_id.is_empty() {
-            photo.face_embedding_state = "error".to_string();
+            photo.face_embedding_state = AiItemState::Error;
             photo
                 .record_error
                 .get_or_insert_with(|| "cache_id missing for face detection".to_string());
@@ -115,7 +115,9 @@ pub(crate) async fn run(
                 // Backfill missing crops under face_id = hash(stable_key|box).
                 for entry in &cached.faces {
                     let fid = face_id(&photo.stable_key, &entry.box_xywh);
-                    let crop_path = cache.face_crop_path_by_id(&fid);
+                    let Some(crop_path) = cache.face_crop_path_by_id(&fid) else {
+                        continue;
+                    };
                     if let Err(error) = ensure_cached_face_crop(
                         &album_dir,
                         &crop_path,
@@ -133,7 +135,7 @@ pub(crate) async fn run(
                         );
                     }
                 }
-                photo.face_embedding_state = "ready".to_string();
+                photo.face_embedding_state = AiItemState::Ready;
                 let mut guard = collected.lock().unwrap_or_else(|e| e.into_inner());
                 for entry in cached.faces {
                     let Ok(vector) =
@@ -151,7 +153,7 @@ pub(crate) async fn run(
                             detection_score: entry.detection_score,
                             quality_score: entry.quality_score,
                             detector_revision: face_revision.clone(),
-                            embedding_state: "ready".to_string(),
+                            embedding_state: AiItemState::Ready,
                         },
                         embedding: vector,
                     });
@@ -166,7 +168,7 @@ pub(crate) async fn run(
             .cloned()
             .or_else(|| resolve_photo_path(cfg, photo))
         else {
-            photo.face_embedding_state = "error".to_string();
+            photo.face_embedding_state = AiItemState::Error;
             photo
                 .record_error
                 .get_or_insert_with(|| "photo path missing for face detection".to_string());
@@ -276,7 +278,7 @@ pub(crate) async fn run(
                                         detection_score: detected.detection_score,
                                         quality_score: detected.quality_score,
                                         detector_revision: face_revision_save.clone(),
-                                        embedding_state: "ready".to_string(),
+                                        embedding_state: AiItemState::Ready,
                                     },
                                     embedding: detected.embedding,
                                 });
@@ -309,16 +311,20 @@ pub(crate) async fn run(
                                     meta.stable_key
                                 );
                             } else {
-                                let crop_paths = crop_boxes
+                                // Keep box and path paired: an invalid id drops its own
+                                // box instead of shifting the rest.
+                                let crop_targets = crop_boxes
                                     .iter()
-                                    .map(|(fid, _)| cache.face_crop_path_by_id(fid))
+                                    .filter_map(|(fid, box_xywh)| {
+                                        cache
+                                            .face_crop_path_by_id(fid)
+                                            .map(|path| (*box_xywh, path))
+                                    })
                                     .collect::<Vec<_>>();
                                 if let Some(image) = image {
                                     let stable_key = meta.stable_key.clone();
                                     let write_result = tokio::task::spawn_blocking(move || {
-                                        for ((_fid, box_xywh), crop_path) in
-                                            crop_boxes.into_iter().zip(crop_paths)
-                                        {
+                                        for (box_xywh, crop_path) in crop_targets {
                                             write_cached_face_crop_from_image(
                                                 &image,
                                                 &crop_path,
@@ -337,9 +343,7 @@ pub(crate) async fn run(
                                         );
                                     }
                                 } else {
-                                    for ((_fid, box_xywh), crop_path) in
-                                        crop_boxes.into_iter().zip(crop_paths)
-                                    {
+                                    for (box_xywh, crop_path) in crop_targets {
                                         if let Err(error) = ensure_cached_face_crop(
                                             &meta.album_dir,
                                             &crop_path,
@@ -391,9 +395,9 @@ pub(crate) async fn run(
             .clone();
         for photo in indexed_photos.iter_mut() {
             match states.get(&photo.stable_key) {
-                Some(Ok(())) => photo.face_embedding_state = "ready".to_string(),
+                Some(Ok(())) => photo.face_embedding_state = AiItemState::Ready,
                 Some(Err(error)) => {
-                    photo.face_embedding_state = "error".to_string();
+                    photo.face_embedding_state = AiItemState::Error;
                     photo.record_error = Some(error.clone());
                 }
                 None => {}
@@ -500,7 +504,7 @@ async fn write_face_indexes(
 ) {
     let mut by_cache: HashMap<String, Vec<&AiIndexedPhotoRecord>> = HashMap::new();
     for photo in indexed_photos {
-        if photo.cache_id.is_empty() || photo.face_embedding_state == "skipped" {
+        if photo.cache_id.is_empty() || photo.face_embedding_state == AiItemState::Skipped {
             continue;
         }
         by_cache

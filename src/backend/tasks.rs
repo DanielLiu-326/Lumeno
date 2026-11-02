@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use axum::extract::Path;
 use axum::{Extension, Json};
 use function_name::named;
+use futures::FutureExt;
 use serde_json::{Value, json};
 use std::any::Any;
 use std::collections::HashMap;
@@ -62,6 +63,37 @@ pub enum TaskStatus {
     Finished,
     Cancelled,
     Failed,
+}
+
+impl TaskStatus {
+    /// Still expected to make progress: holds its deduplication key.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused
+        )
+    }
+
+    /// Will not run again: its deduplication key is free.
+    pub fn is_finished(self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Finished | TaskStatus::Failed | TaskStatus::Cancelled
+        )
+    }
+
+    /// The wire value used by `status()`. Unknown numbers are not a task state.
+    pub fn from_raw(value: u64) -> Option<Self> {
+        Some(match value {
+            0 => TaskStatus::Pending,
+            1 => TaskStatus::Running,
+            2 => TaskStatus::Paused,
+            3 => TaskStatus::Finished,
+            4 => TaskStatus::Cancelled,
+            5 => TaskStatus::Failed,
+            _ => return None,
+        })
+    }
 }
 
 pub struct TaskBase {
@@ -186,10 +218,7 @@ impl TaskManager {
         let mut finished = Vec::new();
         for (k, v) in tasks.iter() {
             let status = *v.base().status.lock().await;
-            if matches!(
-                status,
-                TaskStatus::Finished | TaskStatus::Failed | TaskStatus::Cancelled
-            ) {
+            if status.is_finished() {
                 finished.push(*k);
             }
         }
@@ -200,14 +229,38 @@ impl TaskManager {
         }
     }
 
+    /// Run the task on its own Tokio task, turning a panic into a Failed status.
+    ///
+    /// Without this a panicking task keeps its `Running` status forever, so the
+    /// dedup key never frees and the UI shows the job as still in progress.
+    fn spawn_task(task: Arc<dyn Task>) {
+        tokio::spawn(async move {
+            let base = task.base();
+            let outcome = std::panic::AssertUnwindSafe(task.execute())
+                .catch_unwind()
+                .await;
+            if let Err(payload) = outcome {
+                let detail = payload
+                    .downcast_ref::<&str>()
+                    .map(|text| text.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                eprintln!("task {} panicked: {}", base.name, detail);
+                let status = *base.status.lock().await;
+                if status.is_active() {
+                    base.set_error_msg(detail).await;
+                    base.set_status(TaskStatus::Failed).await;
+                }
+            }
+        });
+    }
+
     pub async fn add_task(&self, task: Arc<dyn Task>) {
         let mut tasks = self.task_set.lock().await;
         Self::evict_finished_tasks(&mut tasks).await;
         tasks.insert(task.uuid(), task.clone());
         drop(tasks);
-        tokio::spawn(async move {
-            task.execute().await;
-        });
+        Self::spawn_task(task);
     }
 
     pub async fn add_task_if_absent(&self, task: Arc<dyn Task>) -> (Uuid, bool) {
@@ -224,10 +277,7 @@ impl TaskManager {
                 continue;
             }
             let status = *existing.base().status.lock().await;
-            if matches!(
-                status,
-                TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused
-            ) {
+            if status.is_active() {
                 return (existing.uuid(), false);
             }
         }
@@ -235,10 +285,26 @@ impl TaskManager {
         let id = task.uuid();
         tasks.insert(id, task.clone());
         drop(tasks);
-        tokio::spawn(async move {
-            task.execute().await;
-        });
+        Self::spawn_task(task);
         (id, true)
+    }
+
+    /// Any active task whose deduplication key starts with `prefix`.
+    pub async fn has_active_key_prefix(&self, prefix: &str) -> bool {
+        let tasks = self.task_set.lock().await;
+        for existing in tasks.values() {
+            let Some(key) = existing.deduplication_key() else {
+                continue;
+            };
+            if !key.starts_with(prefix) {
+                continue;
+            }
+            let status = *existing.base().status.lock().await;
+            if status.is_active() {
+                return true;
+            }
+        }
+        false
     }
 
     pub async fn has_active_key(&self, key: &str) -> bool {
@@ -248,10 +314,7 @@ impl TaskManager {
                 continue;
             }
             let status = *existing.base().status.lock().await;
-            if matches!(
-                status,
-                TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused
-            ) {
+            if status.is_active() {
                 return true;
             }
         }
@@ -470,4 +533,100 @@ pub async fn api_resume_task(
     task.resume(json!({})).await;
     let message = tr(locale.as_str(), "response.success");
     Ok(create_response(true, &message, 0, None))
+}
+
+#[cfg(test)]
+mod panic_tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct PanicTask {
+        base: TaskBase,
+    }
+
+    #[async_trait]
+    impl Task for PanicTask {
+        fn base(&self) -> &TaskBase {
+            &self.base
+        }
+
+        fn deduplication_key(&self) -> Option<String> {
+            Some(format!("panic-test:{}", self.base.owner))
+        }
+
+        async fn execute(&self) {
+            panic!("boom");
+        }
+
+        async fn cancel(&self) {}
+    }
+
+    #[tokio::test]
+    async fn a_panicking_task_ends_failed_and_frees_its_key() {
+        let manager = TaskManager::default();
+        let task = Arc::new(PanicTask {
+            base: TaskBase::new("panic".to_string(), "alice".to_string()),
+        });
+        manager.add_task(task.clone()).await;
+
+        let mut status = TaskStatus::Running;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = *task.base.status.lock().await;
+            if status == TaskStatus::Failed {
+                break;
+            }
+        }
+        assert_eq!(status, TaskStatus::Failed);
+        assert_eq!(
+            task.base.error_msg.lock().await.as_deref(),
+            Some("boom"),
+            "the panic message is kept for the task list"
+        );
+        assert!(
+            !manager.has_active_key("panic-test:alice").await,
+            "a failed task must not hold its dedup key"
+        );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::TaskStatus;
+
+    #[test]
+    fn wire_values_round_trip_and_unknown_values_are_rejected() {
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::Running,
+            TaskStatus::Paused,
+            TaskStatus::Finished,
+            TaskStatus::Cancelled,
+            TaskStatus::Failed,
+        ] {
+            assert_eq!(TaskStatus::from_raw(status as u64), Some(status));
+        }
+        assert_eq!(TaskStatus::from_raw(6), None);
+        assert_eq!(TaskStatus::from_raw(u64::MAX), None);
+    }
+
+    #[test]
+    fn active_and_finished_partition_every_state() {
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::Running,
+            TaskStatus::Paused,
+            TaskStatus::Finished,
+            TaskStatus::Cancelled,
+            TaskStatus::Failed,
+        ] {
+            assert_ne!(
+                status.is_active(),
+                status.is_finished(),
+                "{status:?} must be exactly one of active/finished"
+            );
+        }
+        assert!(TaskStatus::Paused.is_active());
+        assert!(TaskStatus::Failed.is_finished());
+    }
 }

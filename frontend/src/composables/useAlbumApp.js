@@ -1,8 +1,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { formatSize, formatTime, progressPercent, statusLabel, statusTone } from "../utils/format";
 import { locale, setLocale, t } from "../i18n/index.js";
+import { httpJson, setUnauthorizedHandler } from "../utils/http";
 import { compareRelativePaths, encodePath, joinPath, prettyPath, normalizeBrowsePath } from "../utils/path";
 import { compileAlbumFilterClauses, loadFilterItemsFromStorage, partitionFilterClauses } from "../utils/filterDefs.js";
+import { useStorageManager } from "./useStorageManager.js";
 import { defaultWallpaper, normalizeWallpaper } from "../utils/wallpaper.js";
 import { defaultAccent, loadCachedAccent, normalizeAccent } from "../utils/accent.js";
 import { downloadFileByUrl } from "../utils/downloadFile.js";
@@ -181,35 +183,16 @@ export function useAlbumApp() {
     }
 
     async function apiFetch(url, options = {}) {
-        const headers = {
-            "Accept-Language": locale.value,
-            ...(options.headers || {}),
-        };
-        const response = await fetch(url, {
-            credentials: "include",
-            headers,
-            ...options,
-        });
-
-        const contentType = response.headers.get("content-type") || "";
-        if (contentType.includes("application/json")) {
-            const payload = await response.json();
-            if (!payload.success) {
-                const error = new Error(payload.message || t("msg.requestFailed"));
-                error.status = response.status;
-                throw error;
-            }
-            return payload;
-        }
-
-        if (!response.ok) {
-            const error = new Error(`HTTP ${response.status}`);
-            error.status = response.status;
-            throw error;
-        }
-
-        return response;
+        return httpJson(url, options, t("msg.requestFailed"));
     }
+
+    // One place reacts to an expired session: every request goes through the
+    // shared client, so a 401 from any component lands here.
+    setUnauthorizedHandler(() => {
+        if (!loggedIn.value) return;
+        loggedIn.value = false;
+        stopTaskPolling();
+    });
 
     let dashboardSeq = 0;
 
@@ -229,6 +212,14 @@ export function useAlbumApp() {
             if (seq === dashboardSeq) dashboardLoading.value = false;
         }
     }
+
+    const storage = useStorageManager({
+        apiFetch,
+        isLoggedIn: () => loggedIn.value,
+        showMessage: setMessage,
+        refreshTasks,
+        ensureTaskPolling,
+    });
 
     async function login() {
         if (!loginForm.username || !loginForm.passphrase) {
@@ -1495,11 +1486,10 @@ export function useAlbumApp() {
         return String(input.dirName || input.dir_name || input.album || "");
     }
 
+    /// Open one album and start its photo load. Animation timing belongs to the
+    /// view that runs it, so nothing here waits for a transition to finish.
     async function selectAlbum(input) {
         const dirName = albumDirName(input);
-        const deferMs = typeof input === "object" && input && Number.isFinite(Number(input.deferMs))
-            ? Math.max(0, Number(input.deferMs))
-            : 0;
 
         currentAlbum.value = dirName;
         albumViewMode.value = "photos";
@@ -1529,9 +1519,6 @@ export function useAlbumApp() {
         try {
             // Let FilterSidebar hydrate against this album (no photo request yet).
             await nextTick();
-            if (deferMs > 0) {
-                await new Promise((resolve) => setTimeout(resolve, deferMs));
-            }
             if (openId !== albumPhotosFetchId || currentAlbum.value !== dirName) return;
 
             void fetchDateHistogram();
@@ -1634,7 +1621,7 @@ export function useAlbumApp() {
     }
 
     async function fetchFilesForPicker(path) {
-        const encoded = path ? encodeURIComponent(path).replace(/%2F/g, "/") : "";
+        const encoded = encodePath(path);
         const url = encoded ? `/api/list_files/${encoded}` : "/api/list_files/";
         const payload = await apiFetch(`${url}?limit=0`);
         return payload.data || { items: [], total_count: 0 };
@@ -1702,13 +1689,13 @@ export function useAlbumApp() {
         }
     }
 
-    async function rebuildAlbumIndex() {
-        if (!currentAlbum.value) return;
+    async function rebuildAlbumIndex(album = currentAlbum.value) {
+        if (!album) return;
         try {
             const payload = await apiFetch("/api/albums/rebuild_index", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ album: currentAlbum.value }),
+                body: JSON.stringify({ album }),
             });
             const created = payload.data?.created !== false;
             setMessage(created ? t("msg.rebuildIndexTaskCreated") : t("msg.rebuildIndexTaskAlreadyRunning"));
@@ -2255,6 +2242,7 @@ export function useAlbumApp() {
         albumViewMode.value = "photos";
         dashboard.value = null;
         dashboardError.value = "";
+        storage.reset();
         stopTaskPolling();
         entries.value = [];
         tasks.value = [];
@@ -2415,6 +2403,24 @@ export function useAlbumApp() {
         dashboard,
         dashboardError,
         dashboardLoading,
+        storageReport: storage.report,
+        storageLoading: storage.loading,
+        storageError: storage.error,
+        storageStale: storage.stale,
+        storageScanning: storage.scanning,
+        storageCleaning: storage.cleaning,
+        storageOwner: storage.owner,
+        storageMembers: storage.members,
+        storageSharedCache: storage.sharedCache,
+        storageMembersLoading: storage.membersLoading,
+        storageMembersError: storage.membersError,
+        loadStorageMembers: storage.loadMembers,
+        viewStorageOwner: storage.viewOwner,
+        scanAllStorageMembers: storage.scanAll,
+        refreshStorageReport: storage.refresh,
+        startStorageScan: storage.scan,
+        startStorageScanFor: (owner) => storage.scan(owner),
+        startStorageCleanup: storage.cleanup,
         userLocale,
         cutSelected,
         deleteAlbum,

@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, text};
+use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::exec::Frame;
 use crate::grade::field::{self, FieldSpec};
@@ -47,8 +47,8 @@ impl NodeParam for Crop {
         json!({ "x": self.x, "y": self.y, "w": self.w, "h": self.h })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -111,8 +111,7 @@ impl Node for Crop {
 }
 
 impl Crop {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "x",
@@ -132,7 +131,7 @@ impl Crop {
             ),
             field::slider(
                 "w",
-                text(zh, "Width", "宽度"),
+                "grade.field.width",
                 self.w,
                 0.05,
                 1.0,
@@ -140,7 +139,7 @@ impl Crop {
             ),
             field::slider(
                 "h",
-                text(zh, "Height", "高度"),
+                "grade.field.height",
                 self.h,
                 0.05,
                 1.0,

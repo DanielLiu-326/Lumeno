@@ -68,9 +68,9 @@ impl SettingsManager {
             changed = obj.get(key) != Some(&value);
             obj.insert(key.to_owned(), value);
         }
+        self.save_to_disk(&locked);
         let settings = locked.clone();
         drop(locked);
-        self.save_to_disk(&settings);
         if changed {
             self.notify_change(vec![key.to_owned()], settings);
         }
@@ -87,9 +87,9 @@ impl SettingsManager {
                 target.insert(k.clone(), v.clone());
             }
         }
+        self.save_to_disk(&locked);
         let settings = locked.clone();
         drop(locked);
-        self.save_to_disk(&settings);
         if !changed_keys.is_empty() {
             self.notify_change(changed_keys, settings);
         }
@@ -142,6 +142,34 @@ impl SettingsManager {
             .and_then(|v| v.as_u64())
             .map(|n| (n as usize).max(1).min(32))
             .unwrap_or(3)
+    }
+
+    pub fn thumbnail_format_from(settings: &Value) -> String {
+        let value = settings
+            .get("thumbnail_format")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or("avif");
+        match value {
+            "avif" | "jpeg" | "webp" => value.to_string(),
+            _ => "avif".to_string(),
+        }
+    }
+
+    pub async fn thumbnail_format(&self) -> String {
+        Self::thumbnail_format_from(&*self.settings.lock().await)
+    }
+
+    pub fn thumbnail_quality_from(settings: &Value) -> u8 {
+        settings
+            .get("thumbnail_quality")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as u8).clamp(1, 100))
+            .unwrap_or(85)
+    }
+
+    pub async fn thumbnail_quality(&self) -> u8 {
+        Self::thumbnail_quality_from(&*self.settings.lock().await)
     }
 
     pub fn darktable_concurrency_from(settings: &Value) -> usize {
@@ -291,15 +319,20 @@ impl SettingsManager {
         })
     }
 
+    /// Caller holds the settings lock: snapshot order and write order match, so a
+    /// straggling write cannot resurrect an older settings file.
     fn save_to_disk(&self, settings: &Value) {
-        let path = self.persist_path.clone();
-        let data = serde_json::to_string_pretty(settings).unwrap_or_default();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        match serde_json::to_vec_pretty(settings) {
+            Ok(data) => {
+                if let Err(error) =
+                    crate::backend::common::write_file_atomic(&self.persist_path, &data)
+                {
+                    eprintln!("failed to persist settings: {error}");
+                }
             }
-            let _ = std::fs::write(&path, data);
-        });
+            // Never replace a good file with an empty one.
+            Err(error) => eprintln!("failed to serialize settings: {error}"),
+        }
     }
 
     pub fn clamp_ai_settings(settings: &mut Value) {
@@ -390,15 +423,9 @@ pub async fn api_settings_update(
     Extension(cfg): Extension<Arc<AppState>>,
     Json(payload): Json<UpdateSettingsPayload>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    if session.role != Role::Admin {
-        return Err(AppError::Forbidden(tr(
-            locale.as_str(),
-            "error.admin_only_settings",
-        )));
-    }
+    let _session = cfg
+        .require_admin(&token, locale.as_str(), "error.admin_only_settings")
+        .await?;
     let mut settings = payload.settings;
     SettingsManager::clamp_ai_settings(&mut settings);
     if let Err(error) = super::ai::validate_ai_settings_update(&settings) {
@@ -419,15 +446,9 @@ pub async fn api_thumbnail_scan_now(
     token: Token,
     Extension(cfg): Extension<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    if session.role != Role::Admin {
-        return Err(AppError::Forbidden(tr(
-            locale.as_str(),
-            "error.admin_only_settings",
-        )));
-    }
+    let _session = cfg
+        .require_admin(&token, locale.as_str(), "error.admin_only_settings")
+        .await?;
     super::album::queue_background_thumbnail_tasks(&cfg).await;
     Ok(create_response(
         true,
@@ -553,12 +574,7 @@ pub async fn api_password_update(
     Extension(cfg): Extension<Arc<AppState>>,
     Json(payload): Json<UpdatePasswordPayload>,
 ) -> Result<Json<Value>, AppError> {
-    if !rate_limiter.check(addr.ip()).await {
-        return Err(AppError::BadRequest(tr(
-            locale.as_str(),
-            "error.rate_limited",
-        )));
-    }
+    rate_limiter.check_for(addr.ip(), locale.as_str()).await?;
     let Some(username) = cfg.get_username(&token).await else {
         return Err(AppError::unauthorized(locale.as_str()));
     };
@@ -588,15 +604,13 @@ pub async fn api_admin_users_get(
     token: Token,
     Extension(cfg): Extension<Arc<AppState>>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    if session.role != Role::Admin {
-        return Err(AppError::Forbidden(tr(
+    let session = cfg
+        .require_admin(
+            &token,
             locale.as_str(),
             "error.admin_only_member_management",
-        )));
-    }
+        )
+        .await?;
 
     let users = cfg.user_manager.list_users().await;
     let message = tr(locale.as_str(), "response.ok");
@@ -614,15 +628,13 @@ pub async fn api_admin_users_update(
     Extension(cfg): Extension<Arc<AppState>>,
     Json(payload): Json<UpdateMemberPayload>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    if session.role != Role::Admin {
-        return Err(AppError::Forbidden(tr(
+    let session = cfg
+        .require_admin(
+            &token,
             locale.as_str(),
             "error.admin_only_member_management",
-        )));
-    }
+        )
+        .await?;
 
     let target_username = payload.username.trim().to_owned();
     if !cfg.user_manager.user_exists(&target_username).await {
@@ -694,15 +706,13 @@ pub async fn api_admin_users_delete(
     Extension(cfg): Extension<Arc<AppState>>,
     Json(payload): Json<DeleteMemberPayload>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    if session.role != Role::Admin {
-        return Err(AppError::Forbidden(tr(
+    let session = cfg
+        .require_admin(
+            &token,
             locale.as_str(),
             "error.admin_only_member_management",
-        )));
-    }
+        )
+        .await?;
 
     let target = payload.username.trim().to_owned();
     if target == session.username {
@@ -771,15 +781,13 @@ pub async fn api_admin_reset_password(
     Extension(cfg): Extension<Arc<AppState>>,
     Json(payload): Json<ResetPasswordPayload>,
 ) -> Result<Json<Value>, AppError> {
-    let Some(session) = cfg.get_session_info(&token).await else {
-        return Err(AppError::unauthorized(locale.as_str()));
-    };
-    if session.role != Role::Admin {
-        return Err(AppError::Forbidden(tr(
+    let session = cfg
+        .require_admin(
+            &token,
             locale.as_str(),
             "error.admin_only_member_management",
-        )));
-    }
+        )
+        .await?;
 
     let target = payload.username.trim().to_owned();
     if !cfg.user_manager.user_exists(&target).await {
@@ -1247,6 +1255,8 @@ pub async fn api_webdav_shares_update(
 /// WebDAV request handler — serves `/dav/{username}/{path}` using dav-server
 /// with HTTP Basic Auth. Each request is authenticated against the user store.
 pub async fn api_webdav_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(rate_limiter): Extension<RateLimiter>,
     Extension(cfg): Extension<Arc<AppState>>,
     req: axum::extract::Request,
 ) -> axum::response::Response<dav_server::body::Body> {
@@ -1268,6 +1278,29 @@ pub async fn api_webdav_handler(
             .body(dav_server::body::Body::empty())
             .unwrap()
     };
+
+    let forbidden = || {
+        axum::http::Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(dav_server::body::Body::empty())
+            .unwrap()
+    };
+
+    let too_many = || {
+        axum::http::Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Retry-After", "60")
+            .body(dav_server::body::Body::empty())
+            .unwrap()
+    };
+
+    // Read-only shares must not reach the filesystem at all for these. Compared as
+    // text because the `http` crate has no constants for WebDAV methods.
+    let method = req.method().as_str().to_ascii_uppercase();
+    let mutating = !matches!(
+        method.as_str(),
+        "GET" | "HEAD" | "OPTIONS" | "PROPFIND" | "REPORT"
+    );
 
     // Extract Basic Auth credentials
     let auth_header = req
@@ -1294,6 +1327,11 @@ pub async fn api_webdav_handler(
 
     // Parse /dav/{username}/{share_path}/... from URI
     let uri_path = req.uri().path().to_string();
+    // dav-server decodes and joins request paths; refuse traversal segments before
+    // it gets a chance to step outside the share root.
+    if uri_path.split('/').any(is_dot_segment) {
+        return not_found();
+    }
     let stripped = uri_path.trim_start_matches("/dav/");
     let segments: Vec<&str> = stripped.splitn(2, '/').collect();
     let target_user = segments.first().unwrap_or(&"");
@@ -1319,33 +1357,157 @@ pub async fn api_webdav_handler(
         return not_found();
     };
 
-    // Authenticate: skip if share allows anonymous access
-    if !share.anonymous {
-        let authenticated = if let Some((ref user, ref pass)) = credentials {
-            if user == *target_user {
+    // Authenticate. Anonymous shares are read-only: writes always need credentials,
+    // and the password check is rate limited on failure so `/dav` cannot be used to
+    // spray guesses (argon2 is deliberately expensive).
+    let authenticated = match &credentials {
+        Some((user, pass)) => {
+            if rate_limiter.is_limited(addr.ip()).await {
+                return too_many();
+            }
+            // A wrong username fails without touching argon2 but still counts, so
+            // it cannot be used to probe accounts.
+            let ok = if *user == *target_user {
                 let prehashed = cfg.prehash_passphrase(pass);
                 cfg.user_manager.login(user, &prehashed).await
             } else {
                 false
+            };
+            if !ok {
+                rate_limiter.record_failure(addr.ip()).await;
             }
-        } else {
-            false
-        };
-
-        if !authenticated {
-            return unauthorized();
+            ok
         }
+        None => false,
+    };
+
+    match webdav_access(mutating, share.anonymous, share.readonly, authenticated) {
+        WebDavAccess::Allow => {}
+        WebDavAccess::Unauthorized => return unauthorized(),
+        WebDavAccess::Forbidden => return forbidden(),
     }
 
-    // Build the LocalFs root at the share's directory
-    let fs_root = cfg.data_path.join(&share.username).join(&share.path);
-    let is_readonly = share.readonly;
+    // Build the LocalFs root at the share's directory. Shares are re-validated here
+    // because `webdav_shares.json` is just a file on disk.
+    let user_root = cfg.data_path.join(&share.username);
+    let Ok(fs_root) = super::common::into_host_path_safely(&user_root, &share.path) else {
+        return not_found();
+    };
+    if !fs_root.is_dir() {
+        return not_found();
+    }
 
     let dav = DavHandler::builder()
-        .filesystem(LocalFs::new(&fs_root, false, !is_readonly, false))
+        .filesystem(LocalFs::new(&fs_root, false, false, false))
         .locksystem(FakeLs::new())
         .strip_prefix(&format!("/dav/{}/{}", share.username, share.path))
         .build_handler();
 
     dav.handle(req).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WebDavAccess {
+    Allow,
+    Unauthorized,
+    Forbidden,
+}
+
+/// Who may do what on a share.
+///
+/// * anonymous access only ever grants reads;
+/// * a read-only share refuses every mutating method for everyone;
+/// * an unauthenticated write asks for credentials first (401) instead of
+///   revealing whether the share would have allowed it.
+fn webdav_access(
+    mutating: bool,
+    anonymous_allowed: bool,
+    readonly: bool,
+    authenticated: bool,
+) -> WebDavAccess {
+    if !authenticated && (!anonymous_allowed || mutating) {
+        return WebDavAccess::Unauthorized;
+    }
+    if mutating && readonly {
+        return WebDavAccess::Forbidden;
+    }
+    WebDavAccess::Allow
+}
+
+/// `.`, `..`, and encoded spellings that decode into a path separator.
+///
+/// A decoded segment can never legitimately contain `/`, `\` or NUL, so treating
+/// those as traversal refuses `%2e%2e%2fetc` before dav-server joins paths.
+fn is_dot_segment(segment: &str) -> bool {
+    if segment.is_empty() {
+        return false;
+    }
+    let decoded = percent_encoding::percent_decode_str(segment)
+        .decode_utf8_lossy()
+        .to_string();
+    decoded == "." || decoded == ".." || decoded.contains(['/', '\\', '\0'])
+}
+
+#[cfg(test)]
+mod webdav_path_tests {
+    use super::is_dot_segment;
+
+    #[test]
+    fn refuses_dot_and_encoded_separator_segments() {
+        for bad in [
+            "..",
+            ".",
+            "%2e%2e",
+            "%2E%2E",
+            "%2e%2e%2fetc",
+            "a%2fb",
+            "a%5cb",
+            "a%00b",
+        ] {
+            assert!(is_dot_segment(bad), "accepted {bad:?}");
+        }
+        for ok in ["", "a.jpg", "100%", "%20space"] {
+            assert!(!is_dot_segment(ok), "rejected {ok:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod webdav_access_tests {
+    use super::{WebDavAccess, webdav_access};
+
+    #[test]
+    fn read_only_shares_refuse_writes_for_everyone() {
+        assert_eq!(webdav_access(false, false, true, true), WebDavAccess::Allow);
+        assert_eq!(
+            webdav_access(true, false, true, true),
+            WebDavAccess::Forbidden
+        );
+        assert_eq!(
+            webdav_access(true, true, true, false),
+            WebDavAccess::Unauthorized
+        );
+    }
+
+    #[test]
+    fn anonymous_never_counts_as_a_writer() {
+        assert_eq!(
+            webdav_access(false, true, false, false),
+            WebDavAccess::Allow
+        );
+        assert_eq!(
+            webdav_access(true, true, false, false),
+            WebDavAccess::Unauthorized
+        );
+        assert_eq!(webdav_access(true, true, false, true), WebDavAccess::Allow);
+    }
+
+    #[test]
+    fn authenticated_writes_need_a_writable_non_anonymous_contract() {
+        assert_eq!(webdav_access(true, false, false, true), WebDavAccess::Allow);
+        assert_eq!(
+            webdav_access(true, false, false, false),
+            WebDavAccess::Unauthorized
+        );
+    }
 }

@@ -44,7 +44,8 @@ impl AiProviderKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AiCapabilities {
     pub image_search: bool,
     pub text_search: bool,

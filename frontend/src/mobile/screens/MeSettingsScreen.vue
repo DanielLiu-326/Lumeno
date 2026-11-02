@@ -2,6 +2,7 @@
 import { computed, inject, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import SettingsPanel from "../../components/SettingsPanel.vue";
+import StoragePanel from "../../components/StoragePanel.vue";
 import { t } from "../../i18n/index.js";
 import { IconArrowLeft } from "../../utils/icons";
 import { ALBUM_APP_KEY, MOBILE_UI_KEY } from "../context.js";
@@ -94,6 +95,32 @@ function goBack() {
       @preview-accent="app.previewAccent"
       @delete-member="app.deleteMember"
       @reset-member-password="({ username, new_password }) => app.resetMemberPassword(username, new_password)"
-    />
+    >
+      <template #storage>
+        <StoragePanel
+          embedded
+          :is-dark="ui.isDark"
+          :report="app.storageReport"
+          :loading="app.storageLoading"
+          :error="app.storageError"
+          :stale="app.storageStale"
+          :scanning="app.storageScanning"
+          :cleaning="app.storageCleaning"
+          :is-admin="app.isAdmin"
+          :members="app.storageMembers"
+          :members-loading="app.storageMembersLoading"
+          :shared-cache="app.storageSharedCache"
+          :viewing-owner="app.storageOwner"
+          :on-view-member="app.viewStorageOwner"
+          :on-scan-member="(owner) => app.startStorageScanFor(owner)"
+          :on-scan-all="app.scanAllStorageMembers"
+          :on-load-members="app.loadStorageMembers"
+          :on-refresh="app.refreshStorageReport"
+          :on-scan="app.startStorageScan"
+          :on-cleanup="app.startStorageCleanup"
+          :on-rebuild-index="app.rebuildAlbumIndex"
+        />
+      </template>
+    </SettingsPanel>
   </Screen>
 </template>

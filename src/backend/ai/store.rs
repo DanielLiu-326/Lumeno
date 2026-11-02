@@ -1,4 +1,3 @@
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -7,8 +6,10 @@ use uuid::Uuid;
 
 use super::faces::FACE_DETECTOR_REVISION;
 use super::models::{
-    AiFaceRecord, AiIndexedAlbumSummary, AiIndexedPhotoRecord, LoadedOwnerIndex,
-    NormalizedAiIndexRequest, OwnerIndexStatus, StoredAiGenerationManifest,
+    AiFaceRecord, AiGenerationStats, AiIndexedAlbumSummary, AiIndexedPhotoRecord, AiItemState,
+    LoadedOwnerIndex, NormalizedAiIndexRequest, OwnerIndexStatus, StoredAiEmbeddingInfo,
+    StoredAiGenerationFiles, StoredAiGenerationManifest, StoredAiGenerationProvider,
+    StoredAiGenerationSource,
 };
 use super::provider::{AiCapabilities, AiProviderHealth};
 
@@ -47,12 +48,12 @@ fn photo_record_from_stable_key(
         width: None,
         height: None,
         provider_revision,
-        scan_state: "reused".to_string(),
-        image_embedding_state: "pending".to_string(),
-        duplicate_hash_state: "skipped".to_string(),
+        scan_state: AiItemState::Reused,
+        image_embedding_state: AiItemState::Pending,
+        duplicate_hash_state: AiItemState::Skipped,
         duplicate_phash_u64: None,
         duplicate_phash_valid: false,
-        face_embedding_state: "pending".to_string(),
+        face_embedding_state: AiItemState::Pending,
         reused_from_generation: None,
         record_error: None,
         indexed_at_unix_ms: 0,
@@ -137,28 +138,16 @@ impl FileAiIndexStore {
             .map_err(|error| format!("purge ai index for {owner} failed: {error}"))
     }
 
-    pub fn owner_has_current_index(&self, owner: &str) -> bool {
-        !self.list_album_cache_ids(owner).is_empty()
+    pub async fn owner_has_current_index(&self, owner: &str) -> bool {
+        !self.list_album_cache_ids_async(owner).await.is_empty()
     }
 
-    pub(crate) fn list_album_cache_ids(&self, owner: &str) -> Vec<String> {
-        let albums_root = self.owner_dir(owner).join("albums");
-        let Ok(entries) = std::fs::read_dir(albums_root) else {
-            return Vec::new();
+    /// Whether the directory exists and holds at least one entry.
+    async fn dir_has_entry_async(dir: &Path) -> bool {
+        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+            return false;
         };
-        let mut ids = entries
-            .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .filter(|entry| {
-                let path = entry.path();
-                path.join("CURRENT").exists()
-                    || Self::dir_has_json(&path.join("embeddings"))
-                    || Self::dir_has_json(&path.join("faces"))
-            })
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-        ids.sort();
-        ids
+        entries.next_entry().await.ok().flatten().is_some()
     }
 
     pub(crate) async fn list_album_cache_ids_async(&self, owner: &str) -> Vec<String> {
@@ -189,14 +178,6 @@ impl FileAiIndexStore {
         ids
     }
 
-    fn dir_has_json(dir: &Path) -> bool {
-        std::fs::read_dir(dir).is_ok_and(|entries| {
-            entries.flatten().any(|entry| {
-                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
-            })
-        })
-    }
-
     async fn dir_has_json_async(dir: &Path) -> bool {
         let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
             return false;
@@ -209,23 +190,12 @@ impl FileAiIndexStore {
         false
     }
 
-    fn read_current_generation(dir: &Path) -> Option<String> {
-        std::fs::read_to_string(dir.join("CURRENT"))
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-
     async fn read_current_generation_async(dir: &Path) -> Option<String> {
         tokio::fs::read_to_string(dir.join("CURRENT"))
             .await
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-    }
-
-    pub(crate) fn current_album_generation(&self, owner: &str, cache_id: &str) -> Option<String> {
-        Self::read_current_generation(&self.album_dir(owner, cache_id))
     }
 
     pub(crate) async fn current_album_generation_async(
@@ -422,7 +392,7 @@ impl FileAiIndexStore {
         };
         record.width = width;
         record.height = height;
-        record.image_embedding_state = "ready".to_string();
+        record.image_embedding_state = AiItemState::Ready;
         record.photo_id = photos.len();
         let embedding_key = record.embedding_key();
         embeddings.insert(embedding_key, vector);
@@ -453,8 +423,8 @@ impl FileAiIndexStore {
                 ) {
                     record.width = file.width;
                     record.height = file.height;
-                    record.face_embedding_state = "ready".to_string();
-                    record.image_embedding_state = "skipped".to_string();
+                    record.face_embedding_state = AiItemState::Ready;
+                    record.image_embedding_state = AiItemState::Skipped;
                     record.photo_id = photos.len();
                     photos.insert(record.stable_key.clone(), record);
                 }
@@ -470,7 +440,7 @@ impl FileAiIndexStore {
                 if photo.height.is_none() {
                     photo.height = file.height;
                 }
-                photo.face_embedding_state = "ready".to_string();
+                photo.face_embedding_state = AiItemState::Ready;
             }
             for entry in file.faces {
                 let Ok(vector) = entry.decode_embedding() else {
@@ -485,7 +455,7 @@ impl FileAiIndexStore {
                     detection_score: entry.detection_score,
                     quality_score: entry.quality_score,
                     detector_revision: file.detector_revision.clone().unwrap_or_default(),
-                    embedding_state: "ready".to_string(),
+                    embedding_state: AiItemState::Ready,
                 };
                 faces_by_stable_key
                     .entry(file.stable_key.clone())
@@ -512,12 +482,13 @@ impl FileAiIndexStore {
         self.load_albums_index_async(owner, &cache_ids, true).await
     }
 
-    pub fn owner_status(&self, owner: &str) -> OwnerIndexStatus {
+    pub async fn owner_status(&self, owner: &str) -> OwnerIndexStatus {
         let owner_root = self.owner_dir(owner);
-        let cache_ids = self.list_album_cache_ids(owner);
-        let current_generation = cache_ids
-            .first()
-            .and_then(|cache_id| self.current_album_generation(owner, cache_id));
+        let cache_ids = self.list_album_cache_ids_async(owner).await;
+        let mut current_generation = None;
+        if let Some(cache_id) = cache_ids.first() {
+            current_generation = self.current_album_generation_async(owner, cache_id).await;
+        }
         let mut manifest_present = false;
         let mut embeddings_present = false;
         let mut duplicates_index_present = false;
@@ -526,17 +497,21 @@ impl FileAiIndexStore {
         let mut stats = None;
         for cache_id in &cache_ids {
             let album_root = self.album_dir(owner, cache_id);
-            embeddings_present |= album_root.join("embeddings").is_dir()
-                && std::fs::read_dir(album_root.join("embeddings"))
-                    .map(|mut d| d.next().is_some())
+            embeddings_present |= Self::dir_has_entry_async(&album_root.join("embeddings")).await;
+            duplicates_index_present |=
+                tokio::fs::metadata(album_root.join("duplicates_index.json"))
+                    .await
+                    .map(|meta| meta.is_file())
                     .unwrap_or(false);
-            duplicates_index_present |= album_root.join("duplicates_index.json").is_file();
-            let Some(generation) = self.current_album_generation(owner, cache_id) else {
+            let Some(generation) = self.current_album_generation_async(owner, cache_id).await
+            else {
                 continue;
             };
             let generation_dir = album_root.join("generations").join(generation);
-            manifest_present |= generation_dir.join("manifest.json").exists();
-            if let Some(manifest) = std::fs::read_to_string(generation_dir.join("manifest.json"))
+            let manifest_path = generation_dir.join("manifest.json");
+            manifest_present |= tokio::fs::try_exists(&manifest_path).await.unwrap_or(false);
+            if let Some(manifest) = tokio::fs::read_to_string(&manifest_path)
+                .await
                 .ok()
                 .and_then(|raw| serde_json::from_str::<StoredAiGenerationManifest>(&raw).ok())
             {
@@ -549,7 +524,7 @@ impl FileAiIndexStore {
         }
         OwnerIndexStatus {
             owner: owner.to_string(),
-            root_exists: owner_root.exists(),
+            root_exists: tokio::fs::try_exists(&owner_root).await.unwrap_or(false),
             current_generation,
             manifest_present,
             embeddings_present,
@@ -594,23 +569,23 @@ impl FileAiIndexStore {
 
         let photos_reused = indexed_photos
             .iter()
-            .filter(|photo| photo.scan_state == "reused")
+            .filter(|photo| photo.scan_state == AiItemState::Reused)
             .count();
         let image_embeddings_pending = indexed_photos
             .iter()
-            .filter(|photo| photo.image_embedding_state == "pending")
+            .filter(|photo| photo.image_embedding_state == AiItemState::Pending)
             .count();
         let image_embeddings_ready = indexed_photos
             .iter()
-            .filter(|photo| photo.image_embedding_state == "ready")
+            .filter(|photo| photo.image_embedding_state.is_ready())
             .count();
         let duplicate_hashes_pending = indexed_photos
             .iter()
-            .filter(|photo| photo.duplicate_hash_state == "pending")
+            .filter(|photo| photo.duplicate_hash_state == AiItemState::Pending)
             .count();
         let face_embeddings_pending = indexed_photos
             .iter()
-            .filter(|photo| photo.face_embedding_state == "pending")
+            .filter(|photo| photo.face_embedding_state == AiItemState::Pending)
             .count();
         let duplicate_groups = super::album_cache::AlbumAiCache::new(&self.root, owner, cache_id)
             .read_duplicates_index_json()
@@ -638,55 +613,63 @@ impl FileAiIndexStore {
             "unavailable"
         };
 
-        let manifest = json!({
-            "version": 2,
-            "owner": owner,
-            "cache_id": cache_id,
-            "album": request.album,
-            "mode": request.mode,
-            "features": request.features,
-            "created_at_unix_ms": timestamp_ms,
-            "sources": indexed_albums,
-            "files": {
-                "embeddings_dir": "embeddings",
-                "faces_dir": "faces",
-                "phash_dir": "phash",
-                "duplicates_index": "duplicates_index.json",
-                "face_index": "face_index.json",
+        let manifest = StoredAiGenerationManifest {
+            version: StoredAiGenerationManifest::VERSION,
+            owner: owner.to_string(),
+            cache_id: cache_id.to_string(),
+            created_at_unix_ms: Some(timestamp_ms),
+            state: Some(generation_state.to_string()),
+            album: request.album.clone(),
+            mode: Some(request.mode.clone()),
+            features: request.features.clone(),
+            sources: indexed_albums
+                .iter()
+                .map(|album| StoredAiGenerationSource {
+                    owner: Some(album.owner.clone()),
+                    album: Some(album.album.clone()),
+                    source_key: Some(album.source_key.clone()),
+                    photo_count: Some(album.photo_count),
+                })
+                .collect(),
+            files: StoredAiGenerationFiles {
+                embeddings_dir: "embeddings".to_string(),
+                faces_dir: "faces".to_string(),
+                phash_dir: "phash".to_string(),
+                duplicates_index: "duplicates_index.json".to_string(),
+                face_index: "face_index.json".to_string(),
             },
-            "provider": {
-                "kind": provider_health.kind,
-                "backend": provider_health.backend,
-                "healthy": provider_health.healthy,
-                "model_manifest_present": provider_health.model_manifest_present,
-                "model_root": provider_health.model_root,
-                "revision": provider_health.revision,
+            provider: StoredAiGenerationProvider {
+                kind: provider_health.kind.clone(),
+                backend: provider_health.backend.clone(),
+                healthy: provider_health.healthy,
+                model_manifest_present: provider_health.model_manifest_present,
+                model_root: provider_health.model_root.clone(),
+                revision: provider_health.revision.clone(),
             },
-            "capabilities": capabilities,
-            "stats": {
-                "albums_total": 1,
-                "photos_total": photos_total,
-                "photos_indexed": indexed_photos.len(),
-                "photos_reused": photos_reused,
-                "duplicates": duplicate_groups,
-                "faces": faces.len(),
-                "image_embeddings_pending": image_embeddings_pending,
-                "duplicate_hashes_pending": duplicate_hashes_pending,
-                "face_embeddings_pending": face_embeddings_pending,
-            },
-            "state": generation_state,
-            "face_detector_revision": provider_health
+            capabilities: Some(capabilities.clone()),
+            stats: Some(AiGenerationStats {
+                albums_total: 1,
+                photos_total,
+                photos_indexed: indexed_photos.len(),
+                photos_reused,
+                duplicates: duplicate_groups,
+                faces: faces.len(),
+                image_embeddings_pending,
+                duplicate_hashes_pending,
+                face_embeddings_pending,
+            }),
+            face_detector_revision: provider_health
                 .revision
                 .clone()
                 .unwrap_or_else(|| FACE_DETECTOR_REVISION.to_string()),
-            "image_embedding": {
-                "dimension": capabilities.image_embedding_dimension,
+            image_embedding: StoredAiEmbeddingInfo {
+                dimension: capabilities.image_embedding_dimension,
             },
-            "face_embedding": {
-                "dimension": capabilities.face_embedding_dimension,
+            face_embedding: StoredAiEmbeddingInfo {
+                dimension: capabilities.face_embedding_dimension,
             },
-            "note": "per-album generation keyed by AlbumMeta.cache; named people live in data/{owner}/albums/{album}/faces.json",
-        });
+            note: "per-album generation keyed by AlbumMeta.cache; named people live in data/{owner}/albums/{album}/faces.json".to_string(),
+        };
 
         let manifest_path = generation_dir.join("manifest.json");
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)

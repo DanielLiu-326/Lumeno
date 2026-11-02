@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, text};
+use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::exec::{self, Frame};
 use crate::grade::field::{self, FieldSpec};
@@ -46,8 +46,8 @@ impl NodeParam for Sharpen {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -110,12 +110,11 @@ impl Node for Sharpen {
 }
 
 impl Sharpen {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "amount",
-                text(zh, "Amount", "数量"),
+                "grade.field.amount",
                 self.amount,
                 0.0,
                 3.0,
@@ -123,7 +122,7 @@ impl Sharpen {
             ),
             field::slider(
                 "radius",
-                text(zh, "Radius", "半径"),
+                "grade.field.radius",
                 self.radius,
                 0.001,
                 0.02,
@@ -131,7 +130,7 @@ impl Sharpen {
             ),
             field::slider(
                 "threshold",
-                text(zh, "Threshold", "阈值"),
+                "grade.field.threshold",
                 self.threshold,
                 0.0,
                 0.2,

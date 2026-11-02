@@ -1,3 +1,5 @@
+import { encodePath } from "./path.js";
+
 const VIDEO_EXTS = new Set(["mp4", "m4v", "mov", "webm"]);
 
 export function isVideoPhoto(photo) {
@@ -5,16 +7,6 @@ export function isVideoPhoto(photo) {
   const name = String(photo.name || photo.path || "");
   const ext = name.split(".").pop()?.toLowerCase() || "";
   return VIDEO_EXTS.has(ext);
-}
-
-/**
- * Path segment for `/api/thumbnail/{segment}`.
- * Mobile browsers refuse to paint an img whose URL ends in .mp4/.mov,
- * so video requests get a trailing .webp that the server strips.
- */
-export function thumbnailPathSegment(path) {
-  const encoded = encodeURIComponent(path || "");
-  return isVideoPhoto({ path }) ? `${encoded}.webp` : encoded;
 }
 
 export function formatDurationMs(ms) {
@@ -33,5 +25,5 @@ export function playbackUrl(path, owner) {
   const params = new URLSearchParams();
   if (owner) params.set("owner", owner);
   params.set("play", "1");
-  return `/api/download/${encodeURIComponent(path)}?${params}`;
+  return `/api/download/${encodePath(path)}?${params}`;
 }

@@ -4,7 +4,6 @@ use axum::{Extension, Json};
 use chrono::{Datelike, NaiveDate};
 use function_name::named;
 use futures::future::BoxFuture;
-use percent_encoding::percent_decode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -16,6 +15,7 @@ use uuid::Uuid;
 
 use crate::backend::common::{AppError, AppState, Token, create_response, into_host_path_safely};
 use crate::backend::i18n::{RequestLocale, tr, trf};
+use crate::backend::identity::{AlbumName, AlbumRef, Owner};
 use crate::backend::tasks::{Task, TaskStatus};
 
 use super::helpers::*;
@@ -1552,10 +1552,9 @@ pub async fn verify_shared_photo_access(
     path: &str,
     locale: &str,
 ) -> Result<(), AppError> {
-    let decoded = percent_decode(path.as_bytes())
-        .decode_utf8()
-        .unwrap_or(std::borrow::Cow::Borrowed(path));
-    let path = decoded.trim_start_matches('/');
+    // Callers pass the decoded path from `Path`/JSON; decoding again would
+    // misread a literal `%` in a filename.
+    let path = path.trim_start_matches('/');
     let Some(album_name) = path
         .strip_prefix("albums/")
         .and_then(|rest| rest.split('/').next())
@@ -1591,6 +1590,17 @@ pub(crate) struct ResolvedAlbum {
     pub(crate) can_write: bool,
     pub(crate) can_delete: bool,
     pub(crate) is_owner: bool,
+}
+
+impl ResolvedAlbum {
+    /// The album as a validated value. `resolve_album_access` already checked
+    /// both components, so a rejected value means a caller built this struct by
+    /// hand (tests do).
+    pub(crate) fn album_ref(&self) -> Option<AlbumRef> {
+        let owner = Owner::new(&self.owner)?;
+        let name = AlbumName::new(&self.album_name)?;
+        Some(AlbumRef::new(owner, name))
+    }
 }
 
 pub(crate) async fn resolve_album_access(
@@ -1654,6 +1664,14 @@ pub(crate) struct AlbumSource {
     display_name: String,
     cover: String,
     description: String,
+}
+
+impl AlbumSource {
+    /// Owner of the album. Storage stats use it to separate shared albums from
+    /// the caller's own data root.
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1834,6 +1852,7 @@ pub async fn api_dashboard(
     let Some(session) = cfg.get_session_info(&token).await else {
         return Err(AppError::unauthorized(locale.as_str()));
     };
+    let is_admin = session.is_admin();
     let username = session.username;
     let sources = collect_accessible_album_sources(&cfg, &username).await;
     let own_album_count = sources
@@ -1953,8 +1972,8 @@ pub async fn api_dashboard(
     let mut active_tasks = task_map
         .into_iter()
         .filter_map(|(id, mut task)| {
-            let status = task.get("status").and_then(Value::as_u64)?;
-            if status > TaskStatus::Paused as u64 {
+            let status = TaskStatus::from_raw(task.get("status").and_then(Value::as_u64)?)?;
+            if !status.is_active() {
                 return None;
             }
             task.as_object_mut()?.insert("id".to_string(), json!(id));
@@ -1970,7 +1989,7 @@ pub async fn api_dashboard(
     });
     active_tasks.truncate(6);
 
-    let admin = if session.role == crate::backend::auth::Role::Admin {
+    let admin = if is_admin {
         let settings = cfg.settings_manager.get_all().await;
         Some(json!({
             "user_count": cfg.user_manager.list_usernames().await.len(),
@@ -2362,6 +2381,7 @@ pub async fn api_albums_upload(
             bytes: f.bytes,
             is_dir: false,
             path: staging_dir.join(&f.name).to_string_lossy().to_string(),
+            request_path: format!("albums/__uploading/{}/{}", staging_uuid, f.name),
         })
         .collect();
 

@@ -527,7 +527,7 @@ for node in order
 
 Export 的 `image` 输入只接受 `DisplayRgb`。边上若仍是 `LinearRgb`，`pipeline` 在调用 Export 之前做一次 `display_from_linear`。这是送进 Export 之前的适配，不是 Export 或 Sigmoid 的逻辑。
 
-`ExecTarget::Preview` 时，`pipeline` 在送到下游之前把马赛克按整数倍抽取到长边以内（抽取保持 CFA 相位：缩放因子取 2 的幂）。光栅图则在线性化之后做面积平均缩小。文档里的参数不改。Demosaic 看见预览目标时，自己把方法降为 `bilinear`。
+`ExecTarget::Preview` 时，`pipeline` 在送到下游之前把相机 RGB 按整数倍抽取到长边以内（缩放因子取 2 的幂），光栅图则在线性化之后做面积平均缩小。文档里的参数不改。解码器（LibRaw）已经把马赛克插值完，Demosaic 节点只是透传，没有"预览降为 bilinear"这回事。
 
 检查点：内存里只保留进入正在改的那个节点的一帧。再改这个节点时从这一帧算起，不重跑上游。改到另一个节点时，换成进入那个节点的帧。不给每个节点留一份图像。
 
@@ -536,7 +536,7 @@ pub trait NodeParam: Send + Sync {
     fn node_type(&self) -> &'static str;
     fn to_json(&self) -> serde_json::Value;
     fn always_on(&self) -> bool { false }
-    fn fields(&self, locale: &str) -> Vec<FieldSpec>;
+    fn fields(&self) -> Vec<FieldSpec>;
     fn from_json(value: &serde_json::Value) -> Result<Self, String>
     where
         Self: Sized;
@@ -564,6 +564,10 @@ pub trait Node: Send + Sync {
     fn defaults(&self) -> Box<dyn Node>;
 }
 ```
+
+文档是宿主保存的值，`Pipeline::compile(&Document)` 把它变成执行器唯一接受的形状：从 input 到 export 的顺序、每个输入的生产者、每个节点能不能跑（`Runnable` / `Inactive` / `MissingInput`）、以及结构问题（重复 id、未知边、同一输入两个生产者、环、断链）。执行器只读 `Pipeline::order()`，不再自己从 export 回溯；"为什么没生效"先问 `Pipeline::status(id)`，不要靠猜。
+
+`FieldSpec` 里的 `label`、`choices`、`display` 不装界面文案：凡是文字都是 `grade.*` 形式的 i18n key（节点标题用 `document::title_key`），由宿主查表翻译；数值和单位（`72px`、`0°`、`90`）以及 `X`/`Y`/`R`/`G`/`B`/`Omega`/`Epsilon` 这类符号原样显示。库本身不带任何一门语言的句子。
 
 `Node` 不继承 `NodeParam`。同一个具体类型可以两个都实现，节点用 `params()` 把参数交出来。`fields` 在 `NodeParam` 上。`inputs` 和 `outputs` 只看参数，不接收 `self`，并标 `where Self: Sized`，因此不进 `dyn Node` 的虚表。文档保存 `Box<dyn Node>`。按类型名从 JSON 构造仍由 `param_from_json` 分发，因为那时还没有节点实例。
 
@@ -657,20 +661,16 @@ linear = (code - black_level) / (white_level - black_level) * gain[cfa(x, y)]
 
 ### 9.3 Demosaic
 
-输入 `image` 接受 `Mosaic`。输出是线性相机 RGB，尺寸与马赛克相同，`space` 还不是 `LinearRec2020`。缓冲须已是线性 RAW（`linear = true`）。仍是传感器码值时，本节点不插值、不写输出。
+输入 `image` 是解码器（LibRaw）已经插值完的线性相机 RGB；这里没有马赛克数据，也没有 5×5 邻域可用来重建高光。因此本节点是**透传**：不改像素、不裁切、不写 `space`。
 
 | 字段 | 类型 | 范围 | 默认 |
 | --- | --- | --- | --- |
-| `method` | `bilinear` \| `rcd` | — | `rcd` |
-| `highlight` | `clip` \| `reconstruct` | — | `reconstruct` |
+| `method` | `bilinear` \| `rcd` | — | `bilinear`（已无效果） |
+| `highlight` | `clip` \| `reconstruct` | — | `clip`（已无效果） |
 
-输入已经减过黑电平并乘过白平衡系数。`clip`：每个颜色位置把样本裁到 `[0, 1]`。`reconstruct`：超过 1 的通道用未饱和通道的比值外推，三通道都饱和时保持裁切。外推比值取该像素 5×5 邻域内未饱和像素的中位数。
+两个字段只为让旧文档能加载而保留，不再出现在节点界面里，也不影响输出。
 
-`bilinear`：每个缺失色是同色最近样本的距离加权平均。2×2 拜耳即可。预览强制走这条。
-
-`rcd`：**Ratio Corrected Demosaicing**。先插绿色，再用水平/垂直插值误差决定边缘方向，对红-绿、蓝-绿色差做方向选择，最后把色差加回绿色。X-Trans 首版不承诺 RCD。输入上的 CFA 若是 X-Trans 且方法为 `rcd`，本节点自己改用 `bilinear`，并在返回值里带上 `DemosaicFallback`。它不查看是谁产生了这块马赛克。
-
-边界：样本不足的边用镜像延拓。插值后的尺寸与马赛克相同。本节点停在线性相机 RGB，不乘工作空间矩阵。
+**不要在这里裁到 `[0, 1]`。** 相机的白平衡系数会把亮部推出 1，这是场景参考数据的正常状态；在乘工作空间矩阵之前裁掉某个通道，会把载有色相的通道比例破坏掉。实测：一台 S5M2 的相机矩阵下，亮黄 `(1.40, 1.05, 0.28)` 在裁切后输出 `(230, 237, 0)`（红低于绿、发青），不裁切则输出 `(255, 231, 0)`（保持暖黄）。裁切只属于显示变换。
 
 ### 9.3a Input Color Profile
 

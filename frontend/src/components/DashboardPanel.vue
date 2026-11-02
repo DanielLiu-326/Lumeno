@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { t } from "../i18n/index.js";
 import { formatSize, progressPercent, statusLabel, statusTone } from "../utils/format";
 import { albumCoverUrl } from "../utils/albumCover.js";
-import { thumbnailPathSegment } from "../utils/mediaKind.js";
+import { photoThumbnailUrl } from "../utils/thumbnailUrl.js";
 import {
   IconAlbum,
   IconDatabase,
@@ -27,7 +27,7 @@ const summary = computed(() => props.data?.summary || {});
 const statItems = computed(() => [
   { icon: IconAlbum, label: t("dashboard.albums"), value: summary.value.own_album_count || 0, note: t("dashboard.sharedCount", { count: summary.value.shared_album_count || 0 }) },
   { icon: IconImage, label: t("dashboard.photos"), value: summary.value.accessible_photo_count || 0, note: t("dashboard.datedCount", { count: summary.value.dated_photo_count || 0 }) },
-  { icon: IconDatabase, label: t("dashboard.storage"), value: formatSize(summary.value.total_bytes || 0), note: t("dashboard.accessibleStorage") },
+  { icon: IconDatabase, label: t("dashboard.storage"), value: formatSize(summary.value.total_bytes || 0), note: t("dashboard.accessibleStorage"), tab: "storage" },
   { icon: IconTasks, label: t("dashboard.activeTasks"), value: summary.value.active_task_count || 0, note: t("dashboard.taskStatus") },
   { icon: IconSparkles, label: t("dashboard.uptime"), value: formatUptime(summary.value.uptime_seconds || 0), note: t("dashboard.currentProcess") },
 ]);
@@ -41,12 +41,6 @@ function formatUptime(seconds) {
   if (days > 0) return t("dashboard.uptimeDaysHours", { days, hours });
   if (hours > 0) return t("dashboard.uptimeHoursMinutes", { hours, minutes });
   return t("dashboard.uptimeMinutes", { minutes });
-}
-
-function thumbUrl(photo, size = 360) {
-  if (!photo?.path) return "";
-  const owner = photo.owner ? `&owner=${encodeURIComponent(photo.owner)}` : "";
-  return `/api/thumbnail/${thumbnailPathSegment(photo.path)}?size=${size}${owner}`;
 }
 
 function albumCover(album) {
@@ -106,7 +100,13 @@ const memoryGroups = computed(() => {
 
       <template v-else>
         <section class="grid grid-cols-2 gap-3 md:grid-cols-5">
-          <div v-for="item in statItems" :key="item.label" class="app-dash-island min-w-0 px-4 py-4">
+          <div
+            v-for="item in statItems"
+            :key="item.label"
+            class="app-dash-island min-w-0 px-4 py-4"
+            :class="item.tab ? 'cursor-pointer transition hover:ring-1 hover:ring-amber-400/60' : ''"
+            @click="item.tab && emit('navigate', item.tab)"
+          >
             <p class="flex items-center gap-1.5 truncate text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">
               <component :is="item.icon" class="app-accent h-3.5 w-3.5 shrink-0" />
               {{ item.label }}
@@ -126,7 +126,7 @@ const memoryGroups = computed(() => {
               <div v-if="data?.recent_photos?.length" class="grid grid-cols-3 gap-2.5 sm:grid-cols-4 lg:grid-cols-6">
                 <button v-for="photo in data.recent_photos" :key="`${photo.owner}:${photo.path}`"
                   class="group relative aspect-square overflow-hidden rounded-xl bg-stone-200/70" @click="openAlbum(photo)">
-                  <img :src="thumbUrl(photo)" alt="" loading="lazy" class="h-full w-full object-cover transition duration-300 group-hover:scale-105" />
+                  <img :src="photoThumbnailUrl(photo)" alt="" loading="lazy" class="h-full w-full object-cover transition duration-300 group-hover:scale-105" />
                   <span class="absolute inset-x-0 bottom-0 truncate bg-black/55 px-2 py-1 text-left text-[10px] text-white">{{ albumTitle(photo) }}</span>
                 </button>
               </div>
@@ -157,7 +157,7 @@ const memoryGroups = computed(() => {
                 <h2 class="app-dash-chip mb-3 text-sm font-bold" :class="isDark ? 'text-stone-100' : 'text-stone-900'">{{ group.title }}</h2>
                 <div v-if="group.photos?.length" class="grid grid-cols-4 gap-2">
                   <button v-for="photo in group.photos.slice(0, 4)" :key="`${group.key}:${photo.owner}:${photo.path}`" class="aspect-square overflow-hidden rounded-xl bg-stone-200/70" @click="openAlbum(photo)">
-                    <img :src="thumbUrl(photo, 240)" alt="" loading="lazy" class="h-full w-full object-cover" />
+                    <img :src="photoThumbnailUrl(photo, { size: 240 })" alt="" loading="lazy" class="h-full w-full object-cover" />
                   </button>
                 </div>
                 <p v-else class="app-dash-island px-4 py-6 text-sm" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t("dashboard.noMemories") }}</p>

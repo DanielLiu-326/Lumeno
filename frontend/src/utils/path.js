@@ -1,5 +1,14 @@
+/**
+ * The one way a photo path goes into a URL.
+ *
+ * Segments are encoded individually so `/` stays the separator, and every other
+ * byte (including a literal `%`, `#`, `?` or space) is percent-encoded exactly
+ * once. Whole-string `encodeURIComponent` and the
+ * `encodeURIComponent(...).replace(/%2F/g, "/")` trick produce different URLs
+ * for the same file; use this instead.
+ */
 export function encodePath(path) {
-    return path
+    return String(path ?? "")
         .split("/")
         .filter((segment) => segment.length > 0)
         .map((segment) => encodeURIComponent(segment))

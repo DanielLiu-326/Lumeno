@@ -9,6 +9,7 @@ import FileBrowserPanel from "./components/FileBrowserPanel.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import OnThisDayPanel from "./components/OnThisDayPanel.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
+import StoragePanel from "./components/StoragePanel.vue";
 import { useAlbumApp } from "./composables/useAlbumApp";
 import { normalizeDiscoveryPhoto } from "./utils/photoDetail.js";
 import { progressPercent, statusLabel, statusTone } from "./utils/format";
@@ -279,6 +280,7 @@ watch(
       await app.refreshDashboard();
     } else if (tab === "settings") {
       await app.refreshAiStatus();
+      await app.refreshStorageReport();
     }
   },
 );
@@ -286,6 +288,17 @@ watch(
 function switchTab(tab) {
   if (tab === "settings") {
     settingsSection.value = "preferences";
+  }
+  activeTab.value = tab;
+}
+
+/// Storage lives inside settings now; the dashboard tile still points at it.
+function navigateTo(tab) {
+  if (tab === "storage") {
+    settingsSection.value = "storage";
+    settingsFocus.value += 1;
+    activeTab.value = "settings";
+    return;
   }
   activeTab.value = tab;
 }
@@ -632,13 +645,10 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             :on-search-text-in-modal="(opts) => app.searchAlbumByText({ ...opts, inModal: true })"
             :on-load-duplicates-in-modal="app.loadAlbumDuplicatesForModal"
             :fetch-photos-by-paths="app.fetchAlbumPhotosByPaths"
-            @create-album="app.createAlbum"
             @refresh-albums="app.refreshAlbums"
             @select-album="app.selectAlbum"
-            @update-album="app.updateAlbum"
             @delete-album="app.deleteAlbum"
             @delete-photos="app.deleteAlbumPhotos"
-            @share-album="app.shareAlbum"
             @show-duplicates="app.showAlbumDuplicates"
             @show-photos="app.showAlbumPhotos"
             @find-similar="app.findSimilarPhotos"
@@ -650,7 +660,6 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             @adopt-album-cluster="app.adoptAlbumCluster"
             @recluster-album-faces="app.reclusterAlbumFaces"
             @merge-album-cluster="app.mergeAlbumCluster"
-            @unshare-album="app.unshareAlbum"
             @apply-filters="app.refreshAlbumPhotos"
             @update-sort="(s) => { app.albumSort = s; app.refreshAlbumPhotos(); }"
             @import-selected="app.importSelectedToAlbum"
@@ -672,7 +681,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
               :loading="app.dashboardLoading"
               :error="app.dashboardError"
               @refresh="() => app.refreshDashboard()"
-              @navigate="(tab) => (activeTab = tab)"
+              @navigate="navigateTo"
               @select-album="openDashboardAlbum"
             />
           </div>
@@ -759,7 +768,33 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
               @preview-accent="app.previewAccent"
               @delete-member="app.deleteMember"
               @reset-member-password="({ username, new_password }) => app.resetMemberPassword(username, new_password)"
-            />
+            >
+              <template #storage>
+                <StoragePanel
+                  embedded
+                  :is-dark="isDark"
+                  :report="app.storageReport"
+                  :loading="app.storageLoading"
+                  :error="app.storageError"
+                  :stale="app.storageStale"
+                  :scanning="app.storageScanning"
+                  :cleaning="app.storageCleaning"
+                  :is-admin="app.isAdmin"
+                  :members="app.storageMembers"
+                  :members-loading="app.storageMembersLoading"
+                  :shared-cache="app.storageSharedCache"
+                  :viewing-owner="app.storageOwner"
+                  :on-view-member="app.viewStorageOwner"
+                  :on-scan-member="(owner) => app.startStorageScanFor(owner)"
+                  :on-scan-all="app.scanAllStorageMembers"
+                  :on-load-members="app.loadStorageMembers"
+                  :on-refresh="app.refreshStorageReport"
+                  :on-scan="app.startStorageScan"
+                  :on-cleanup="app.startStorageCleanup"
+                  :on-rebuild-index="app.rebuildAlbumIndex"
+                />
+              </template>
+            </SettingsPanel>
           </div>
         </template>
 

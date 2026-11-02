@@ -1,4 +1,6 @@
-import { locale, t } from "../i18n/index.js";
+import { t } from "../i18n/index.js";
+import { httpJson, postJson } from "./http.js";
+import { encodePath } from "./path.js";
 
 export const DEFAULT_VIDEO_ENCODE_ORDER = ["av1", "hevc", "h264"];
 
@@ -147,31 +149,12 @@ export function videoBadgeText(info) {
   return planPlayback(info).badge || "";
 }
 
-async function apiJson(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "include",
-    headers: {
-      "Accept-Language": locale.value,
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
-  const payload = await response.json();
-  if (!payload.success) {
-    const error = new Error(payload.message || t("msg.requestFailed"));
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
-}
-
 function infoKey(path, owner) {
   return `${owner || ""}:${path}`;
 }
 
 export function videoInfoUrl(path, owner) {
-  const encoded = encodeURIComponent(path).replace(/%2F/g, "/");
+  const encoded = encodePath(path);
   const query = owner ? `?owner=${encodeURIComponent(owner)}` : "";
   return `/api/albums/video_info/${encoded}${query}`;
 }
@@ -179,15 +162,16 @@ export function videoInfoUrl(path, owner) {
 export async function loadVideoInfo(path, owner, { refresh = false } = {}) {
   const key = infoKey(path, owner);
   if (!refresh && infoCache.has(key)) return infoCache.get(key);
-  const payload = await apiJson(videoInfoUrl(path, owner));
+  const payload = await httpJson(videoInfoUrl(path, owner), {}, t("msg.requestFailed"));
   infoCache.set(key, payload.data);
   return payload.data;
 }
 
 export async function startVideoEncode(path, owner, codec) {
-  const payload = await apiJson("/api/albums/video_encode", {
-    method: "POST",
-    body: JSON.stringify({ path, owner: owner || undefined, codec }),
+  const payload = await postJson("/api/albums/video_encode", {
+    path,
+    owner: owner || undefined,
+    codec,
   });
   return payload.data;
 }
@@ -211,7 +195,7 @@ export function watchVideoEncode(path, owner, codec, taskId, isCurrent, onReady,
         return;
       }
       if (!taskId) return;
-      const tasks = await apiJson("/api/get_task_list/");
+      const tasks = await httpJson("/api/get_task_list/", {}, t("msg.requestFailed"));
       const task = tasks.data?.[taskId];
       if (task && (task.status === 4 || task.status === 5) && isCurrent()) {
         window.clearInterval(timer);

@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, object, req_str, text};
+use super::{Node, NodeParam, object, req_str};
 use crate::grade::buffer::{self, InputDesc, OutputDesc};
-use crate::grade::exec::{Frame, map_rgb};
-use crate::grade::field::{self, FieldSpec};
+use crate::grade::exec::Frame;
+use crate::grade::field::FieldSpec;
 
 #[derive(Clone, Copy)]
 enum Method {
@@ -70,8 +70,8 @@ impl NodeParam for Demosaic {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -134,41 +134,22 @@ impl Node for Demosaic {
 }
 
 impl Demosaic {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
-        vec![
-            field::choice(
-                "method",
-                text(zh, "Method", "方法"),
-                match self.method {
-                    Method::Bilinear => 0,
-                    Method::Rcd => 1,
-                },
-                &["bilinear", "rcd"],
-                zh,
-                &["双线性", "RCD"],
-            ),
-            field::choice(
-                "highlight",
-                text(zh, "Highlights", "高光"),
-                match self.highlight {
-                    Highlight::Clip => 0,
-                    Highlight::Reconstruct => 1,
-                },
-                &["clip", "reconstruct"],
-                zh,
-                &["裁切", "重建"],
-            ),
-        ]
+    /// The decoder (LibRaw) already demosaiced and clipped at the sensor
+    /// ceiling; by the time pixels reach here there is no CFA to interpolate and
+    /// no highlight data to reconstruct. Both old parameters are still parsed so
+    /// saved documents load, but neither has an effect, so neither is shown.
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
+        Vec::new()
     }
 
     pub(super) fn render_frame(&self, input: &Frame) -> Frame {
         let _ = self.method;
-        if self.highlight == Highlight::Reconstruct {
-            return input.clone_frame();
-        }
-        map_rgb(input, input.space, |r, g, b| {
-            [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
-        })
+        // Scene-referred camera RGB above 1 is normal for bright subjects after
+        // camera white balance. Clipping a channel here, before the camera
+        // matrix, destroys the channel ratios that carry hue: a bright yellow
+        // loses red first and comes out green. The display transform is the
+        // only place that may clip.
+        let _ = self.highlight;
+        input.clone_frame()
     }
 }

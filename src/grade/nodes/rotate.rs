@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, object, req_bool, req_f, text, wrap_degrees};
+use super::{Node, NodeParam, object, req_bool, req_f, wrap_degrees};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::exec::{Frame, Roi};
 use crate::grade::field::{self, FieldSpec};
@@ -48,8 +48,8 @@ impl NodeParam for Rotate {
         })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -112,12 +112,11 @@ impl Node for Rotate {
 }
 
 impl Rotate {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "degrees",
-                text(zh, "Angle", "角度"),
+                "grade.field.angle",
                 self.degrees,
                 -180.0,
                 180.0,
@@ -125,17 +124,17 @@ impl Rotate {
             ),
             field::toggle(
                 "expand",
-                text(zh, "Expand canvas", "扩展画布"),
+                "grade.field.expand_canvas",
                 self.expand,
-                text(zh, "On", "开"),
-                text(zh, "Off", "关"),
+                "grade.value.on",
+                "grade.value.off",
             ),
             field::toggle(
                 "inscribed",
-                text(zh, "Largest fit", "最大内接矩形"),
+                "grade.field.largest_fit",
                 self.inscribed,
-                text(zh, "On", "开"),
-                text(zh, "Off", "关"),
+                "grade.value.on",
+                "grade.value.off",
             ),
         ]
     }

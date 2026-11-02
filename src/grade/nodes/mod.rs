@@ -41,7 +41,7 @@ pub trait NodeParam: Any + Send + Sync {
         false
     }
 
-    fn fields(&self, _locale: &str) -> Vec<FieldSpec> {
+    fn fields(&self) -> Vec<FieldSpec> {
         Vec::new()
     }
 
@@ -271,10 +271,6 @@ pub(super) fn wrap_degrees(value: f32) -> f32 {
         d += 360.0;
     }
     d.clamp(-180.0, 180.0)
-}
-
-pub(super) fn text(zh: bool, en: &str, cn: &str) -> String {
-    (if zh { cn } else { en }).to_string()
 }
 
 #[cfg(test)]

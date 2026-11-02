@@ -1,4 +1,4 @@
-import { thumbnailPathSegment } from "./mediaKind.js";
+import { DEFAULT_THUMBNAIL_SIZE, thumbnailUrl } from "./thumbnailUrl.js";
 
 /** Owner of a shared album, from `owner` or `owner/dir` access keys. */
 export function albumOwnerName(album, fallback = "") {
@@ -9,9 +9,8 @@ export function albumOwnerName(album, fallback = "") {
   return fallback || "";
 }
 
-export function albumCoverUrl(album, size = 400, fallbackOwner = "") {
+export function albumCoverUrl(album, size = DEFAULT_THUMBNAIL_SIZE, fallbackOwner = "") {
   if (!album?.cover) return "";
   const owner = albumOwnerName(album, fallbackOwner);
-  const ownerParam = owner ? `&owner=${encodeURIComponent(owner)}` : "";
-  return `/api/thumbnail/${thumbnailPathSegment(album.cover)}?size=${size}${ownerParam}`;
+  return thumbnailUrl(album.cover, { size, owner });
 }

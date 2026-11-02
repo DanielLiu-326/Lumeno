@@ -29,18 +29,26 @@ use uuid::Uuid;
 use crate::backend::common::{
     AppError, AppState, ConcurrencyLimiter, Token, create_response, into_host_path_safely,
 };
+use crate::backend::grade_api::render_grade_export;
 use crate::backend::i18n::{RequestLocale, tr, trf};
+use crate::backend::identity::{AlbumName, AlbumRef, Owner, PhotoRef, PhotoRel};
 
 use super::api::resolve_album_access;
 use super::decoder::{darktable_export, find_xmp_sidecar};
 use super::helpers::albums_root;
 use super::media::is_image_path;
 
+/// Downloads stream files that already exist, so the cap only bounds the request.
 const MAX_PHOTOS: usize = 2000;
+/// Export renders every file before it can be zipped; the cap keeps one ticket
+/// from turning into an hours-long CPU job.
 const MAX_EXPORT_PHOTOS: usize = 100;
 const MAX_TICKETS: usize = 128;
 const TICKET_TTL: Duration = Duration::from_secs(5 * 60);
 const CHUNK: usize = 64 * 1024;
+/// XMP grading is opt-in: a request that omits the flag exports the pixels as
+/// they are. Single-photo and batch export share this default.
+pub(crate) const DEFAULT_APPLY_XMP: bool = false;
 /// General-purpose bits: data descriptor (bit 3) and UTF-8 names (bit 11).
 const GP_FLAGS: u16 = 0x0808;
 
@@ -99,27 +107,350 @@ pub struct DownloadRequest {
     photos: Vec<String>,
 }
 
-enum Phase {
+enum ZipPhase {
     File,
     Central,
     Done,
 }
 
-struct ZipEncode {
-    files: Vec<ZipPart>,
-    offsets: Vec<u64>,
-    index: usize,
+/// One archive entry. Export entries are produced lazily: the bytes only exist
+/// after the photo was rendered or transcoded.
+struct ZipEntry {
+    name: String,
+    path: PathBuf,
+    size: u64,
+    dos_time: u16,
+    dos_date: u16,
+    /// Owned temp file; removed once its bytes are in the archive.
+    temp: bool,
+}
+
+/// Where the entries come from. Download streams files that already exist;
+/// export renders each photo first. Both feed the same encoder so the archive
+/// bytes cannot drift between the two flows.
+enum ZipPlan {
+    Files {
+        parts: Vec<ZipPart>,
+        index: usize,
+        zip64: bool,
+    },
+    Export {
+        ticket: ExportTicket,
+        index: usize,
+        used_names: HashSet<String>,
+    },
+}
+
+impl ZipPlan {
+    fn zip64(&self) -> bool {
+        match self {
+            ZipPlan::Files { zip64, .. } => *zip64,
+            // Rendered sizes are unknown when the ticket is created, so every
+            // export entry uses the ZIP64 form regardless of its real size.
+            ZipPlan::Export { .. } => true,
+        }
+    }
+
+    async fn next_entry(&mut self) -> io::Result<Option<ZipEntry>> {
+        match self {
+            ZipPlan::Files { parts, index, .. } => {
+                let Some(part) = parts.get(*index) else {
+                    return Ok(None);
+                };
+                *index += 1;
+                Ok(Some(ZipEntry {
+                    name: part.name.clone(),
+                    path: part.path.clone(),
+                    size: part.size,
+                    dos_time: part.dos_time,
+                    dos_date: part.dos_date,
+                    temp: false,
+                }))
+            }
+            ZipPlan::Export {
+                ticket,
+                index,
+                used_names,
+            } => {
+                if *index >= ticket.sources.len() {
+                    return Ok(None);
+                }
+                let source_path = ticket.sources[*index].path.clone();
+                let subpath = ticket.sources[*index].subpath.clone();
+                let dos_time = ticket.sources[*index].dos_time;
+                let dos_date = ticket.sources[*index].dos_date;
+                let apply_grade = ticket.apply_grade;
+                let xmp = if !apply_grade && ticket.apply_xmp {
+                    find_xmp_sidecar(&source_path)
+                } else {
+                    None
+                };
+                let edited = apply_grade || xmp.is_some();
+                let out_ext = ticket.out_ext.clone();
+                let quality = ticket.quality;
+                let max_width = ticket.max_width;
+                let direct =
+                    !edited && max_width == 0 && same_export_format(&source_path, &out_ext);
+                let name = next_entry_name(used_names, &subpath, &out_ext, edited);
+                let (path, temp) = if direct {
+                    (source_path, false)
+                } else {
+                    let temp_path = std::env::temp_dir().join(format!(
+                        "lumeno-export-{}-{}.{}",
+                        Uuid::new_v4(),
+                        *index,
+                        out_ext
+                    ));
+                    let limiter = ticket.limiter.clone();
+                    let rendered = if apply_grade {
+                        match render_grade_export(
+                            &limiter,
+                            &source_path,
+                            &out_ext,
+                            quality,
+                            max_width,
+                        )
+                        .await
+                        {
+                            Ok(bytes) => tokio::fs::write(&temp_path, bytes)
+                                .await
+                                .map_err(|err| io::Error::other(err.to_string())),
+                            Err(err) => Err(io::Error::other(err.to_string())),
+                        }
+                    } else {
+                        let _permit = limiter.acquire().await;
+                        darktable_export(
+                            &source_path,
+                            xmp.as_deref(),
+                            &temp_path,
+                            &out_ext,
+                            quality,
+                            max_width,
+                        )
+                        .await
+                        .map_err(|err| io::Error::other(err.message))
+                    };
+                    if let Err(error) = rendered {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        return Err(error);
+                    }
+                    (temp_path, true)
+                };
+                let meta = match tokio::fs::metadata(&path).await {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        if temp {
+                            let _ = tokio::fs::remove_file(&path).await;
+                        }
+                        return Err(error);
+                    }
+                };
+                if !meta.is_file() {
+                    if temp {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                    return Err(io::Error::other("export did not produce a file"));
+                }
+                *index += 1;
+                Ok(Some(ZipEntry {
+                    name,
+                    path,
+                    size: meta.len(),
+                    dos_time,
+                    dos_date,
+                    temp,
+                }))
+            }
+        }
+    }
+}
+
+/// Streaming ZIP writer shared by download and export.
+struct ZipStream {
+    plan: ZipPlan,
+    zip64: bool,
+    current: Option<ZipEntry>,
     reader: Option<tokio::fs::File>,
     crc: u32,
     read: u64,
+    /// Bytes written so far, which is also the offset of the next entry.
+    offset: u64,
     records: Vec<CentralRec>,
     pending: Vec<u8>,
     pending_pos: usize,
-    phase: Phase,
-    zip64: bool,
-    cd_offset: u64,
+    phase: ZipPhase,
     central_ready: bool,
     dead: bool,
+}
+
+/// One validated photo from a batch request.
+struct BatchSource {
+    subpath: String,
+    path: PathBuf,
+    size: u64,
+    dos_time: u16,
+    dos_date: u16,
+}
+
+impl BatchSource {
+    fn zip_part(self) -> ZipPart {
+        ZipPart {
+            name: self.subpath,
+            path: self.path,
+            size: self.size,
+            dos_time: self.dos_time,
+            dos_date: self.dos_date,
+        }
+    }
+
+    fn export_source(self) -> ExportSource {
+        ExportSource {
+            subpath: self.subpath,
+            path: self.path,
+            dos_time: self.dos_time,
+            dos_date: self.dos_date,
+        }
+    }
+}
+
+/// Validate a batch request and resolve every photo to a confined host path.
+///
+/// This is the whole authorisation story for both batch endpoints: album access,
+/// path confinement, symlink escape, duplicate removal. The caller only decides
+/// the cap, the error key for it, and whether non-images may be included —
+/// download returns any file, export can only produce images.
+#[allow(clippy::too_many_arguments)]
+async fn collect_batch_sources(
+    cfg: &AppState,
+    username: &str,
+    user_root: &Path,
+    owner: &str,
+    albumname: &str,
+    photos: &[String],
+    limit: usize,
+    limit_error: &str,
+    require_image: bool,
+    lang: &str,
+) -> Result<Vec<BatchSource>, AppError> {
+    let Some(owner) = Owner::new(owner) else {
+        return Err(AppError::BadRequest(tr(
+            lang,
+            "error.invalid_album_identifier",
+        )));
+    };
+    let Some(album_name) = AlbumName::new(albumname) else {
+        return Err(AppError::BadRequest(tr(
+            lang,
+            "error.invalid_album_identifier",
+        )));
+    };
+    let album = AlbumRef::new(owner, album_name);
+    if photos.is_empty() {
+        return Err(AppError::BadRequest(tr(
+            lang,
+            "error.download_photos_empty",
+        )));
+    }
+    if photos.len() > limit {
+        return Err(AppError::BadRequest(trf(
+            lang,
+            limit_error,
+            &[("value", limit.to_string())],
+        )));
+    }
+
+    let resolved = resolve_album_access(
+        cfg,
+        username,
+        user_root,
+        &album_access_input(username, album.owner().as_str(), album.name().as_str()),
+        lang,
+    )
+    .await?;
+    if resolved.owner != album.owner().as_str() || resolved.album_name != album.name().as_str() {
+        return Err(AppError::Forbidden(tr(lang, "error.album_access_denied")));
+    }
+
+    let album_dir = albums_root(resolved.root_path.as_path()).join(album.name());
+    let album_canon = tokio::fs::canonicalize(&album_dir).await.map_err(|_| {
+        AppError::NotFound(trf(
+            lang,
+            "error.resource_not_found",
+            &[("value", albumname.to_string())],
+        ))
+    })?;
+
+    let mut seen = HashSet::new();
+    let mut sources = Vec::new();
+    for raw in photos {
+        let Some(rel) = PhotoRel::new(raw) else {
+            return Err(AppError::BadRequest(trf(
+                lang,
+                "error.download_bad_path",
+                &[("value", raw.clone())],
+            )));
+        };
+        if !seen.insert(rel.as_str().to_string()) {
+            continue;
+        }
+        let photo = PhotoRef::new(album.clone(), rel);
+        let subpath = photo.rel().as_str().to_string();
+        let host = into_host_path_safely(resolved.root_path.as_path(), &photo.api_path())?;
+        if !host.starts_with(&album_dir) {
+            return Err(AppError::BadRequest(trf(
+                lang,
+                "error.download_bad_path",
+                &[("value", raw.clone())],
+            )));
+        }
+        let canon = tokio::fs::canonicalize(&host).await.map_err(|_| {
+            AppError::NotFound(trf(
+                lang,
+                "error.resource_not_found",
+                &[("value", subpath.clone())],
+            ))
+        })?;
+        if !canon.starts_with(&album_canon) {
+            return Err(AppError::Forbidden(tr(lang, "error.invalid_shared_path")));
+        }
+        let meta = tokio::fs::metadata(&canon).await.map_err(|_| {
+            AppError::NotFound(trf(
+                lang,
+                "error.resource_not_found",
+                &[("value", subpath.clone())],
+            ))
+        })?;
+        if !meta.is_file() {
+            return Err(AppError::BadRequest(trf(
+                lang,
+                "error.download_not_a_file",
+                &[("value", subpath.clone())],
+            )));
+        }
+        if require_image && !is_image_path(&canon) {
+            return Err(AppError::BadRequest(trf(
+                lang,
+                "error.export_not_image",
+                &[("value", subpath.clone())],
+            )));
+        }
+        let (dos_time, dos_date) =
+            dos_timestamp(meta.modified().unwrap_or_else(|_| SystemTime::now()));
+        sources.push(BatchSource {
+            subpath,
+            path: canon,
+            size: meta.len(),
+            dos_time,
+            dos_date,
+        });
+    }
+    if sources.is_empty() {
+        return Err(AppError::BadRequest(tr(
+            lang,
+            "error.download_photos_empty",
+        )));
+    }
+    Ok(sources)
 }
 
 pub async fn api_albums_download(
@@ -134,113 +465,20 @@ pub async fn api_albums_download(
     };
     let owner = payload.owner.trim();
     let albumname = payload.albumname.trim();
-    if owner.is_empty()
-        || albumname.is_empty()
-        || owner.contains(['/', '\\', '\0'])
-        || albumname.contains(['/', '\\', '\0'])
-    {
-        return Err(AppError::BadRequest(tr(
-            lang,
-            "error.invalid_album_identifier",
-        )));
-    }
-    if payload.photos.is_empty() {
-        return Err(AppError::BadRequest(tr(
-            lang,
-            "error.download_photos_empty",
-        )));
-    }
-    if payload.photos.len() > MAX_PHOTOS {
-        return Err(AppError::BadRequest(trf(
-            lang,
-            "error.download_too_many",
-            &[("value", MAX_PHOTOS.to_string())],
-        )));
-    }
-
-    let resolved = resolve_album_access(
+    let sources = collect_batch_sources(
         &cfg,
         &username,
-        &user_root,
-        &album_access_input(&username, owner, albumname),
+        user_root.as_path(),
+        owner,
+        albumname,
+        &payload.photos,
+        MAX_PHOTOS,
+        "error.download_too_many",
+        false,
         lang,
     )
     .await?;
-    if resolved.owner != owner || resolved.album_name != albumname {
-        return Err(AppError::Forbidden(tr(lang, "error.album_access_denied")));
-    }
-
-    let album_dir = albums_root(resolved.root_path.as_path()).join(&resolved.album_name);
-    let album_canon = tokio::fs::canonicalize(&album_dir).await.map_err(|_| {
-        AppError::NotFound(trf(
-            lang,
-            "error.resource_not_found",
-            &[("value", albumname.to_string())],
-        ))
-    })?;
-
-    let mut seen = HashSet::new();
-    let mut files = Vec::new();
-    for raw in &payload.photos {
-        let Some(name) = normalize_subpath(raw) else {
-            return Err(AppError::BadRequest(trf(
-                lang,
-                "error.download_bad_path",
-                &[("value", raw.clone())],
-            )));
-        };
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let rel = format!("albums/{albumname}/{name}");
-        let host = into_host_path_safely(resolved.root_path.as_path(), &rel)?;
-        if !host.starts_with(&album_dir) {
-            return Err(AppError::BadRequest(trf(
-                lang,
-                "error.download_bad_path",
-                &[("value", raw.clone())],
-            )));
-        }
-        let canon = tokio::fs::canonicalize(&host).await.map_err(|_| {
-            AppError::NotFound(trf(
-                lang,
-                "error.resource_not_found",
-                &[("value", name.clone())],
-            ))
-        })?;
-        if !canon.starts_with(&album_canon) {
-            return Err(AppError::Forbidden(tr(lang, "error.invalid_shared_path")));
-        }
-        let meta = tokio::fs::metadata(&canon).await.map_err(|_| {
-            AppError::NotFound(trf(
-                lang,
-                "error.resource_not_found",
-                &[("value", name.clone())],
-            ))
-        })?;
-        if !meta.is_file() {
-            return Err(AppError::BadRequest(trf(
-                lang,
-                "error.download_not_a_file",
-                &[("value", name.clone())],
-            )));
-        }
-        let (dos_time, dos_date) =
-            dos_timestamp(meta.modified().unwrap_or_else(|_| SystemTime::now()));
-        files.push(ZipPart {
-            name,
-            path: canon,
-            size: meta.len(),
-            dos_time,
-            dos_date,
-        });
-    }
-    if files.is_empty() {
-        return Err(AppError::BadRequest(tr(
-            lang,
-            "error.download_photos_empty",
-        )));
-    }
+    let files: Vec<ZipPart> = sources.into_iter().map(BatchSource::zip_part).collect();
 
     let zip64 = needs_zip64(&files);
     let content_length = zip_content_length(&files, zip64);
@@ -320,7 +558,11 @@ pub async fn api_albums_download_file(
     let length = ticket.content_length;
     let zip64 = ticket.zip64;
     let files = ticket.files.clone();
-    let body = Body::from_stream(zip_body(files, zip64));
+    let body = Body::from_stream(zip_body(ZipPlan::Files {
+        parts: files,
+        index: 0,
+        zip64,
+    }));
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
@@ -346,27 +588,6 @@ fn album_access_input(viewer: &str, owner: &str, albumname: &str) -> String {
     } else {
         format!("{owner}/{albumname}")
     }
-}
-
-fn normalize_subpath(raw: &str) -> Option<String> {
-    let text = raw.trim();
-    if text.is_empty() || text.len() > 1024 || text.as_bytes().len() > u16::MAX as usize {
-        return None;
-    }
-    if text.starts_with('/') || text.contains(['\\', '\0']) {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for part in text.split('/') {
-        if part.is_empty() || part == "." || part == ".." {
-            return None;
-        }
-        parts.push(part);
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(parts.join("/"))
 }
 
 fn zip_download_name(album: &str) -> String {
@@ -482,21 +703,8 @@ fn zip_content_length(files: &[ZipPart], zip64: bool) -> u64 {
     len
 }
 
-fn local_offsets(files: &[ZipPart], zip64: bool) -> (Vec<u64>, u64) {
-    let mut offsets = Vec::with_capacity(files.len());
-    let mut offset = 0u64;
-    for file in files {
-        offsets.push(offset);
-        offset += local_header_len(&file.name, zip64) + file.size + descriptor_len(zip64);
-    }
-    (offsets, offset)
-}
-
-fn zip_body(
-    files: Vec<ZipPart>,
-    zip64: bool,
-) -> impl Stream<Item = Result<Bytes, io::Error>> + Send {
-    let state = ZipEncode::new(files, zip64);
+fn zip_body(plan: ZipPlan) -> impl Stream<Item = Result<Bytes, io::Error>> + Send {
+    let state = ZipStream::new(plan);
     futures::stream::unfold(state, |mut state| async move {
         if state.dead {
             return None;
@@ -512,22 +720,21 @@ fn zip_body(
     })
 }
 
-impl ZipEncode {
-    fn new(files: Vec<ZipPart>, zip64: bool) -> Self {
-        let (offsets, cd_offset) = local_offsets(&files, zip64);
+impl ZipStream {
+    fn new(plan: ZipPlan) -> Self {
+        let zip64 = plan.zip64();
         Self {
-            files,
-            offsets,
-            index: 0,
+            plan,
+            zip64,
+            current: None,
             reader: None,
             crc: 0,
             read: 0,
+            offset: 0,
             records: Vec::new(),
             pending: Vec::new(),
             pending_pos: 0,
-            phase: Phase::File,
-            zip64,
-            cd_offset,
+            phase: ZipPhase::File,
             central_ready: false,
             dead: false,
         }
@@ -539,90 +746,125 @@ impl ZipEncode {
         self.pending_pos = 0;
     }
 
+    fn take_pending(&mut self) -> Option<Bytes> {
+        if self.pending_pos >= self.pending.len() {
+            return None;
+        }
+        let end = (self.pending_pos + CHUNK).min(self.pending.len());
+        let bytes = Bytes::copy_from_slice(&self.pending[self.pending_pos..end]);
+        self.pending_pos = end;
+        if self.pending_pos == self.pending.len() {
+            self.pending.clear();
+            self.pending_pos = 0;
+        }
+        self.offset += bytes.len() as u64;
+        Some(bytes)
+    }
+
+    fn finish_entry(&mut self) {
+        let crc = self.crc;
+        let size = self.read;
+        if let Some(record) = self.records.last_mut() {
+            record.crc = crc;
+            record.size = size;
+        }
+        let mut descriptor = Vec::new();
+        write_descriptor(&mut descriptor, crc, size, self.zip64);
+        self.queue(descriptor);
+        self.reader = None;
+        if let Some(entry) = self.current.take()
+            && entry.temp
+        {
+            let _ = std::fs::remove_file(&entry.path);
+        }
+    }
+
     async fn pull(&mut self) -> io::Result<Option<Bytes>> {
         loop {
-            if self.pending_pos < self.pending.len() {
-                let end = (self.pending_pos + CHUNK).min(self.pending.len());
-                let bytes = Bytes::copy_from_slice(&self.pending[self.pending_pos..end]);
-                self.pending_pos = end;
-                if self.pending_pos == self.pending.len() {
-                    self.pending.clear();
-                    self.pending_pos = 0;
-                }
+            if let Some(bytes) = self.take_pending() {
                 return Ok(Some(bytes));
             }
             match self.phase {
-                Phase::Done => return Ok(None),
-                Phase::Central => {
+                ZipPhase::Done => return Ok(None),
+                ZipPhase::Central => {
                     if !self.central_ready {
-                        self.queue(build_central(&self.records, self.cd_offset, self.zip64));
+                        self.queue(build_central(&self.records, self.offset, self.zip64));
                         self.central_ready = true;
                         continue;
                     }
-                    self.phase = Phase::Done;
+                    self.phase = ZipPhase::Done;
                     return Ok(None);
                 }
-                Phase::File => {
+                ZipPhase::File => {
                     if self.reader.is_none() {
-                        if self.index >= self.files.len() {
-                            self.phase = Phase::Central;
+                        if self.current.is_some() {
+                            self.finish_entry();
                             continue;
                         }
-                        let index = self.index;
-                        let name = self.files[index].name.clone();
-                        let path = self.files[index].path.clone();
-                        let size = self.files[index].size;
-                        let dos_time = self.files[index].dos_time;
-                        let dos_date = self.files[index].dos_date;
-                        let offset = self.offsets[index];
-                        self.records.push(CentralRec {
-                            name: name.clone(),
-                            crc: 0,
-                            size,
-                            offset,
-                            dos_time,
-                            dos_date,
-                        });
+                        let Some(entry) = self.plan.next_entry().await? else {
+                            self.phase = ZipPhase::Central;
+                            continue;
+                        };
                         let mut header = Vec::new();
-                        write_local(&mut header, &name, dos_time, dos_date, self.zip64);
+                        write_local(
+                            &mut header,
+                            &entry.name,
+                            entry.dos_time,
+                            entry.dos_date,
+                            self.zip64,
+                        );
                         self.queue(header);
-                        self.reader = Some(tokio::fs::File::open(&path).await?);
+                        self.records.push(CentralRec {
+                            name: entry.name.clone(),
+                            crc: 0,
+                            size: entry.size,
+                            offset: self.offset,
+                            dos_time: entry.dos_time,
+                            dos_date: entry.dos_date,
+                        });
                         self.crc = 0;
                         self.read = 0;
+                        // Track the entry before opening it: if the open fails the
+                        // stream is dropped and an owned temp file must still go.
+                        let path = entry.path.clone();
+                        self.current = Some(entry);
+                        self.reader = Some(tokio::fs::File::open(&path).await?);
                         continue;
                     }
-                    let file_size = self.files[self.index].size;
-                    if self.read < file_size {
-                        let want = ((file_size - self.read) as usize).min(CHUNK);
+                    let size = self.current.as_ref().map(|entry| entry.size).unwrap_or(0);
+                    if self.read < size {
+                        let want = ((size - self.read) as usize).min(CHUNK);
                         let mut buf = vec![0u8; want];
                         let mut got = 0;
                         while got < want {
-                            let n = self.reader.as_mut().unwrap().read(&mut buf[got..]).await?;
-                            if n == 0 {
+                            let read = self.reader.as_mut().unwrap().read(&mut buf[got..]).await?;
+                            if read == 0 {
                                 return Err(io::Error::new(
                                     io::ErrorKind::UnexpectedEof,
-                                    "photo changed size during download",
+                                    "file changed size while zipping",
                                 ));
                             }
-                            got += n;
+                            got += read;
                         }
                         self.crc = crc32_update(self.crc, &buf);
                         self.read += got as u64;
+                        self.offset += got as u64;
                         return Ok(Some(Bytes::from(buf)));
                     }
-                    let crc = self.crc;
-                    let size = self.read;
-                    if let Some(record) = self.records.last_mut() {
-                        record.crc = crc;
-                    }
-                    let mut desc = Vec::new();
-                    write_descriptor(&mut desc, crc, size, self.zip64);
-                    self.queue(desc);
-                    self.reader = None;
-                    self.index += 1;
-                    continue;
+                    self.finish_entry();
                 }
             }
+        }
+    }
+}
+
+impl Drop for ZipStream {
+    fn drop(&mut self) {
+        self.reader.take();
+        if let Some(entry) = self.current.take()
+            && entry.temp
+        {
+            let _ = std::fs::remove_file(&entry.path);
         }
     }
 }
@@ -779,6 +1021,7 @@ struct ExportTicket {
     quality: u32,
     max_width: u32,
     apply_xmp: bool,
+    apply_grade: bool,
     limiter: Arc<ConcurrencyLimiter>,
     expires: Instant,
 }
@@ -802,36 +1045,8 @@ pub struct ExportBatchRequest {
     max_width: Option<u32>,
     #[serde(default)]
     apply_xmp: Option<bool>,
-}
-
-enum ExportPhase {
-    File,
-    Central,
-    Done,
-}
-
-struct ExportEncode {
-    sources: Vec<ExportSource>,
-    index: usize,
-    out_ext: String,
-    quality: u32,
-    max_width: u32,
-    apply_xmp: bool,
-    limiter: Option<Arc<ConcurrencyLimiter>>,
-    used_names: HashSet<String>,
-    offset: u64,
-    records: Vec<CentralRec>,
-    reader: Option<tokio::fs::File>,
-    current_path: Option<PathBuf>,
-    current_is_temp: bool,
-    crc: u32,
-    read: u64,
-    size: u64,
-    pending: Vec<u8>,
-    pending_pos: usize,
-    phase: ExportPhase,
-    central_ready: bool,
-    dead: bool,
+    #[serde(default)]
+    apply_grade: Option<bool>,
 }
 
 pub async fn api_albums_export_batch(
@@ -846,138 +1061,47 @@ pub async fn api_albums_export_batch(
     };
     let owner = payload.owner.trim();
     let albumname = payload.albumname.trim();
-    if owner.is_empty()
-        || albumname.is_empty()
-        || owner.contains(['/', '\\', '\0'])
-        || albumname.contains(['/', '\\', '\0'])
-    {
-        return Err(AppError::BadRequest(tr(
-            lang,
-            "error.invalid_album_identifier",
-        )));
-    }
     let Some(out_ext) = export_extension(&payload.format) else {
         return Err(AppError::BadRequest(tr(
             lang,
             "error.unsupported_export_format",
         )));
     };
-    if payload.photos.is_empty() {
-        return Err(AppError::BadRequest(tr(
-            lang,
-            "error.download_photos_empty",
-        )));
-    }
-    if payload.photos.len() > MAX_EXPORT_PHOTOS {
-        return Err(AppError::BadRequest(trf(
-            lang,
-            "error.export_too_many",
-            &[("value", MAX_EXPORT_PHOTOS.to_string())],
-        )));
-    }
     let quality = payload.quality.unwrap_or(95).clamp(1, 100);
     let max_width = payload.max_width.unwrap_or(0);
-    let apply_xmp = payload.apply_xmp.unwrap_or(false);
+    // Same default as the single-photo export: XMP grading is opt-in.
+    let apply_xmp = payload.apply_xmp.unwrap_or(DEFAULT_APPLY_XMP);
+    let apply_grade = payload.apply_grade.unwrap_or(false);
 
-    let resolved = resolve_album_access(
+    let sources = collect_batch_sources(
         &cfg,
         &username,
-        &user_root,
-        &album_access_input(&username, owner, albumname),
+        user_root.as_path(),
+        owner,
+        albumname,
+        &payload.photos,
+        MAX_EXPORT_PHOTOS,
+        "error.export_too_many",
+        true,
         lang,
     )
     .await?;
-    if resolved.owner != owner || resolved.album_name != albumname {
-        return Err(AppError::Forbidden(tr(lang, "error.album_access_denied")));
-    }
 
-    let album_dir = albums_root(resolved.root_path.as_path()).join(&resolved.album_name);
-    let album_canon = tokio::fs::canonicalize(&album_dir).await.map_err(|_| {
-        AppError::NotFound(trf(
-            lang,
-            "error.resource_not_found",
-            &[("value", albumname.to_string())],
-        ))
-    })?;
-
-    let mut seen = HashSet::new();
-    let mut sources = Vec::new();
-    let mut needs_darktable = false;
-    for raw in &payload.photos {
-        let Some(subpath) = normalize_subpath(raw) else {
-            return Err(AppError::BadRequest(trf(
-                lang,
-                "error.download_bad_path",
-                &[("value", raw.clone())],
-            )));
-        };
-        if !seen.insert(subpath.clone()) {
-            continue;
-        }
-        let rel = format!("albums/{albumname}/{subpath}");
-        let host = into_host_path_safely(resolved.root_path.as_path(), &rel)?;
-        if !host.starts_with(&album_dir) {
-            return Err(AppError::BadRequest(trf(
-                lang,
-                "error.download_bad_path",
-                &[("value", raw.clone())],
-            )));
-        }
-        let canon = tokio::fs::canonicalize(&host).await.map_err(|_| {
-            AppError::NotFound(trf(
-                lang,
-                "error.resource_not_found",
-                &[("value", subpath.clone())],
-            ))
-        })?;
-        if !canon.starts_with(&album_canon) {
-            return Err(AppError::Forbidden(tr(lang, "error.invalid_shared_path")));
-        }
-        let meta = tokio::fs::metadata(&canon).await.map_err(|_| {
-            AppError::NotFound(trf(
-                lang,
-                "error.resource_not_found",
-                &[("value", subpath.clone())],
-            ))
-        })?;
-        if !meta.is_file() {
-            return Err(AppError::BadRequest(trf(
-                lang,
-                "error.download_not_a_file",
-                &[("value", subpath.clone())],
-            )));
-        }
-        if !is_image_path(&canon) {
-            return Err(AppError::BadRequest(trf(
-                lang,
-                "error.export_not_image",
-                &[("value", subpath.clone())],
-            )));
-        }
-        if photo_needs_darktable(&canon, out_ext, max_width, apply_xmp) {
-            needs_darktable = true;
-        }
-        let (dos_time, dos_date) =
-            dos_timestamp(meta.modified().unwrap_or_else(|_| SystemTime::now()));
-        sources.push(ExportSource {
-            subpath,
-            path: canon,
-            dos_time,
-            dos_date,
-        });
-    }
-    if sources.is_empty() {
-        return Err(AppError::BadRequest(tr(
-            lang,
-            "error.download_photos_empty",
-        )));
-    }
-    if needs_darktable && !darktable_installed() {
+    if !apply_grade
+        && sources
+            .iter()
+            .any(|source| photo_needs_darktable(&source.path, out_ext, max_width, apply_xmp))
+        && !darktable_installed()
+    {
         return Err(AppError::BadRequest(tr(
             lang,
             "error.darktable_not_available",
         )));
     }
+    let sources: Vec<ExportSource> = sources
+        .into_iter()
+        .map(BatchSource::export_source)
+        .collect();
 
     let id = Uuid::new_v4().to_string();
     {
@@ -995,6 +1119,7 @@ pub async fn api_albums_export_batch(
                 quality,
                 max_width,
                 apply_xmp,
+                apply_grade,
                 limiter: cfg.darktable_limiter.clone(),
                 expires: Instant::now() + TICKET_TTL,
             },
@@ -1048,7 +1173,11 @@ pub async fn api_albums_export_batch_file(
     }
 
     let filename = ticket.filename.clone();
-    let body = Body::from_stream(export_zip_body(ticket));
+    let body = Body::from_stream(zip_body(ZipPlan::Export {
+        ticket,
+        index: 0,
+        used_names: HashSet::new(),
+    }));
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -1153,246 +1282,10 @@ fn next_entry_name(
     candidate
 }
 
-fn export_zip_body(ticket: ExportTicket) -> impl Stream<Item = Result<Bytes, io::Error>> + Send {
-    let state = ExportEncode::from_ticket(ticket);
-    futures::stream::unfold(state, |mut state| async move {
-        if state.dead {
-            return None;
-        }
-        match state.pull().await {
-            Ok(Some(bytes)) => Some((Ok(bytes), state)),
-            Ok(None) => None,
-            Err(err) => {
-                state.dead = true;
-                Some((Err(err), state))
-            }
-        }
-    })
-}
-
-impl ExportEncode {
-    fn from_ticket(ticket: ExportTicket) -> Self {
-        Self {
-            sources: ticket.sources,
-            index: 0,
-            out_ext: ticket.out_ext,
-            quality: ticket.quality,
-            max_width: ticket.max_width,
-            apply_xmp: ticket.apply_xmp,
-            limiter: Some(ticket.limiter),
-            used_names: HashSet::new(),
-            offset: 0,
-            records: Vec::new(),
-            reader: None,
-            current_path: None,
-            current_is_temp: false,
-            crc: 0,
-            read: 0,
-            size: 0,
-            pending: Vec::new(),
-            pending_pos: 0,
-            phase: ExportPhase::File,
-            central_ready: false,
-            dead: false,
-        }
-    }
-
-    fn queue(&mut self, bytes: Vec<u8>) {
-        debug_assert!(self.pending.is_empty());
-        self.pending = bytes;
-        self.pending_pos = 0;
-    }
-
-    fn take_pending(&mut self) -> Option<Bytes> {
-        if self.pending_pos >= self.pending.len() {
-            return None;
-        }
-        let end = (self.pending_pos + CHUNK).min(self.pending.len());
-        let bytes = Bytes::copy_from_slice(&self.pending[self.pending_pos..end]);
-        self.pending_pos = end;
-        if self.pending_pos == self.pending.len() {
-            self.pending.clear();
-            self.pending_pos = 0;
-        }
-        self.offset += bytes.len() as u64;
-        Some(bytes)
-    }
-
-    async fn begin_entry(&mut self) -> io::Result<()> {
-        let source_path = self.sources[self.index].path.clone();
-        let subpath = self.sources[self.index].subpath.clone();
-        let dos_time = self.sources[self.index].dos_time;
-        let dos_date = self.sources[self.index].dos_date;
-        let xmp = if self.apply_xmp {
-            find_xmp_sidecar(&source_path)
-        } else {
-            None
-        };
-        let edited = xmp.is_some();
-        let out_ext = self.out_ext.clone();
-        let quality = self.quality;
-        let max_width = self.max_width;
-        let direct = !edited && max_width == 0 && same_export_format(&source_path, &out_ext);
-        let entry_name = next_entry_name(&mut self.used_names, &subpath, &out_ext, edited);
-        let output = if direct {
-            self.current_path = Some(source_path.clone());
-            self.current_is_temp = false;
-            source_path
-        } else {
-            let temp = std::env::temp_dir().join(format!(
-                "lumeno-export-{}-{}.{}",
-                Uuid::new_v4(),
-                self.index,
-                out_ext
-            ));
-            self.current_path = Some(temp.clone());
-            self.current_is_temp = true;
-            let limiter = self
-                .limiter
-                .clone()
-                .ok_or_else(|| io::Error::other("export limiter missing"))?;
-            let _permit = limiter.acquire().await;
-            darktable_export(
-                &source_path,
-                xmp.as_deref(),
-                &temp,
-                &out_ext,
-                quality,
-                max_width,
-            )
-            .await
-            .map_err(|err| io::Error::other(err.message))?;
-            temp
-        };
-        let meta = tokio::fs::metadata(&output).await?;
-        if !meta.is_file() {
-            return Err(io::Error::other("export did not produce a file"));
-        }
-        self.size = meta.len();
-        self.read = 0;
-        self.crc = 0;
-        self.records.push(CentralRec {
-            name: entry_name.clone(),
-            crc: 0,
-            size: self.size,
-            offset: self.offset,
-            dos_time,
-            dos_date,
-        });
-        let mut header = Vec::new();
-        write_local(&mut header, &entry_name, dos_time, dos_date, true);
-        self.queue(header);
-        self.reader = Some(tokio::fs::File::open(&output).await?);
-        Ok(())
-    }
-
-    fn finish_entry(&mut self) {
-        let crc = self.crc;
-        let size = self.read;
-        if let Some(record) = self.records.last_mut() {
-            record.crc = crc;
-            record.size = size;
-        }
-        let mut desc = Vec::new();
-        write_descriptor(&mut desc, crc, size, true);
-        self.queue(desc);
-        self.reader.take();
-        if self.current_is_temp {
-            if let Some(path) = self.current_path.take() {
-                let _ = std::fs::remove_file(path);
-            }
-        } else {
-            self.current_path = None;
-        }
-        self.current_is_temp = false;
-        self.index += 1;
-    }
-
-    async fn pull(&mut self) -> io::Result<Option<Bytes>> {
-        loop {
-            if let Some(bytes) = self.take_pending() {
-                return Ok(Some(bytes));
-            }
-            match self.phase {
-                ExportPhase::Done => return Ok(None),
-                ExportPhase::Central => {
-                    if !self.central_ready {
-                        self.queue(build_central(&self.records, self.offset, true));
-                        self.central_ready = true;
-                        continue;
-                    }
-                    self.phase = ExportPhase::Done;
-                    return Ok(None);
-                }
-                ExportPhase::File => {
-                    if self.reader.is_none() {
-                        if self.index >= self.sources.len() {
-                            self.phase = ExportPhase::Central;
-                            continue;
-                        }
-                        self.begin_entry().await?;
-                        continue;
-                    }
-                    if self.read < self.size {
-                        let want = ((self.size - self.read) as usize).min(CHUNK);
-                        let mut buf = vec![0u8; want];
-                        let mut got = 0;
-                        while got < want {
-                            let n = self.reader.as_mut().unwrap().read(&mut buf[got..]).await?;
-                            if n == 0 {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::UnexpectedEof,
-                                    "export file shrank during download",
-                                ));
-                            }
-                            got += n;
-                        }
-                        self.crc = crc32_update(self.crc, &buf);
-                        self.read += got as u64;
-                        self.offset += got as u64;
-                        return Ok(Some(Bytes::from(buf)));
-                    }
-                    self.finish_entry();
-                }
-            }
-        }
-    }
-}
-
-impl Drop for ExportEncode {
-    fn drop(&mut self) {
-        self.reader.take();
-        if self.current_is_temp {
-            if let Some(path) = self.current_path.take() {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures::StreamExt;
-
-    #[test]
-    fn subpath_rejects_escape_and_keeps_nested_names() {
-        assert_eq!(
-            normalize_subpath("2024/a.jpg").as_deref(),
-            Some("2024/a.jpg")
-        );
-        assert_eq!(
-            normalize_subpath("  nest/b.JPG  ").as_deref(),
-            Some("nest/b.JPG")
-        );
-        assert!(normalize_subpath("").is_none());
-        assert!(normalize_subpath("../a.jpg").is_none());
-        assert!(normalize_subpath("a/../../b.jpg").is_none());
-        assert!(normalize_subpath("/abs.jpg").is_none());
-        assert!(normalize_subpath("a\\b.jpg").is_none());
-        assert!(normalize_subpath("a//b.jpg").is_none());
-        assert!(normalize_subpath(".").is_none());
-    }
 
     async fn collect_zip(dir: &std::path::Path, zip64: bool) -> Vec<u8> {
         let hello = dir.join("a.jpg");
@@ -1417,7 +1310,11 @@ mod tests {
             },
         ];
         let expected = zip_content_length(&files, zip64);
-        let mut stream = Box::pin(zip_body(files, zip64));
+        let mut stream = Box::pin(zip_body(ZipPlan::Files {
+            parts: files,
+            index: 0,
+            zip64,
+        }));
         let mut out = Vec::new();
         while let Some(chunk) = stream.next().await {
             out.extend_from_slice(&chunk.unwrap());
@@ -1518,7 +1415,15 @@ mod tests {
         let nested = dir.join("sub").join("b.jpg");
         tokio::fs::write(&hello, b"hello").await.unwrap();
         tokio::fs::write(&nested, b"world!").await.unwrap();
-        let encode = ExportEncode {
+        let settings = std::sync::Arc::new(crate::backend::settings::SettingsManager::new(
+            std::env::temp_dir().join(format!("lumeno-limiter-{}.json", Uuid::new_v4())),
+        ));
+        let limiter = ConcurrencyLimiter::for_thumbnails(&settings).await;
+        let ticket = ExportTicket {
+            viewer: "alice".into(),
+            owner: "alice".into(),
+            album_name: "Trip".into(),
+            filename: "Trip.zip".into(),
             sources: vec![
                 ExportSource {
                     subpath: "a.jpg".into(),
@@ -1533,39 +1438,19 @@ mod tests {
                     dos_date: 33,
                 },
             ],
-            index: 0,
             out_ext: "jpg".into(),
             quality: 95,
             max_width: 0,
-            apply_xmp: true,
-            limiter: None,
-            used_names: HashSet::new(),
-            offset: 0,
-            records: Vec::new(),
-            reader: None,
-            current_path: None,
-            current_is_temp: false,
-            crc: 0,
-            read: 0,
-            size: 0,
-            pending: Vec::new(),
-            pending_pos: 0,
-            phase: ExportPhase::File,
-            central_ready: false,
-            dead: false,
+            // Same format and size: the entries are copied straight through.
+            apply_xmp: false,
+            apply_grade: false,
+            limiter,
+            expires: Instant::now() + TICKET_TTL,
         };
-        let mut stream = Box::pin(futures::stream::unfold(encode, |mut state| async move {
-            if state.dead {
-                return None;
-            }
-            match state.pull().await {
-                Ok(Some(bytes)) => Some((Ok(bytes), state)),
-                Ok(None) => None,
-                Err(err) => {
-                    state.dead = true;
-                    Some((Err(err), state))
-                }
-            }
+        let mut stream = Box::pin(zip_body(ZipPlan::Export {
+            ticket,
+            index: 0,
+            used_names: HashSet::new(),
         }));
         let mut out = Vec::new();
         while let Some(chunk) = stream.next().await {

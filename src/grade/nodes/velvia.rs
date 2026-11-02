@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, text};
+use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{InputDesc, OutputDesc};
 use crate::grade::color::luma;
 use crate::grade::exec::{Frame, map_rgb};
@@ -38,8 +38,8 @@ impl NodeParam for Velvia {
         json!({ "strength": self.strength, "bias": self.bias })
     }
 
-    fn fields(&self, locale: &str) -> Vec<FieldSpec> {
-        self.ui_fields(locale)
+    fn fields(&self) -> Vec<FieldSpec> {
+        self.ui_fields()
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
@@ -102,12 +102,11 @@ impl Node for Velvia {
 }
 
 impl Velvia {
-    pub(super) fn ui_fields(&self, locale: &str) -> Vec<FieldSpec> {
-        let zh = locale.starts_with("zh");
+    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
         vec![
             field::slider(
                 "strength",
-                text(zh, "Strength", "强度"),
+                "grade.field.strength",
                 self.strength,
                 0.0,
                 1.0,
@@ -115,7 +114,7 @@ impl Velvia {
             ),
             field::slider(
                 "bias",
-                text(zh, "Bias", "偏向"),
+                "grade.field.bias",
                 self.bias,
                 0.25,
                 4.0,
