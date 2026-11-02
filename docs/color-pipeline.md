@@ -927,6 +927,35 @@ p = (c - domain_min) / (domain_max - domain_min) * (size - 1)
 
 找不到引用、种类不对或表尺寸非法时，执行返回 `Resource(...)`。节点不打开文件路径。
 
+### 9.13a ColorZones
+
+按色相把画面分成若干段，分别调它们的明度、彩度和色相。输入、输出都是线性 Rec.2020。
+
+| 字段 | 类型 | 范围 | 默认 |
+| --- | --- | --- | --- |
+| `lightness` | 控制点数组 `[[hue, value], …]` | hue 0–360，value −100–100 | 两端 `0` |
+| `chroma` | 同上 | value −100–100 | 两端 `0` |
+| `hue` | 同上 | value −180–180（度） | 两端 `0` |
+| `mix` | f32 | 0–100（%） | 100 |
+| `process_mode` | `smooth` \| `strong` | — | `smooth` |
+| `interpolation` | `centripetal_spline` \| `cubic_spline` \| `linear` | — | `centripetal_spline` |
+
+控制点的 hue 先排序、夹到 `[0, 360]`；两端不足时用首尾点向外延伸，所以曲线在整圈色相上都有定义。`hue = 0` 与 `360` 是同一条线，保存时保留两个端点，执行时按环形取值。
+
+色相取自 **HSV**：线性 Rec.2020 先转线性 sRGB，按 `V = max`、`S = (max-min)/max`、标准色相公式取 `(h, s, v)`。色相轮与界面画的渐变一一对应（红 0、黄 60、青 180、蓝 240），`V` 不设上限，所以相机高光超过 1 也能原样往返。三个曲线各自把 `h` 映射成一个调整量：
+
+```text
+V' = V * (1 + lightness(h) / 100)
+S' = clamp(S * (1 + chroma(h) / 100), 0, 1)
+h' = h + hue(h)
+```
+
+`V'` 不小于 0，`h'` 取模到 `[0, 360)`。转回 HSV → 线性 sRGB → 线性 Rec.2020。没有颜色（`V ≈ 0`）的像素原样返回。`process_mode = strong` 时把三个调整量按符号平方（`x * |x|`），选择更"硬"，过渡更窄；`smooth` 直接用插值结果。
+
+`interpolation` 决定控制点之间怎么连：`linear` 是折线；`cubic_spline` 是普通三次样条；`centripetal_spline` 用向心 Catmull-Rom（α = 0.5），控制点不等距时不会打结。三者都只在相邻两点之间插值，不改变端点值。
+
+`mix = 0` 直接返回输入。否则 `out = in + mix/100 * (adjusted - in)`，在**线性**空间混合，避免在编码空间混出灰边。节点不改缓冲的 `space`，也不读掩码以外的输入。
+
 ### 9.14 Blend
 
 Blend 把多张已经算好的图像按层合成一张。它不负责把不同尺寸配准，也不负责把线性光和显示光变成同一种数。对不齐就拒绝，而不是缩放或自动插入 Sigmoid。

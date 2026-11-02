@@ -37,9 +37,9 @@ use crate::backend::album::video_encode::{
     encode_file, encode_root, is_encode_codec, probe_file, source_cache_key,
 };
 use crate::backend::cache_areas::{self, CacheArea, CacheGc, CacheLayout};
-use crate::backend::common::{ApiResult, AppError, AppState, Ctx, create_response};
+use crate::backend::common::{ApiResult, AppError, AppState, Ctx};
 use crate::backend::constants::{THUMBNAIL_CACHE_SIZES, THUMBNAIL_SIZE_MAX, THUMBNAIL_SIZE_MIN};
-use crate::backend::i18n::{RequestLocale, tr, trf};
+use crate::backend::i18n::{tr, trf};
 use crate::backend::tasks::{Task, TaskBase, TaskStatus, format_subtask};
 
 pub const REPORT_VERSION: u32 = 1;

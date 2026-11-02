@@ -12,6 +12,7 @@ import RotateNode from "./RotateNode.vue";
 import CropNode from "./CropNode.vue";
 import SigmoidNode from "./SigmoidNode.vue";
 import LutNode from "./LutNode.vue";
+import ColorZonesNode from "./ColorZonesNode.vue";
 import ExportNode from "./ExportNode.vue";
 import GenericNode from "./GenericNode.vue";
 
@@ -30,6 +31,7 @@ const views = {
   "crop": CropNode,
   "sigmoid": SigmoidNode,
   "lut": LutNode,
+  "color-zones": ColorZonesNode,
   "export": ExportNode,
 };
 

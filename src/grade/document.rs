@@ -125,6 +125,7 @@ pub fn document_with_camera(raw: bool, baseline_ev: f32, camera: Option<CameraCo
         list.push(vertex("dehaze", nodes::dehaze(), false));
     }
     list.push(vertex("velvia", nodes::velvia(), raw));
+    list.push(vertex("color-zones", nodes::color_zones(), false));
     list.push(vertex("denoise", nodes::denoise(), raw));
     list.push(vertex("sharpen", nodes::sharpen(), raw));
     list.push(vertex("rotate", nodes::rotate(), true));
@@ -265,6 +266,7 @@ pub fn title_key(id: &str) -> &'static str {
         "local-contrast" => "grade.node.local_contrast",
         "dehaze" => "grade.node.dehaze",
         "velvia" => "grade.node.velvia",
+        "color-zones" => "grade.node.color_zones",
         "denoise" => "grade.node.denoise",
         "sharpen" => "grade.node.sharpen",
         "rotate" => "grade.node.rotate",

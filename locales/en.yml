@@ -206,6 +206,7 @@ filter:
 
 grade:
   node:
+    color_zones: "Color Zones"
     input: "Input"
     white_balance: "White Balance"
     demosaic: "Demosaic"
@@ -223,6 +224,9 @@ grade:
     export: "Export"
     unknown: "Node"
   field:
+    mix: "Mix"
+    process_mode: "Process mode"
+    interpolation: "Interpolation"
     width: "Width"
     height: "Height"
     strength: "Strength"
@@ -262,6 +266,11 @@ grade:
     on: "On"
     off: "Off"
   option:
+    smooth: "Smooth"
+    strong: "Strong"
+    centripetal: "Centripetal spline"
+    cubic: "Cubic spline"
+    linear: "Linear"
     bilinear: "Bilinear"
     rcd: "RCD"
     clip: "Clip"
@@ -281,3 +290,4 @@ grade:
     as_shot: "As shot"
     temperature: "Temperature"
     gains: "Gains"
+

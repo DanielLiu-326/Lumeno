@@ -2,6 +2,7 @@
 //! separate: a node exposes its parameters through [`Node::params`]. Construction
 //! from a type name is the only match left in this module.
 
+mod color_zones;
 mod crop;
 mod dehaze;
 mod demosaic;
@@ -124,6 +125,10 @@ pub(crate) fn velvia() -> Box<dyn Node> {
     Box::new(velvia::Velvia::new())
 }
 
+pub(crate) fn color_zones() -> Box<dyn Node> {
+    Box::new(color_zones::ColorZones::new())
+}
+
 pub(crate) fn denoise() -> Box<dyn Node> {
     Box::new(denoise::Denoise::new())
 }
@@ -169,6 +174,9 @@ pub(crate) fn param_from_json(node_type: &str, value: &Value) -> Result<Box<dyn 
             .map(|node| Box::new(node) as Box<dyn Node>),
         "dehaze" => dehaze::Dehaze::from_json(value).map(|node| Box::new(node) as Box<dyn Node>),
         "velvia" => velvia::Velvia::from_json(value).map(|node| Box::new(node) as Box<dyn Node>),
+        "color-zones" => {
+            color_zones::ColorZones::from_json(value).map(|node| Box::new(node) as Box<dyn Node>)
+        }
         "denoise" => denoise::Denoise::from_json(value).map(|node| Box::new(node) as Box<dyn Node>),
         "sharpen" => sharpen::Sharpen::from_json(value).map(|node| Box::new(node) as Box<dyn Node>),
         "rotate" => rotate::Rotate::from_json(value).map(|node| Box::new(node) as Box<dyn Node>),

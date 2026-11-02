@@ -206,6 +206,7 @@ filter:
 
 grade:
   node:
+    color_zones: "色彩分区"
     input: "输入"
     white_balance: "白平衡"
     demosaic: "去马赛克"
@@ -223,6 +224,9 @@ grade:
     export: "导出"
     unknown: "节点"
   field:
+    mix: "混合"
+    process_mode: "处理模式"
+    interpolation: "插值方式"
     width: "宽度"
     height: "高度"
     strength: "强度"
@@ -262,6 +266,11 @@ grade:
     on: "开"
     off: "关"
   option:
+    smooth: "平滑"
+    strong: "强"
+    centripetal: "向心样条"
+    cubic: "三次样条"
+    linear: "线性"
     bilinear: "双线性"
     rcd: "RCD"
     clip: "裁切"
@@ -281,3 +290,4 @@ grade:
     as_shot: "相机白平衡"
     temperature: "色温"
     gains: "通道增益"
+

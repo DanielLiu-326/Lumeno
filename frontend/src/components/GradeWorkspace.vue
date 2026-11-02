@@ -12,7 +12,7 @@ import { nodeView } from "./grade/node_view/views.js";
 const GROUPS = {
   base: ["input", "white-balance", "demosaic", "input-color-profile", "rotate", "crop", "export"],
   tone: ["exposure", "local-contrast", "sigmoid"],
-  color: ["velvia", "lut"],
+  color: ["velvia", "color-zones", "lut"],
   correct: ["dehaze", "denoise", "sharpen"],
   effect: [],
 };
