@@ -101,40 +101,70 @@ function evaluate(list, hue) {
   const [x0, y0] = list[index];
   const [x1raw, y1] = list[(index + 1) % n];
   const x1 = index + 1 < n ? x1raw : x1raw + 360;
-  const t = Math.max(0, Math.min(1, (hue - x0) / Math.max(1e-3, x1 - x0)));
+  const span = Math.max(1e-3, x1 - x0);
+  const t = Math.max(0, Math.min(1, (hue - x0) / span));
   if (props.node.params?.interpolation === "linear") {
     return y0 + (y1 - y0) * t;
   }
-  const [xp, yp] = list[(index + n - 1) % n];
-  const [xn, yn] = list[(index + 2) % n];
-  const xPrev = index === 0 ? xp - 360 : xp;
-  const xNext = index + 2 < n ? xn : xn + 360;
-  let m0;
-  let m1;
-  if (props.node.params?.interpolation === "centripetal_spline") {
-    const spanPrev = Math.max(1e-3, x0 - xPrev);
-    const spanNext = Math.max(1e-3, xNext - x1);
-    m0 = ((y1 - yp) / (spanPrev + (x1 - x0))) * (x1 - x0);
-    m1 = ((yn - y0) / ((x1 - x0) + spanNext)) * (x1 - x0);
-  } else {
-    m0 = (y1 - yp) / 2;
-    m1 = (yn - y0) / 2;
-  }
+  // One slope per control point, shared by both neighbours, so the curve stays
+  // differentiable at the point (per-segment tangents bend it into a corner).
+  const m0 = slope(list, index);
+  const m1 = slope(list, (index + 1) % n);
   const t2 = t * t;
   const t3 = t2 * t;
   return (
-    (2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * m0 + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * m1
+    (2 * t3 - 3 * t2 + 1) * y0 +
+    (t3 - 2 * t2 + t) * span * m0 +
+    (-2 * t3 + 3 * t2) * y1 +
+    (t3 - t2) * span * m1
   );
 }
 
+function slope(list, index) {
+  const n = list.length;
+  const first = list[0][0];
+  const y = (i) => list[((i % n) + n) % n][1];
+  const xPrev = index === 0 ? first - 360 : list[index - 1][0];
+  const xNext = index + 1 < n ? list[index + 1][0] : first + 360;
+  const hPrev = Math.max(1e-3, list[index][0] - xPrev);
+  const hNext = Math.max(1e-3, xNext - list[index][0]);
+  const prev = y(index - 1);
+  const next = y(index + 1);
+  const here = list[index][1];
+  if (props.node.params?.interpolation !== "centripetal_spline") {
+    return (next - prev) / (hPrev + hNext);
+  }
+  const sPrev = (here - prev) / hPrev;
+  const sNext = (next - here) / hNext;
+  return (sPrev * hNext + sNext * hPrev) / (hPrev + hNext);
+}
+
 function commit(next) {
-  const sorted = next
+  const max = activeTab.value.max;
+  const clamped = next
     .map(([hue, value]) => [
       Math.max(0, Math.min(360, Math.round(hue))),
-      Math.max(-activeTab.value.max, Math.min(activeTab.value.max, Math.round(value))),
+      Math.max(-max, Math.min(max, Math.round(value))),
     ])
     .sort((a, b) => a[0] - b[0]);
-  props.node.params[activeTab.value.key] = sorted;
+  // Two points on the same hue would make a vertical step; keep the last one.
+  const merged = [];
+  for (const point of clamped) {
+    const last = merged[merged.length - 1];
+    if (last && Math.abs(last[0] - point[0]) < 1) {
+      last[1] = point[1];
+    } else {
+      merged.push([...point]);
+    }
+  }
+  if (merged.length >= 2) {
+    const first = merged[0];
+    const last = merged[merged.length - 1];
+    if (first[0] <= 1 && last[0] >= 359) {
+      last[1] = first[1];
+    }
+  }
+  props.node.params[activeTab.value.key] = merged;
   emit("pick");
 }
 
@@ -174,6 +204,11 @@ function onPointerDown(event) {
   const { x, y } = localPoint(event);
   let index = nearestIndex(event);
   if (index < 0) {
+    // A second point on the same hue would be a vertical step, not a curve.
+    const sameHue = points.value.findIndex(([entry]) => Math.abs(entry - x) < 1.5);
+    if (sameHue >= 0) index = sameHue;
+  }
+  if (index < 0) {
     const list = [...points.value.map((point) => [...point])];
     const hue = Math.max(0, Math.min(360, x));
     const insert = list.findIndex(([entry]) => entry > hue);
@@ -197,6 +232,14 @@ function onPointerMove(event) {
   const upper = dragIndex < list.length - 1 ? list[dragIndex + 1][0] - 1 : 360;
   list[dragIndex][0] = Math.max(lower, Math.min(upper, x));
   list[dragIndex][1] = fromY(y);
+  // 0° and 360° are the same hue: keep the two ends on one value.
+  if (list.length > 2) {
+    if (dragIndex === 0 && list[list.length - 1][0] >= 359) {
+      list[list.length - 1][1] = list[0][1];
+    } else if (dragIndex === list.length - 1 && list[0][0] <= 1) {
+      list[0][1] = list[list.length - 1][1];
+    }
+  }
   props.node.params[activeTab.value.key] = list;
 }
 

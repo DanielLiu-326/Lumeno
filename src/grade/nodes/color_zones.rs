@@ -19,7 +19,7 @@ enum ProcessMode {
     Strong,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Interpolation {
     Centripetal,
     Cubic,
@@ -152,6 +152,17 @@ fn parse_curve(raw: Option<&Value>, min: f32, max: f32) -> Result<Vec<Point>, St
         });
     }
     points.sort_by(|a, b| a.hue.total_cmp(&b.hue));
+    // Hue 0 and 360 are one place on the wheel, so they must agree; otherwise the
+    // wrap segment becomes a step.
+    let first_hue = points.first().map(|point| point.hue);
+    let first_value = points.first().map(|point| point.value);
+    if let (Some(first_hue), Some(first_value), Some(last)) =
+        (first_hue, first_value, points.last_mut())
+        && first_hue <= 1e-3
+        && (last.hue - 360.0).abs() <= 1e-3
+    {
+        last.value = first_value;
+    }
     Ok(points)
 }
 
@@ -213,7 +224,6 @@ fn eval(points: &[Point], hue: f32, interpolation: Interpolation) -> f32 {
     }
     let hue = hue.rem_euclid(360.0);
     let n = points.len();
-    // Find the segment [i, i+1] with wraparound.
     let mut index = n - 1;
     for i in 0..n {
         let start = points[i].hue;
@@ -240,38 +250,50 @@ fn eval(points: &[Point], hue: f32, interpolation: Interpolation) -> f32 {
     match interpolation {
         Interpolation::Linear => p0.value + (p1.value - p0.value) * t,
         Interpolation::Cubic | Interpolation::Centripetal => {
-            let prev = points[(index + n - 1) % n];
-            let next = points[(index + 2) % n];
-            let x_prev = if index == 0 {
-                prev.hue - 360.0
-            } else {
-                prev.hue
-            };
-            let x_next = if index + 2 < n {
-                next.hue
-            } else {
-                next.hue + 360.0
-            };
-            let (m0, m1) = if interpolation == Interpolation::Centripetal {
-                // Non-uniform Catmull-Rom: tangents are scaled by the segment
-                // lengths, so an unevenly spaced point does not overshoot.
-                let h_prev = (x0 - x_prev).max(1e-3);
-                let h_next = (x_next - x1).max(1e-3);
-                (
-                    (p1.value - prev.value) / (h_prev + span) * span,
-                    (next.value - p0.value) / (span + h_next) * span,
-                )
-            } else {
-                ((p1.value - prev.value) / 2.0, (next.value - p0.value) / 2.0)
-            };
+            // One slope per point, shared by both neighbouring segments: that is
+            // what keeps the curve differentiable at a control point. Computing
+            // tangents per segment (or from a wrapped neighbour that sits on the
+            // same x) bends the curve into a corner.
+            let m0 = slope(points, index, interpolation);
+            let m1 = slope(points, (index + 1) % n, interpolation);
             let t2 = t * t;
             let t3 = t2 * t;
             (2.0 * t3 - 3.0 * t2 + 1.0) * p0.value
-                + (t3 - 2.0 * t2 + t) * m0
+                + (t3 - 2.0 * t2 + t) * span * m0
                 + (-2.0 * t3 + 3.0 * t2) * p1.value
-                + (t3 - t2) * m1
+                + (t3 - t2) * span * m1
         }
     }
+}
+
+/// Slope at `index` in value-per-degree. `Cubic` is the uniform centred
+/// difference; `Centripetal` weights the two secants by their x span, which is
+/// the non-uniform variant (Barry–Goldman tangents reduced to 1-D).
+fn slope(points: &[Point], index: usize, interpolation: Interpolation) -> f32 {
+    let n = points.len();
+    let first = points[0].hue;
+    let y = |i: usize| points[i % n].value;
+    let x_prev = if index == 0 {
+        first - 360.0
+    } else {
+        points[index - 1].hue
+    };
+    let x_next = if index + 1 < n {
+        points[index + 1].hue
+    } else {
+        first + 360.0
+    };
+    let h_prev = (points[index].hue - x_prev).max(1e-3);
+    let h_next = (x_next - points[index].hue).max(1e-3);
+    let prev = y(index + n - 1);
+    let next = y(index + 1);
+    let here = points[index].value;
+    if interpolation == Interpolation::Cubic {
+        return (next - prev) / (h_prev + h_next);
+    }
+    let s_prev = (here - prev) / h_prev;
+    let s_next = (next - here) / h_next;
+    (s_prev * h_next + s_next * h_prev) / (h_prev + h_next)
 }
 
 impl NodeParam for ColorZones {
@@ -437,6 +459,54 @@ mod tests {
         let wrapped = eval(&points, 300.0, Interpolation::Linear);
         assert!(wrapped < 0.0 && wrapped > -50.0, "wrapped={wrapped}");
         assert!((eval(&points, 360.0, Interpolation::Linear) - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn curve_has_no_corner_at_a_control_point() {
+        let points = vec![
+            Point {
+                hue: 0.0,
+                value: 0.0,
+            },
+            Point {
+                hue: 60.0,
+                value: 50.0,
+            },
+            Point {
+                hue: 240.0,
+                value: -30.0,
+            },
+            Point {
+                hue: 360.0,
+                value: 0.0,
+            },
+        ];
+        for mode in [Interpolation::Cubic, Interpolation::Centripetal] {
+            for point in &points[1..points.len() - 1] {
+                let eps = 0.05;
+                let left =
+                    (eval(&points, point.hue, mode) - eval(&points, point.hue - eps, mode)) / eps;
+                let right =
+                    (eval(&points, point.hue + eps, mode) - eval(&points, point.hue, mode)) / eps;
+                assert!(
+                    (left - right).abs() < 0.05,
+                    "{mode:?} corner at {}: left={left} right={right}",
+                    point.hue
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_endpoints_share_one_value() {
+        let node = ColorZones::from_json(&serde_json::json!({
+            "lightness": [[0.0, 20.0], [120.0, 0.0], [360.0, -40.0]],
+        }))
+        .unwrap();
+        let json = node.to_json();
+        assert_eq!(json["lightness"][2][1], 20.0);
+        assert!((eval(&node.lightness, 0.0, Interpolation::Cubic) - 20.0).abs() < 1e-3);
+        assert!((eval(&node.lightness, 359.9, Interpolation::Cubic) - 20.0).abs() < 1.5);
     }
 
     #[test]
