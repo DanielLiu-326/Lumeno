@@ -122,21 +122,22 @@ function evaluate(list, hue) {
 
 function slope(list, index) {
   const n = list.length;
-  const first = list[0][0];
   const y = (i) => list[((i % n) + n) % n][1];
-  const xPrev = index === 0 ? first - 360 : list[index - 1][0];
-  const xNext = index + 1 < n ? list[index + 1][0] : first + 360;
+  const xPrev = index === 0 ? list[n - 1][0] - 360 : list[index - 1][0];
+  const xNext = index + 1 < n ? list[index + 1][0] : list[0][0] + 360;
   const hPrev = Math.max(1e-3, list[index][0] - xPrev);
   const hNext = Math.max(1e-3, xNext - list[index][0]);
   const prev = y(index - 1);
   const next = y(index + 1);
   const here = list[index][1];
+  const sPrev = (here - prev) / hPrev;
+  const sNext = (next - here) / hNext;
   if (props.node.params?.interpolation !== "centripetal_spline") {
     return (next - prev) / (hPrev + hNext);
   }
-  const sPrev = (here - prev) / hPrev;
-  const sNext = (next - here) / hNext;
-  return (sPrev * hNext + sNext * hPrev) / (hPrev + hNext);
+  // A full spline bows the segment into a hump; scaling the tangent down keeps
+  // it close to the straight line while still rounding the corner.
+  return ((sPrev * hNext + sNext * hPrev) / (hPrev + hNext)) * 0.35;
 }
 
 function commit(next) {

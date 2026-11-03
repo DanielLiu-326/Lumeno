@@ -271,30 +271,39 @@ fn eval(points: &[Point], hue: f32, interpolation: Interpolation) -> f32 {
 /// the non-uniform variant (Barry–Goldman tangents reduced to 1-D).
 fn slope(points: &[Point], index: usize, interpolation: Interpolation) -> f32 {
     let n = points.len();
-    let first = points[0].hue;
     let y = |i: usize| points[i % n].value;
+    // Unwrap the periodic neighbour to the side of the current point, whatever
+    // hue it sits on: a last point at 200 must appear at -160 before hue 0.
     let x_prev = if index == 0 {
-        first - 360.0
+        points[n - 1].hue - 360.0
     } else {
         points[index - 1].hue
     };
     let x_next = if index + 1 < n {
         points[index + 1].hue
     } else {
-        first + 360.0
+        points[0].hue + 360.0
     };
     let h_prev = (points[index].hue - x_prev).max(1e-3);
     let h_next = (x_next - points[index].hue).max(1e-3);
     let prev = y(index + n - 1);
     let next = y(index + 1);
     let here = points[index].value;
+    let s_prev = (here - prev) / h_prev;
+    let s_next = (next - here) / h_next;
     if interpolation == Interpolation::Cubic {
         return (next - prev) / (h_prev + h_next);
     }
     let s_prev = (here - prev) / h_prev;
     let s_next = (next - here) / h_next;
-    (s_prev * h_next + s_next * h_prev) / (h_prev + h_next)
+    let weighted = (s_prev * h_next + s_next * h_prev) / (h_prev + h_next);
+    weighted * CENTRIPETAL_TENSION
 }
+
+/// A full spline leaves each control point at the average slope of its two
+/// neighbours, which bows the segment into a soft hump. Scaling the tangents
+/// down keeps the segment close to the straight line and still rounds the corner.
+const CENTRIPETAL_TENSION: f32 = 0.35;
 
 impl NodeParam for ColorZones {
     fn node_type(&self) -> &'static str {
@@ -510,28 +519,31 @@ mod tests {
     }
 
     #[test]
-    fn centripetal_and_cubic_differ_on_uneven_spacing() {
+    fn centripetal_stays_closer_to_the_segment_than_cubic() {
         let points = vec![
             Point {
                 hue: 0.0,
                 value: 0.0,
             },
             Point {
-                hue: 20.0,
-                value: 60.0,
+                hue: 100.0,
+                value: 100.0,
             },
             Point {
-                hue: 300.0,
-                value: -20.0,
+                hue: 200.0,
+                value: 0.0,
             },
         ];
-        let cubic = eval(&points, 10.0, Interpolation::Cubic);
-        let centripetal = eval(&points, 10.0, Interpolation::Centripetal);
+        let linear_mid = 50.0;
+        let cubic = eval(&points, 50.0, Interpolation::Cubic);
+        let centripetal = eval(&points, 50.0, Interpolation::Centripetal);
+        assert!(cubic > linear_mid + 1.0, "cubic should bow: {cubic}");
         assert!(
-            (cubic - centripetal).abs() > 0.5,
-            "cubic={cubic} centripetal={centripetal}"
+            (centripetal - linear_mid).abs() < (cubic - linear_mid).abs(),
+            "centripetal={centripetal} cubic={cubic}"
         );
         for point in &points {
+            assert!((eval(&points, point.hue, Interpolation::Cubic) - point.value).abs() < 1e-3);
             assert!(
                 (eval(&points, point.hue, Interpolation::Centripetal) - point.value).abs() < 1e-3
             );
