@@ -1,11 +1,12 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { t } from "../../i18n/index.js";
 import { useGradeSession } from "../../composables/useGradeSession";
 import { useOverlayHistory } from "../useOverlayHistory.js";
 import { IconArrowLeft, IconCheck } from "../../utils/icons";
 import GradeSlider from "./GradeSlider.vue";
 import GradeToolIcon from "./GradeToolIcon.vue";
+import Collapse from "./Collapse.vue";
 
 const props = defineProps({
   photo: { type: Object, required: true },
@@ -134,43 +135,6 @@ function modeOptions(nodeEntry) {
   return nodeEntry.fields.find((field) => field.key === "mode")?.options || [];
 }
 
-// The sheet keeps its layout height and slides with `transform`; the image is
-// scaled (also a transform) so it stays fully visible above the sheet.
-const sheet = ref(null);
-const stageH = ref(0);
-const sheetH = ref(0);
-const safeBottom = ref(0);
-const COLLAPSED_H = 64;
-const TOOLS_H = 120;
-
-function measureSheet() {
-  stageH.value = stage.value?.getBoundingClientRect().height || 0;
-  sheetH.value = sheet.value?.getBoundingClientRect().height || 0;
-  safeBottom.value = sheet.value
-    ? Number.parseFloat(getComputedStyle(sheet.value).paddingBottom) || 0
-    : 0;
-}
-
-const visibleSheet = computed(() => {
-  if (!sheetH.value) return 0;
-  if (selectedNode.value) return sheetH.value;
-  const base = categoryEntry.value ? TOOLS_H : COLLAPSED_H;
-  return Math.min(sheetH.value, base + safeBottom.value);
-});
-
-const sheetStyle = computed(() => ({
-  transform: `translateY(${Math.max(0, Math.round(sheetH.value - visibleSheet.value))}px)`,
-}));
-
-const fitStyle = computed(() => {
-  if (!stageH.value || !sheetH.value) return { transform: "scale(1)" };
-  const available = stageH.value - visibleSheet.value;
-  const scale = Math.max(0.35, Math.min(1, available / stageH.value));
-  return { transform: `scale(${scale.toFixed(4)})` };
-});
-
-let resizeObserver = null;
-
 // ── canvas ────────────────────────────────────────────
 const stage = ref(null);
 const view = reactive({ scale: 1, x: 0, y: 0 });
@@ -277,12 +241,6 @@ onBeforeUnmount(() => {
 onMounted(() => {
   open.value = true;
   void openSession(props.photo.path);
-  void nextTick(() => {
-    measureSheet();
-    resizeObserver = new ResizeObserver(() => measureSheet());
-    if (stage.value) resizeObserver.observe(stage.value);
-    if (sheet.value) resizeObserver.observe(sheet.value);
-  });
 });
 
 watch(
@@ -325,121 +283,120 @@ function close() {
         @pointerup="onPointerUp"
         @pointercancel="onPointerUp"
       >
-        <div class="absolute inset-0 origin-top transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]" :style="fitStyle">
-          <img
-            v-if="preview"
-            :src="comparing ? before : preview"
-            class="absolute inset-0 h-full w-full object-contain"
-            :style="imageStyle"
-            draggable="false"
-            alt=""
-          />
-        </div>
-        <div v-if="!preview" class="flex h-full items-center justify-center text-sm text-stone-500">
+        <img
+          v-if="preview"
+          :src="comparing ? before : preview"
+          class="absolute inset-0 h-full w-full object-contain"
+          :style="imageStyle"
+          draggable="false"
+          alt=""
+        />
+        <div v-else class="flex h-full items-center justify-center text-sm text-stone-500">
           {{ loading ? t("mobile.gradeLoading") : t("mobile.gradeEmpty") }}
         </div>
         <div class="pointer-events-none absolute inset-x-0 top-0 flex justify-center pt-2">
           <span v-if="comparing" class="rounded-full bg-black/60 px-2.5 py-1 text-[0.6875rem] text-stone-200">{{ t("mobile.gradeCompare") }}</span>
         </div>
+      </div>
 
-        <!-- The sheet always has the same layout height; only its transform
-             changes. That keeps the expand animation on the compositor. -->
-        <section
-          ref="sheet"
-          class="absolute inset-x-0 bottom-0 flex h-[52vh] flex-col rounded-t-2xl border-t border-white/10 bg-[#151515] pb-[env(safe-area-inset-bottom)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-          :style="sheetStyle"
-        >
-          <div class="min-h-0 flex-1 overflow-y-auto px-4 pt-3">
-            <div v-if="!canWrite" class="mb-3 rounded-lg bg-rose-500/15 px-3 py-2 text-[0.75rem] text-rose-200">
-              {{ t("mobile.gradeReadOnly") }}
-            </div>
-            <div v-if="panelNode" :key="panelNode.id">
-              <div class="mb-3 flex items-center justify-between">
-                <span class="text-[0.8125rem] font-medium text-stone-200">{{ panelNode.title }}</span>
-                <button type="button" class="rounded-md px-2 py-1 text-[0.6875rem] text-stone-400" @click="resetNode(panelNode)">
-                  {{ t("mobile.gradeReset") }}
-                </button>
-              </div>
+      <section class="border-t border-white/10 bg-[#151515] pb-[calc(env(safe-area-inset-bottom)+6px)] [contain:layout_paint]">
+        <div v-if="!canWrite" class="mx-4 mt-3 rounded-lg bg-rose-500/15 px-3 py-2 text-[0.75rem] text-rose-200">
+          {{ t("mobile.gradeReadOnly") }}
+        </div>
 
-              <div v-if="panelNode.id === 'white-balance'" class="mb-3 flex gap-1.5">
-                <button
-                  v-for="option in modeOptions(panelNode)"
-                  :key="option.value"
-                  type="button"
-                  class="flex-1 rounded-lg px-2 py-1.5 text-[0.75rem]"
-                  :class="panelNode.params.mode === option.value ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
-                  @click="onChoice(panelNode, { key: 'mode' }, option.value)"
-                >
-                  {{ option.label }}
-                </button>
-              </div>
+        <!-- parameters of the selected tool -->
+        <Collapse :open="!!selectedNode" :duration="300">
+            <div v-if="panelNode" class="max-h-[50vh] overflow-y-auto px-4 pt-3">
+              <div :key="panelNode.id">
+                  <div class="mb-3 flex items-center justify-between">
+                    <span class="text-[0.8125rem] font-medium text-stone-200">{{ panelNode.title }}</span>
+                    <button type="button" class="rounded-md px-2 py-1 text-[0.6875rem] text-stone-400" @click="resetNode(panelNode)">
+                      {{ t("mobile.gradeReset") }}
+                    </button>
+                  </div>
 
-              <div class="space-y-4 pb-3">
-                <template v-for="field in panelNode.fields" :key="panelNode.id + ':' + field.key">
-                  <GradeSlider
-                    v-if="field.kind === 'slider'"
-                    :label="field.label"
-                    :model-value="Number(panelNode.params[field.key])"
-                    :min="field.min"
-                    :max="field.max"
-                    :step="(field.max - field.min) / 400"
-                    :display="formatValue(field, panelNode.params[field.key])"
-                    :gradient="gradientFor(field)"
-                    :disabled="!canWrite"
-                    @start="beginEdit(panelNode.id)"
-                    @input="(value) => onInput(panelNode, field, value)"
-                    @reset="resetField(panelNode, field)"
-                    @end="endEdit()"
-                  />
-                  <div v-else-if="field.kind === 'choice' && panelNode.id !== 'white-balance'" class="flex gap-1.5">
+                  <div v-if="panelNode.id === 'white-balance'" class="mb-3 flex gap-1.5">
                     <button
-                      v-for="option in field.options"
+                      v-for="option in modeOptions(panelNode)"
                       :key="option.value"
                       type="button"
                       class="flex-1 rounded-lg px-2 py-1.5 text-[0.75rem]"
-                      :class="String(panelNode.params[field.key]) === String(option.value) ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
-                      @click="onChoice(panelNode, field, option.value)"
+                      :class="panelNode.params.mode === option.value ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
+                      @click="onChoice(panelNode, { key: 'mode' }, option.value)"
                     >
                       {{ option.label }}
                     </button>
                   </div>
-                </template>
-              </div>
+
+                  <div class="space-y-4 pb-3">
+                    <template v-for="field in panelNode.fields" :key="panelNode.id + ':' + field.key">
+                      <GradeSlider
+                        v-if="field.kind === 'slider'"
+                        :label="field.label"
+                        :model-value="Number(panelNode.params[field.key])"
+                        :min="field.min"
+                        :max="field.max"
+                        :step="(field.max - field.min) / 400"
+                        :display="formatValue(field, panelNode.params[field.key])"
+                        :gradient="gradientFor(field)"
+                        :disabled="!canWrite"
+                        @start="beginEdit(panelNode.id)"
+                        @input="(value) => onInput(panelNode, field, value)"
+                        @reset="resetField(panelNode, field)"
+                        @end="endEdit()"
+                      />
+                      <div v-else-if="field.kind === 'choice' && panelNode.id !== 'white-balance'" class="flex gap-1.5">
+                        <button
+                          v-for="option in field.options"
+                          :key="option.value"
+                          type="button"
+                          class="flex-1 rounded-lg px-2 py-1.5 text-[0.75rem]"
+                          :class="String(panelNode.params[field.key]) === String(option.value) ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
+                          @click="onChoice(panelNode, field, option.value)"
+                        >
+                          {{ option.label }}
+                        </button>
+                      </div>
+                    </template>
+
+                  </div>
+                </div>
             </div>
-          </div>
+        </Collapse>
 
-          <!-- tools of the selected category -->
-          <div class="flex h-14 shrink-0 items-center gap-1.5 overflow-x-auto px-3">
-            <button
-              v-for="entry in toolsCategory?.nodes || []"
-              :key="entry.id"
-              type="button"
-              class="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-[0.75rem]"
-              :class="toolId === entry.id ? 'bg-white/14 text-white' : 'text-stone-400'"
-              @click="toggleTool(entry.id)"
-            >
-              <GradeToolIcon :kind="entry.id" :size="22" />
-              {{ entry.title }}
-              <span v-if="modified(entry)" class="h-1 w-1 rounded-full bg-sky-400" />
-            </button>
-          </div>
+        <!-- tools of the selected category -->
+        <Collapse :open="!!categoryEntry" :duration="250">
+            <div v-if="toolsCategory" class="flex gap-1 overflow-x-auto px-3 pt-2">
+              <button
+                v-for="entry in toolsCategory.nodes"
+                :key="entry.id"
+                type="button"
+                class="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-[0.75rem]"
+                :class="toolId === entry.id ? 'bg-white/14 text-white' : 'text-stone-400'"
+                @click="toggleTool(entry.id)"
+              >
+                <GradeToolIcon :kind="entry.id" :size="22" />
+                {{ entry.title }}
+                <span v-if="modified(entry)" class="h-1 w-1 rounded-full bg-sky-400" />
+              </button>
+            </div>
+        </Collapse>
 
-          <!-- categories -->
-          <div class="flex h-16 shrink-0 items-stretch justify-around px-2 pt-1">
-            <button
-              v-for="entry in categories"
-              :key="entry.key"
-              type="button"
-              class="flex flex-1 flex-col items-center gap-1 rounded-lg py-1.5 text-[0.625rem]"
-              :class="category === entry.key ? 'text-white' : 'text-stone-500'"
-              @click="toggleCategory(entry.key)"
-            >
-              <GradeToolIcon :kind="entry.key" :size="18" />
-              {{ t(entry.label) }}
-            </button>
-          </div>
-        </section>
-      </div>
+        <!-- categories -->
+        <div class="flex items-stretch justify-around px-2 pb-1 pt-2">
+          <button
+            v-for="entry in categories"
+            :key="entry.key"
+            type="button"
+            class="flex flex-1 flex-col items-center gap-1 rounded-lg py-1.5 text-[0.625rem]"
+            :class="category === entry.key ? 'text-white' : 'text-stone-500'"
+            @click="toggleCategory(entry.key)"
+          >
+            <GradeToolIcon :kind="entry.key" :size="18" />
+            {{ t(entry.label) }}
+          </button>
+        </div>
+      </section>
     </div>
   </Teleport>
 </template>
