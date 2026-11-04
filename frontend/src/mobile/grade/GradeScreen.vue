@@ -299,14 +299,14 @@ function close() {
         </div>
       </div>
 
-      <section class="border-t border-white/10 bg-[#151515] pb-[env(safe-area-inset-bottom)]">
+      <section class="border-t border-white/10 bg-[#151515] pb-[calc(env(safe-area-inset-bottom)+6px)]">
         <div v-if="!canWrite" class="mx-4 mt-3 rounded-lg bg-rose-500/15 px-3 py-2 text-[0.75rem] text-rose-200">
           {{ t("mobile.gradeReadOnly") }}
         </div>
 
         <!-- parameters of the selected tool -->
         <Collapse :open="!!selectedNode" :duration="300">
-            <div v-if="panelNode" class="max-h-[36vh] overflow-y-auto px-4 pt-3">
+            <div v-if="panelNode" class="max-h-[50vh] overflow-y-auto px-4 pt-3">
               <div :key="panelNode.id">
                   <div class="mb-3 flex items-center justify-between">
                     <span class="text-[0.8125rem] font-medium text-stone-200">{{ panelNode.title }}</span>
