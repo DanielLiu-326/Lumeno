@@ -493,3 +493,29 @@ export const IconSliders = iconStrokes(
   ["M4 7h9M17 7h3M4 17h3M11 17h9", "M13 4.5v5M7 14.5v5"],
   "0 0 24 24",
 );
+
+// ── Grade tools ────────────────────────────────────────
+export const IconContrast = iconStrokes(
+  ["M12 3a9 9 0 0 1 0 18 9 9 0 0 1 0-18Z", "M12 3v18"],
+  "0 0 24 24",
+);
+
+export const IconDroplet = iconStrokes(
+  ["M12 3.5c3.2 3.6 5.5 6.6 5.5 9.2a5.5 5.5 0 1 1-11 0c0-2.6 2.3-5.6 5.5-9.2Z"],
+  "0 0 24 24",
+);
+
+export const IconTriangle = iconStrokes(
+  ["M12 4.5 21 19.5H3L12 4.5Z"],
+  "0 0 24 24",
+);
+
+export const IconThermometer = iconStrokes(
+  ["M12 4a2.5 2.5 0 0 1 2.5 2.5v8a4.5 4.5 0 1 1-5 0v-8A2.5 2.5 0 0 1 12 4Z", "M12 9v7"],
+  "0 0 24 24",
+);
+
+export const IconHaze = iconStrokes(
+  ["M5 8.5a4 4 0 0 1 7.4-2 3.2 3.2 0 0 1 5.1 2.6", "M3.5 13h17", "M5.5 17h13", "M8 20.5h8"],
+  "0 0 24 24",
+);

@@ -5,6 +5,7 @@ import { useGradeSession } from "../../composables/useGradeSession";
 import { useOverlayHistory } from "../useOverlayHistory.js";
 import { IconArrowLeft, IconCheck } from "../../utils/icons";
 import GradeSlider from "./GradeSlider.vue";
+import GradeToolIcon from "./GradeToolIcon.vue";
 
 const props = defineProps({
   photo: { type: Object, required: true },
@@ -16,27 +17,64 @@ const {
   nodes, preview, before, loading, error, saved, canWrite, canUndo, canRedo,
   node, open: openSession, setParam, setChoice, beginEdit, endEdit, undo, redo,
 } = useGradeSession();
+
 const open = ref(false);
 useOverlayHistory(open, () => emit("close"));
 
-const GROUPS = [
+// Bottom bar: one icon per category. Tapping it reveals the tools of that
+// category; tapping a tool reveals its parameters. Nothing else opens.
+const CATEGORIES = [
   { key: "tone", label: "grade.group.tone", ids: ["exposure", "local-contrast", "sigmoid"] },
   { key: "color", label: "grade.group.color", ids: ["velvia"] },
   { key: "correct", label: "grade.group.correct", ids: ["dehaze", "denoise", "sharpen"] },
+  { key: "base", label: "grade.group.base", ids: ["white-balance"] },
 ];
-const group = ref("tone");
 
-const whiteBalance = computed(() => nodes.value.find((entry) => entry.id === "white-balance") || null);
-const visibleNodes = computed(() => {
-  const entries = activeNodes.value.slice();
-  if (whiteBalance.value) entries.unshift(whiteBalance.value);
-  return entries;
+const categories = computed(() =>
+  CATEGORIES
+    .map((entry) => ({ ...entry, nodes: entry.ids.map((id) => node(id)).filter(Boolean) }))
+    .filter((entry) => entry.nodes.length > 0),
+);
+
+const category = ref("");
+const toolId = ref("");
+
+const categoryEntry = computed(() => categories.value.find((entry) => entry.key === category.value) || null);
+const selectedNode = computed(() => categoryEntry.value?.nodes.find((entry) => entry.id === toolId.value) || null);
+
+watch(
+  categories,
+  (list) => {
+    if (category.value && !list.some((entry) => entry.key === category.value)) {
+      category.value = "";
+      toolId.value = "";
+    }
+  },
+  { immediate: true },
+);
+
+watch(categoryEntry, (entry) => {
+  if (!entry) return;
+  if (!entry.nodes.some((node) => node.id === toolId.value)) toolId.value = "";
 });
 
-const activeNodes = computed(() => {
-  const ids = GROUPS.find((entry) => entry.key === group.value)?.ids || [];
-  return ids.map((id) => node(id)).filter(Boolean);
-});
+function toggleCategory(key) {
+  category.value = category.value === key ? "" : key;
+  toolId.value = "";
+}
+
+function toggleTool(id) {
+  toolId.value = toolId.value === id ? "" : id;
+}
+
+function modified(nodeEntry) {
+  const defaults = nodeEntry.defaults || {};
+  return Object.entries(nodeEntry.params || {}).some(([key, value]) => {
+    const fallback = defaults[key];
+    if (fallback === undefined) return false;
+    return JSON.stringify(value) !== JSON.stringify(fallback);
+  });
+}
 
 const TEMP_GRADIENT = "linear-gradient(90deg,#2f5fe0,#8fb3ff,#f2f2f2,#ffd479,#ffab2e)";
 const TINT_GRADIENT = "linear-gradient(90deg,#3fbf7f,#d0d0d0,#b56ad6)";
@@ -57,30 +95,30 @@ function gradientFor(field) {
   return "";
 }
 
-function onInput(node, field, value) {
-  setParam(node.id, field.key, value);
+function onInput(nodeEntry, field, value) {
+  setParam(nodeEntry.id, field.key, value);
 }
 
-function onChoice(node, field, value) {
-  setChoice(node.id, field.key, value);
+function onChoice(nodeEntry, field, value) {
+  setChoice(nodeEntry.id, field.key, value);
 }
 
-function modeOptions(node) {
-  return node.fields.find((field) => field.key === "mode")?.options || [];
+function resetField(nodeEntry, field) {
+  const fallback = nodeEntry.defaults?.[field.key];
+  if (fallback !== undefined) setParam(nodeEntry.id, field.key, fallback);
 }
 
-function resetField(node, field) {
-  const fallback = node.defaults?.[field.key];
-  if (fallback !== undefined) setParam(node.id, field.key, fallback);
-}
-
-function resetNode(node) {
-  const defaults = node.defaults || {};
-  beginEdit(node.id);
+function resetNode(nodeEntry) {
+  const defaults = nodeEntry.defaults || {};
+  beginEdit(nodeEntry.id);
   for (const [key, value] of Object.entries(defaults)) {
-    setParam(node.id, key, value);
+    setParam(nodeEntry.id, key, value);
   }
   endEdit();
+}
+
+function modeOptions(nodeEntry) {
+  return nodeEntry.fields.find((field) => field.key === "mode")?.options || [];
 }
 
 // ── canvas ────────────────────────────────────────────
@@ -125,10 +163,6 @@ function onPointerDown(event) {
     pinchStart = {
       distance: Math.hypot(a.x - b.x, a.y - b.y),
       scale: view.scale,
-      x: (a.x + b.x) / 2,
-      y: (a.y + b.y) / 2,
-      tx: view.x,
-      ty: view.y,
     };
     clearTimeout(longTimer);
   }
@@ -137,8 +171,7 @@ function onPointerDown(event) {
 function onPointerMove(event) {
   if (!pointers.has(event.pointerId)) return;
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-  const start = panStart;
-  if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) {
+  if (panStart && Math.hypot(event.clientX - panStart.x, event.clientY - panStart.y) > 6) {
     moved = true;
     clearTimeout(longTimer);
   }
@@ -149,9 +182,9 @@ function onPointerMove(event) {
     clampView();
     return;
   }
-  if (pointers.size === 1 && start && moved && view.scale > 1) {
-    view.x = start.tx + (event.clientX - start.x);
-    view.y = start.ty + (event.clientY - start.y);
+  if (pointers.size === 1 && panStart && moved && view.scale > 1) {
+    view.x = panStart.tx + (event.clientX - panStart.x);
+    view.y = panStart.ty + (event.clientY - panStart.y);
     clampView();
   }
 }
@@ -252,86 +285,95 @@ function close() {
         </div>
       </div>
 
-      <section class="rounded-t-2xl border-t border-white/10 bg-[#151515] pb-[env(safe-area-inset-bottom)]">
-        <div class="flex gap-1 overflow-x-auto px-2 pt-1.5">
-          <button
-            v-for="entry in GROUPS"
-            :key="entry.key"
-            type="button"
-            class="shrink-0 rounded-lg px-3 py-1.5 text-[0.75rem] font-medium transition"
-            :class="group === entry.key ? 'bg-white/14 text-white' : 'text-stone-400'"
-            @click="group = entry.key"
-          >
-            {{ t(entry.label) }}
-          </button>
+      <section class="border-t border-white/10 bg-[#151515] pb-[env(safe-area-inset-bottom)]">
+        <div v-if="!canWrite" class="mx-4 mt-3 rounded-lg bg-rose-500/15 px-3 py-2 text-[0.75rem] text-rose-200">
+          {{ t("mobile.gradeReadOnly") }}
         </div>
 
-        <div class="max-h-[42vh] space-y-4 overflow-y-auto px-4 pb-4 pt-3">
-          <div v-if="!canWrite" class="rounded-lg bg-rose-500/15 px-3 py-2 text-[0.75rem] text-rose-200">
-            {{ t("mobile.gradeReadOnly") }}
+        <!-- parameters of the selected tool -->
+        <div v-if="selectedNode" class="max-h-[36vh] overflow-y-auto px-4 pt-3">
+          <div class="mb-3 flex items-center justify-between">
+            <span class="text-[0.8125rem] font-medium text-stone-200">{{ selectedNode.title }}</span>
+            <button type="button" class="rounded-md px-2 py-1 text-[0.6875rem] text-stone-400" @click="resetNode(selectedNode)">
+              {{ t("mobile.gradeReset") }}
+            </button>
           </div>
 
-          <!-- One keyed list for every node, so a slider can never be patched
-               against the wrong node when the group or the mode changes. -->
-          <div
-            v-for="node in visibleNodes"
-            :key="node.id"
-            class="space-y-3 border-b border-white/8 pb-4 last:border-b-0 last:pb-0"
-          >
-            <div class="flex items-center justify-between">
-              <span class="text-[0.8125rem] font-medium text-stone-200">{{ node.title }}</span>
-              <button
-                type="button"
-                class="rounded-md px-2 py-1 text-[0.6875rem] text-stone-400"
-                @click="resetNode(node)"
-              >
-                {{ t("mobile.gradeReset") }}
-              </button>
-            </div>
+          <div v-if="selectedNode.id === 'white-balance'" class="mb-3 flex gap-1.5">
+            <button
+              v-for="option in modeOptions(selectedNode)"
+              :key="option.value"
+              type="button"
+              class="flex-1 rounded-lg px-2 py-1.5 text-[0.75rem]"
+              :class="selectedNode.params.mode === option.value ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
+              @click="onChoice(selectedNode, { key: 'mode' }, option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
 
-            <div v-if="node.id === 'white-balance'" class="flex gap-1.5">
-              <button
-                v-for="option in modeOptions(node)"
-                :key="option.value"
-                type="button"
-                class="flex-1 rounded-lg px-2 py-1.5 text-[0.75rem]"
-                :class="node.params.mode === option.value ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
-                @click="onChoice(node, { key: 'mode' }, option.value)"
-              >
-                {{ option.label }}
-              </button>
-            </div>
-
-            <template v-for="field in node.fields" :key="node.id + ':' + field.key">
+          <div class="space-y-4 pb-3">
+            <template v-for="field in selectedNode.fields" :key="selectedNode.id + ':' + field.key">
               <GradeSlider
                 v-if="field.kind === 'slider'"
                 :label="field.label"
-                :model-value="Number(node.params[field.key])"
+                :model-value="Number(selectedNode.params[field.key])"
                 :min="field.min"
                 :max="field.max"
                 :step="(field.max - field.min) / 400"
-                :display="formatValue(field, node.params[field.key])"
+                :display="formatValue(field, selectedNode.params[field.key])"
                 :gradient="gradientFor(field)"
                 :disabled="!canWrite"
-                @start="beginEdit(node.id)"
-                @input="(value) => onInput(node, field, value)"
-                @reset="resetField(node, field)"
+                @start="beginEdit(selectedNode.id)"
+                @input="(value) => onInput(selectedNode, field, value)"
+                @reset="resetField(selectedNode, field)"
                 @end="endEdit()"
               />
-              <div v-else-if="field.kind === 'choice' && node.id !== 'white-balance'" class="flex gap-1.5">
+              <div v-else-if="field.kind === 'choice' && selectedNode.id !== 'white-balance'" class="flex gap-1.5">
                 <button
                   v-for="option in field.options"
                   :key="option.value"
                   type="button"
                   class="flex-1 rounded-lg px-2 py-1.5 text-[0.75rem]"
-                  :class="String(node.params[field.key]) === String(option.value) ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
-                  @click="onChoice(node, field, option.value)"
+                  :class="String(selectedNode.params[field.key]) === String(option.value) ? 'bg-white/16 text-white' : 'bg-white/6 text-stone-400'"
+                  @click="onChoice(selectedNode, field, option.value)"
                 >
                   {{ option.label }}
                 </button>
               </div>
             </template>
           </div>
+        </div>
+
+        <!-- tools of the selected category -->
+        <div v-if="categoryEntry" class="flex gap-1 overflow-x-auto px-3 pt-2">
+          <button
+            v-for="entry in categoryEntry.nodes"
+            :key="entry.id"
+            type="button"
+            class="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-[0.75rem]"
+            :class="toolId === entry.id ? 'bg-white/14 text-white' : 'text-stone-400'"
+            @click="toggleTool(entry.id)"
+          >
+            <GradeToolIcon :kind="entry.id" :size="16" />
+            {{ entry.title }}
+            <span v-if="modified(entry)" class="h-1 w-1 rounded-full bg-sky-400" />
+          </button>
+        </div>
+
+        <!-- categories -->
+        <div class="flex items-stretch justify-around px-2 pb-1 pt-2">
+          <button
+            v-for="entry in categories"
+            :key="entry.key"
+            type="button"
+            class="flex flex-1 flex-col items-center gap-1 rounded-lg py-1.5 text-[0.625rem]"
+            :class="category === entry.key ? 'text-white' : 'text-stone-500'"
+            @click="toggleCategory(entry.key)"
+          >
+            <GradeToolIcon :kind="entry.key" />
+            {{ t(entry.label) }}
+          </button>
         </div>
       </section>
     </div>
