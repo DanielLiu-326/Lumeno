@@ -17,8 +17,9 @@ const emit = defineEmits(["start", "input", "end", "reset"]);
 const track = ref(null);
 let dragging = false;
 let pointerId = null;
-let longPress = 0;
 let lastTap = 0;
+let dragRect = null;
+let dragStart = null;
 
 const span = computed(() => (props.max - props.min) || 1);
 const percent = computed(() => {
@@ -27,9 +28,9 @@ const percent = computed(() => {
   return Math.max(0, Math.min(100, ((value - props.min) / span.value) * 100));
 });
 
-function valueAt(event) {
-  const rect = track.value.getBoundingClientRect();
-  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+function valueAt(event, rect) {
+  const box = rect || track.value.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (event.clientX - box.left) / box.width));
   const raw = props.min + ratio * span.value;
   const step = props.step > 0 ? props.step : span.value / 400;
   const snapped = Math.round(raw / step) * step;
@@ -42,16 +43,12 @@ function onPointerDown(event) {
   track.value.setPointerCapture?.(event.pointerId);
   dragging = true;
   pointerId = event.pointerId;
-  const now = Date.now();
-  if (now - lastTap < 300) reset();
-  lastTap = now;
-  clearTimeout(longPress);
-  longPress = window.setTimeout(() => {
-    if (!dragging) return;
-    reset();
-  }, 600);
+  // Cache the track box for the whole gesture: reading it on every move forces
+  // a layout flush between renders and is what made the drag feel sticky.
+  dragRect = track.value.getBoundingClientRect();
+  dragStart = { x: event.clientX, y: event.clientY, moved: false, at: Date.now() };
   emit("start");
-  emit("input", valueAt(event));
+  emit("input", valueAt(event, dragRect));
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp, { once: true });
   window.addEventListener("pointercancel", onPointerUp, { once: true });
@@ -59,27 +56,33 @@ function onPointerDown(event) {
 
 function onPointerMove(event) {
   if (!dragging || (pointerId !== null && event.pointerId !== pointerId)) return;
-  emit("input", valueAt(event));
+  if (dragStart && Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y) > 3) {
+    dragStart.moved = true;
+  }
+  emit("input", valueAt(event, dragRect));
 }
 
 function onPointerUp() {
-  clearTimeout(longPress);
   window.removeEventListener("pointermove", onPointerMove);
   if (!dragging) return;
   dragging = false;
-  emit("end");
-}
-
-function reset() {
-  clearTimeout(longPress);
-  window.removeEventListener("pointermove", onPointerMove);
-  dragging = false;
-  emit("reset");
+  // Double-tap (two taps without a drag) resets. Doing it on release means a
+  // quick tap followed by a drag never snaps the value back.
+  if (dragStart && !dragStart.moved && Date.now() - dragStart.at < 260) {
+    const now = Date.now();
+    if (now - lastTap < 320) {
+      lastTap = 0;
+      emit("reset");
+    } else {
+      lastTap = now;
+    }
+  }
+  dragStart = null;
+  dragRect = null;
   emit("end");
 }
 
 onBeforeUnmount(() => {
-  clearTimeout(longPress);
   window.removeEventListener("pointermove", onPointerMove);
 });
 </script>

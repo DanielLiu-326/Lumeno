@@ -33,6 +33,7 @@ export function useGradeSession() {
   const canWrite = ref(true);
 
   const queue = new Map();
+  const editing = new Set();
   let sendTimer = 0;
   let inflight = false;
   let editSnapshot = null;
@@ -118,7 +119,19 @@ export function useGradeSession() {
       rev.value = Number(data.rev) || rev.value;
       if (data.node) {
         const index = nodes.value.findIndex((entry) => entry.id === id);
-        if (index >= 0) nodes.value.splice(index, 1, data.node);
+        if (index >= 0) {
+          // The response describes the params of the request that was sent a
+          // moment ago. While the finger is still down (or more input is
+          // queued) the local params are newer: keeping them stops the thumb
+          // from jumping back to the stale value.
+          const local = nodes.value[index];
+          const stale = editing.has(id) || queue.has(id);
+          nodes.value.splice(index, 1, {
+            ...data.node,
+            enabled: stale ? local.enabled : data.node.enabled,
+            params: stale ? local.params : data.node.params,
+          });
+        }
       }
       if (data.preview) preview.value = data.preview;
       error.value = "";
@@ -166,11 +179,13 @@ export function useGradeSession() {
   function beginEdit(id) {
     const target = node(id);
     if (!target) return;
+    editing.add(id);
     editSnapshot = { id, params: JSON.stringify(target.params) };
   }
 
   function endEdit() {
     if (!editSnapshot) return;
+    editing.delete(editSnapshot.id);
     const target = node(editSnapshot.id);
     const after = target ? JSON.stringify(target.params) : "";
     if (target && after !== editSnapshot.params) {
