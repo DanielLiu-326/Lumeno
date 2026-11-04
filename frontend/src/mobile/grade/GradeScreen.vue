@@ -210,7 +210,7 @@ function close() {
 
 <template>
   <Teleport to="body">
-    <div class="mobile-grade fixed inset-0 z-[90] flex flex-col bg-[#0d0d0d] text-stone-100">
+    <div class="mobile-grade fixed inset-0 z-[160] flex flex-col bg-[#0d0d0d] text-stone-100">
       <header class="flex items-center gap-1 px-2 pt-[env(safe-area-inset-top)]">
         <button type="button" class="mobile-icon-btn flex h-11 w-11 items-center justify-center" :title="t('mobile.gradeClose')" @click="close">
           <IconArrowLeft class="h-5 w-5" />
