@@ -202,6 +202,18 @@ function onLumenoBooted() {
   window.setTimeout(sharpenScreenBoxes, 480);
 }
 
+// iOS re-rasters the page when a standalone app returns from the background or
+// restores a tab, and the restored raster keeps the soft top region. Rebuild the
+// screen boxes on both events instead of only after boot.
+function onPageShow() {
+  syncAppViewport();
+  sharpenAndRepaintMobileApp();
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === "visible") sharpenAndRepaintMobileApp();
+}
+
 function releaseLayer(el, settled) {
   if (!settled.value && !el?.classList.contains("is-settled")) return;
   settled.value = false;
@@ -721,7 +733,8 @@ onMounted(() => {
   }
   window.addEventListener("resize", syncAppViewport);
   window.addEventListener("orientationchange", syncAppViewport);
-  window.addEventListener("pageshow", syncAppViewport);
+  window.addEventListener("pageshow", onPageShow);
+  document.addEventListener("visibilitychange", onVisibilityChange);
   window.addEventListener("focusin", syncAppViewport);
   window.addEventListener("focusout", syncAppViewport);
   window.visualViewport?.addEventListener("resize", syncAppViewport);
@@ -745,7 +758,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("lumeno:booted", onLumenoBooted);
   window.removeEventListener("resize", syncAppViewport);
   window.removeEventListener("orientationchange", syncAppViewport);
-  window.removeEventListener("pageshow", syncAppViewport);
+  window.removeEventListener("pageshow", onPageShow);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
   window.removeEventListener("focusin", syncAppViewport);
   window.removeEventListener("focusout", syncAppViewport);
   window.visualViewport?.removeEventListener("resize", syncAppViewport);

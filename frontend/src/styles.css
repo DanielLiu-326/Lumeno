@@ -347,6 +347,39 @@ html.dark .app-frost-dense {
     background: rgb(255 255 255 / 0.78);
 }
 
+/* iOS standalone (added to the home screen) forces a full offscreen blur pass
+   for every `backdrop-filter`, which caps scrolling and panel animation at
+   60 Hz and leaves a soft raster around the status bar. The frosted surfaces
+   become opaque in that mode; the layout and colors do not change. */
+@media (display-mode: standalone) {
+    .app-frost,
+    .app-frost-glass,
+    .app-frost-toolbar,
+    .app-frost-dense,
+    .app-surface {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+    }
+
+    .app-frost,
+    .app-frost-glass,
+    .app-frost-toolbar,
+    .app-frost-dense,
+    .app-surface,
+    .mobile-tabbar {
+        background: #f4efe7;
+    }
+
+    html.dark .app-frost,
+    html.dark .app-frost-glass,
+    html.dark .app-frost-toolbar,
+    html.dark .app-frost-dense,
+    html.dark .app-surface,
+    html.dark .mobile-tabbar {
+        background: #0f172a;
+    }
+}
+
 /* Photo and file tiles sit inside an already frosted panel. A second
    backdrop-filter on every card forces a blur readback per tile while
    scrolling and will lock the desktop compositor. */

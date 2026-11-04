@@ -14,6 +14,7 @@ function finish(open) {
   const node = body.value;
   if (!node) return;
   node.style.height = open ? "auto" : "0px";
+  node.style.willChange = "";
 }
 
 async function animate(open) {
@@ -42,6 +43,7 @@ async function animate(open) {
   }
   node.style.height = `${start}px`;
   node.style.overflow = "hidden";
+  node.style.willChange = "height";
   void node.offsetHeight;
   node.style.height = `${end}px`;
   cleanup = () => finish(open);

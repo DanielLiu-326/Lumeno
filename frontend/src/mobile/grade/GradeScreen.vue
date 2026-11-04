@@ -299,7 +299,7 @@ function close() {
         </div>
       </div>
 
-      <section class="border-t border-white/10 bg-[#151515] pb-[calc(env(safe-area-inset-bottom)+6px)]">
+      <section class="border-t border-white/10 bg-[#151515] pb-[calc(env(safe-area-inset-bottom)+6px)] [contain:layout_paint]">
         <div v-if="!canWrite" class="mx-4 mt-3 rounded-lg bg-rose-500/15 px-3 py-2 text-[0.75rem] text-rose-200">
           {{ t("mobile.gradeReadOnly") }}
         </div>
