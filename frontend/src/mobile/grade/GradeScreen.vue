@@ -307,8 +307,7 @@ function close() {
         <!-- parameters of the selected tool -->
         <Collapse :open="!!selectedNode" :duration="300">
             <div v-if="panelNode" class="max-h-[36vh] overflow-y-auto px-4 pt-3">
-              <Transition name="grade-fade" mode="out-in">
-                <div :key="panelNode.id">
+              <div :key="panelNode.id">
                   <div class="mb-3 flex items-center justify-between">
                     <span class="text-[0.8125rem] font-medium text-stone-200">{{ panelNode.title }}</span>
                     <button type="button" class="rounded-md px-2 py-1 text-[0.6875rem] text-stone-400" @click="resetNode(panelNode)">
@@ -360,23 +359,8 @@ function close() {
                       </div>
                     </template>
 
-<style scoped>
-.grade-fade-enter-active,
-.grade-fade-leave-active {
-  transition: opacity 150ms ease, transform 150ms ease;
-}
-.grade-fade-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-.grade-fade-leave-to {
-  opacity: 0;
-  transform: translateY(-6px);
-}
-</style>
                   </div>
                 </div>
-              </Transition>
             </div>
         </Collapse>
 
@@ -417,17 +401,3 @@ function close() {
   </Teleport>
 </template>
 
-<style scoped>
-.grade-fade-enter-active,
-.grade-fade-leave-active {
-  transition: opacity 150ms ease, transform 150ms ease;
-}
-.grade-fade-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-.grade-fade-leave-to {
-  opacity: 0;
-  transform: translateY(-6px);
-}
-</style>
