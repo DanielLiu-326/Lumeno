@@ -167,28 +167,32 @@ function repaintMobileApp() {
   app.addEventListener("animationend", () => app.classList.remove("is-repaint"), { once: true });
 }
 
-// iOS rasters the first screen lazily while the boot splash still covers it
-// and keeps that low-quality raster afterwards (reads as a gaussian blur on
-// the top region). Only a real box rebuild clears it - the same reason an
-// edge-swipe back (which re-inserts the KeepAlive screen node) fixes it while
-// a plain repaint does not. Drop each resting screen's box for two frames so
-// WebKit re-rasters its content into the page host layer, then restore it.
+// iOS rasters the first screen lazily while the boot splash still covers it and
+// keeps that low-quality raster afterwards (reads as a gaussian blur on the top
+// region, including the strip under the status bar). An edge-swipe back clears it
+// because it re-inserts the screen node, so do the same here: take the screen and
+// the notch cap out of the DOM, flush layout, and put them back in place. A plain
+// repaint or a `display: contents` swap is not enough on current WebKit.
 function sharpenScreenBoxes() {
+  if (document.querySelector(".mobile-push-layer.is-open")) return;
+  if (document.querySelector("[class*='page-enter-active'], [class*='page-leave-active']")) return;
   const host = document.querySelector(".mobile-page-host");
-  if (!host) return;
-  const screens = [];
-  for (const el of host.children) {
-    if (el instanceof HTMLElement && el.style.display !== "contents") {
-      el.style.display = "contents";
-      screens.push(el);
-    }
+  const cap = document.querySelector(".mobile-notch-cap");
+  const targets = [];
+  if (host) targets.push(...host.children);
+  if (cap) targets.push(cap);
+  const moves = [];
+  for (const el of targets) {
+    if (!(el instanceof HTMLElement) || !el.isConnected || !el.parentNode) continue;
+    moves.push({ el, parent: el.parentNode, next: el.nextSibling });
   }
-  if (!screens.length) return;
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      for (const el of screens) el.style.display = "";
-    });
-  });
+  if (!moves.length) return;
+  for (const { el, parent } of moves) parent.removeChild(el);
+  void document.body.offsetHeight;
+  for (const { el, parent, next } of moves) {
+    if (next && next.parentNode === parent) parent.insertBefore(el, next);
+    else parent.appendChild(el);
+  }
 }
 
 function sharpenAndRepaintMobileApp() {
@@ -199,7 +203,11 @@ function sharpenAndRepaintMobileApp() {
 }
 
 function onLumenoBooted() {
-  window.setTimeout(sharpenScreenBoxes, 480);
+  // The first screen may still be painting when boot ends; repeat the rebuild a
+  // few times instead of trusting a single 480 ms timer.
+  for (const delay of [120, 480, 1200]) {
+    window.setTimeout(sharpenScreenBoxes, delay);
+  }
 }
 
 // iOS re-rasters the page when a standalone app returns from the background or
