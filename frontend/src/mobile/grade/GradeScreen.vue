@@ -355,7 +355,7 @@ function close() {
             :class="toolId === entry.id ? 'bg-white/14 text-white' : 'text-stone-400'"
             @click="toggleTool(entry.id)"
           >
-            <GradeToolIcon :kind="entry.id" :size="16" />
+            <GradeToolIcon :kind="entry.id" :size="22" />
             {{ entry.title }}
             <span v-if="modified(entry)" class="h-1 w-1 rounded-full bg-sky-400" />
           </button>
@@ -371,7 +371,7 @@ function close() {
             :class="category === entry.key ? 'text-white' : 'text-stone-500'"
             @click="toggleCategory(entry.key)"
           >
-            <GradeToolIcon :kind="entry.key" />
+            <GradeToolIcon :kind="entry.key" :size="18" />
             {{ t(entry.label) }}
           </button>
         </div>
