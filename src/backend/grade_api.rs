@@ -325,6 +325,8 @@ fn open_session(
     let payload = json!({
         "rev": rev,
         "nodes": nodes_json(&locale, &doc),
+        "raw": raw,
+        "writable": writable,
     });
     let session = GradeSession {
         last_used: std::time::Instant::now(),

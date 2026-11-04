@@ -487,3 +487,9 @@ export const IconStarOff = defineComponent({
     );
   },
 });
+
+// ── Grading ────────────────────────────────────────────
+export const IconSliders = iconStrokes(
+  ["M4 7h9M17 7h3M4 17h3M11 17h9", "M13 4.5v5M7 14.5v5"],
+  "0 0 24 24",
+);

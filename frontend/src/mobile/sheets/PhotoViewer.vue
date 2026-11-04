@@ -11,10 +11,11 @@ import { formatDurationMs, isVideoPhoto, playbackUrl } from "../../utils/mediaKi
 import { loadVideoInfo, planPlayback, startVideoEncode, watchVideoEncode } from "../../utils/videoEncode.js";
 import {
   IconArrowLeft, IconCamera, IconCheck, IconChevronLeft, IconChevronRight,
-  IconChevronUp, IconDots, IconDownload, IconImage, IconPencil, IconSparkles,
-  IconStar, IconTrash, IconViewOriginal,
+  IconChevronUp, IconDots, IconDownload, IconImage, IconPencil, IconSliders,
+  IconSparkles, IconStar, IconTrash, IconViewOriginal,
 } from "../../utils/icons";
 import ActionSheet from "./ActionSheet.vue";
+import GradeScreen from "../grade/GradeScreen.vue";
 import AppDialog from "../../components/AppDialog.vue";
 import AppSlider from "../../components/AppSlider.vue";
 import TagChips from "../../components/TagChips.vue";
@@ -103,6 +104,20 @@ const editColorLabels = ref([]);
 const editTags = ref([]);
 const moreOpen = ref(false);
 const viewOpen = ref(false);
+const gradeOpen = ref(false);
+
+function openGrade() {
+  if (!props.canWrite || isCurrentVideo.value) return;
+  moreOpen.value = false;
+  gradeOpen.value = true;
+}
+
+watch(
+  () => props.photo?.path,
+  () => {
+    gradeOpen.value = false;
+  },
+);
 const albumOpen = ref(false);
 const exportOpen = ref(false);
 const exporting = ref(false);
@@ -1141,6 +1156,9 @@ function onPickAlbum(action) {
           <p class="truncate text-sm font-semibold">{{ photo.name }}</p>
           <p v-if="indexLabel" class="text-[0.6875rem] opacity-60">{{ indexLabel }}</p>
         </div>
+        <button v-if="!isCurrentVideo && canWrite" type="button" class="mobile-icon-btn" :title="t('mobile.grade')" @click="openGrade">
+          <IconSliders class="h-5 w-5" />
+        </button>
         <button v-if="!isCurrentVideo" type="button" class="mobile-icon-btn" :title="t('mobile.viewOptions')" @click="viewOpen = true">
           <IconViewOriginal class="h-5 w-5" />
         </button>
@@ -1348,6 +1366,7 @@ function onPickAlbum(action) {
     </div>
   </Teleport>
 
+  <GradeScreen v-if="gradeOpen && photo" :photo="photo" @close="gradeOpen = false" />
   <ActionSheet :show="moreOpen" :title="photo?.name" :actions="moreActions" @close="moreOpen = false" @select="onMore" />
   <ActionSheet :show="viewOpen" :title="t('mobile.viewOptions')" @close="viewOpen = false">
     <div class="mobile-sheet-toggle" @click="setOriginal(!viewOriginal)">
