@@ -351,12 +351,13 @@ html.dark .app-frost-dense {
    for every `backdrop-filter`, which caps scrolling and panel animation at
    60 Hz and leaves a soft raster around the status bar. The frosted surfaces
    become opaque in that mode; the layout and colors do not change. */
-@media (display-mode: standalone) {
+@media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
     .app-frost,
     .app-frost-glass,
     .app-frost-toolbar,
     .app-frost-dense,
-    .app-surface {
+    .app-surface,
+    .mobile-tabbar {
         -webkit-backdrop-filter: none;
         backdrop-filter: none;
     }
@@ -378,6 +379,36 @@ html.dark .app-frost-dense {
     html.dark .mobile-tabbar {
         background: #0f172a;
     }
+}
+
+/* The same overrides for WebKit builds where the media query does not match;
+   `boot.js` adds the class from `navigator.standalone` before the first paint. */
+html.is-standalone .app-frost,
+html.is-standalone .app-frost-glass,
+html.is-standalone .app-frost-toolbar,
+html.is-standalone .app-frost-dense,
+html.is-standalone .app-surface,
+html.is-standalone .mobile-tabbar {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+}
+
+html.is-standalone .app-frost,
+html.is-standalone .app-frost-glass,
+html.is-standalone .app-frost-toolbar,
+html.is-standalone .app-frost-dense,
+html.is-standalone .app-surface,
+html.is-standalone .mobile-tabbar {
+    background: #f4efe7;
+}
+
+html.dark.is-standalone .app-frost,
+html.dark.is-standalone .app-frost-glass,
+html.dark.is-standalone .app-frost-toolbar,
+html.dark.is-standalone .app-frost-dense,
+html.dark.is-standalone .app-surface,
+html.dark.is-standalone .mobile-tabbar {
+    background: #0f172a;
 }
 
 /* Photo and file tiles sit inside an already frosted panel. A second

@@ -1,4 +1,4 @@
-const SHELL_CACHE = "lumeno-shell-v8";
+const SHELL_CACHE = "lumeno-shell-v9";
 
 const SHELL_URLS = ["/", "/index.html", "/manifest.webmanifest"];
 

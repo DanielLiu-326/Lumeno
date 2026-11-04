@@ -12,6 +12,21 @@
   if (ios) {
     document.documentElement.classList.add("is-frost-deferred");
   }
+  // iOS exposes the home-screen state as `navigator.standalone`; the CSS media
+  // query alone misses some WebKit builds, and the class lets the stylesheet
+  // drop the glass pass before the first paint.
+  try {
+    var mq = window.matchMedia;
+    var standalone =
+      window.navigator.standalone === true ||
+      (mq &&
+        (mq("(display-mode: standalone)").matches ||
+          mq("(display-mode: fullscreen)").matches ||
+          mq("(display-mode: minimal-ui)").matches));
+    if (standalone) document.documentElement.classList.add("is-standalone");
+  } catch (e) {
+    /* ignore */
+  }
   if (safari) {
     var meta = document.querySelector('meta[name="viewport"]');
     if (meta) {
