@@ -32,6 +32,9 @@ pub struct ColorZones {
     chroma: Vec<Point>,
     hue_shift: Vec<Point>,
     mix: f32,
+    /// 0 = straight polyline, 100 = full spline. Anything in between bends only
+    /// the corner at a control point.
+    smoothing: f32,
     process_mode: ProcessMode,
     interpolation: Interpolation,
 }
@@ -43,6 +46,7 @@ impl ColorZones {
             chroma: default_curve(),
             hue_shift: default_curve(),
             mix: 100.0,
+            smoothing: 30.0,
             process_mode: ProcessMode::Smooth,
             interpolation: Interpolation::Centripetal,
         }
@@ -58,11 +62,20 @@ impl ColorZones {
             0.0,
             100.0,
         );
+        let smoothing = clamp_f(
+            obj.get("smoothing")
+                .and_then(Value::as_f64)
+                .map(|v| v as f32)
+                .unwrap_or(30.0),
+            0.0,
+            100.0,
+        );
         Ok(Self {
             lightness: parse_curve(obj.get("lightness"), -100.0, 100.0)?,
             chroma: parse_curve(obj.get("chroma"), -100.0, 100.0)?,
             hue_shift: parse_curve(obj.get("hue"), -180.0, 180.0)?,
             mix,
+            smoothing,
             process_mode: match obj.get("process_mode").and_then(Value::as_str) {
                 Some("strong") => ProcessMode::Strong,
                 _ => ProcessMode::Smooth,
@@ -88,6 +101,7 @@ impl ColorZones {
             return input.clone_frame();
         }
         let mix = self.mix / 100.0;
+        let smoothing = self.smoothing;
         let strong = self.process_mode == ProcessMode::Strong;
         let lightness = &self.lightness;
         let chroma = &self.chroma;
@@ -98,9 +112,17 @@ impl ColorZones {
             let Some((hue, sat, val)) = rgb_to_hsv(sr, sg, sb) else {
                 return [r, g, b];
             };
-            let dl = shape(eval(lightness, hue, interpolation), 100.0, strong);
-            let dc = shape(eval(chroma, hue, interpolation), 100.0, strong);
-            let dh = shape(eval(hue_shift, hue, interpolation), 180.0, strong);
+            let dl = shape(
+                eval(lightness, hue, interpolation, smoothing),
+                100.0,
+                strong,
+            );
+            let dc = shape(eval(chroma, hue, interpolation, smoothing), 100.0, strong);
+            let dh = shape(
+                eval(hue_shift, hue, interpolation, smoothing),
+                180.0,
+                strong,
+            );
             let val2 = val * (1.0 + dl / 100.0);
             let sat2 = (sat * (1.0 + dc / 100.0)).clamp(0.0, 1.0);
             let hue2 = (hue + dh).rem_euclid(360.0);
@@ -215,7 +237,7 @@ fn shape(value: f32, scale: f32, strong: bool) -> f32 {
 }
 
 /// Periodic evaluation over hue: the segment that wraps past 360 is a real one.
-fn eval(points: &[Point], hue: f32, interpolation: Interpolation) -> f32 {
+fn eval(points: &[Point], hue: f32, interpolation: Interpolation, smoothing: f32) -> f32 {
     if points.is_empty() {
         return 0.0;
     }
@@ -247,8 +269,9 @@ fn eval(points: &[Point], hue: f32, interpolation: Interpolation) -> f32 {
     };
     let span = (x1 - x0).max(1e-3);
     let t = ((hue - x0) / span).clamp(0.0, 1.0);
+    let linear = p0.value + (p1.value - p0.value) * t;
     match interpolation {
-        Interpolation::Linear => p0.value + (p1.value - p0.value) * t,
+        Interpolation::Linear => linear,
         Interpolation::Cubic | Interpolation::Centripetal => {
             // One slope per point, shared by both neighbouring segments: that is
             // what keeps the curve differentiable at a control point. Computing
@@ -258,10 +281,12 @@ fn eval(points: &[Point], hue: f32, interpolation: Interpolation) -> f32 {
             let m1 = slope(points, (index + 1) % n, interpolation);
             let t2 = t * t;
             let t3 = t2 * t;
-            (2.0 * t3 - 3.0 * t2 + 1.0) * p0.value
+            let spline = (2.0 * t3 - 3.0 * t2 + 1.0) * p0.value
                 + (t3 - 2.0 * t2 + t) * span * m0
                 + (-2.0 * t3 + 3.0 * t2) * p1.value
-                + (t3 - t2) * span * m1
+                + (t3 - t2) * span * m1;
+            let weight = smoothing.clamp(0.0, 100.0) / 100.0;
+            linear + (spline - linear) * weight
         }
     }
 }
@@ -296,14 +321,8 @@ fn slope(points: &[Point], index: usize, interpolation: Interpolation) -> f32 {
     }
     let s_prev = (here - prev) / h_prev;
     let s_next = (next - here) / h_next;
-    let weighted = (s_prev * h_next + s_next * h_prev) / (h_prev + h_next);
-    weighted * CENTRIPETAL_TENSION
+    (s_prev * h_next + s_next * h_prev) / (h_prev + h_next)
 }
-
-/// A full spline leaves each control point at the average slope of its two
-/// neighbours, which bows the segment into a soft hump. Scaling the tangents
-/// down keeps the segment close to the straight line and still rounds the corner.
-const CENTRIPETAL_TENSION: f32 = 0.35;
 
 impl NodeParam for ColorZones {
     fn node_type(&self) -> &'static str {
@@ -316,6 +335,7 @@ impl NodeParam for ColorZones {
             "chroma": curve_json(&self.chroma),
             "hue": curve_json(&self.hue_shift),
             "mix": self.mix,
+            "smoothing": self.smoothing,
             "process_mode": match self.process_mode {
                 ProcessMode::Smooth => "smooth",
                 ProcessMode::Strong => "strong",
@@ -411,6 +431,14 @@ impl ColorZones {
                 100.0,
                 format!("+{:.2}%", self.mix),
             ),
+            field::slider(
+                "smoothing",
+                "grade.field.smoothing",
+                self.smoothing,
+                0.0,
+                100.0,
+                format!("{:.0}%", self.smoothing),
+            ),
             field::choice(
                 "process_mode",
                 "grade.field.process_mode",
@@ -461,13 +489,13 @@ mod tests {
             },
         ];
         for point in &points {
-            let got = eval(&points, point.hue, Interpolation::Linear);
+            let got = eval(&points, point.hue, Interpolation::Linear, 100.0);
             assert!((got - point.value).abs() < 1e-3, "{point:?} -> {got}");
         }
         // The wrap segment is 240..360(0): 300 lies between them.
-        let wrapped = eval(&points, 300.0, Interpolation::Linear);
+        let wrapped = eval(&points, 300.0, Interpolation::Linear, 100.0);
         assert!(wrapped < 0.0 && wrapped > -50.0, "wrapped={wrapped}");
-        assert!((eval(&points, 360.0, Interpolation::Linear) - 0.0).abs() < 1e-3);
+        assert!((eval(&points, 360.0, Interpolation::Linear, 100.0) - 0.0).abs() < 1e-3);
     }
 
     #[test]
@@ -493,10 +521,12 @@ mod tests {
         for mode in [Interpolation::Cubic, Interpolation::Centripetal] {
             for point in &points[1..points.len() - 1] {
                 let eps = 0.05;
-                let left =
-                    (eval(&points, point.hue, mode) - eval(&points, point.hue - eps, mode)) / eps;
-                let right =
-                    (eval(&points, point.hue + eps, mode) - eval(&points, point.hue, mode)) / eps;
+                let left = (eval(&points, point.hue, mode, 100.0)
+                    - eval(&points, point.hue - eps, mode, 100.0))
+                    / eps;
+                let right = (eval(&points, point.hue + eps, mode, 100.0)
+                    - eval(&points, point.hue, mode, 100.0))
+                    / eps;
                 assert!(
                     (left - right).abs() < 0.05,
                     "{mode:?} corner at {}: left={left} right={right}",
@@ -507,19 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn wrap_endpoints_share_one_value() {
-        let node = ColorZones::from_json(&serde_json::json!({
-            "lightness": [[0.0, 20.0], [120.0, 0.0], [360.0, -40.0]],
-        }))
-        .unwrap();
-        let json = node.to_json();
-        assert_eq!(json["lightness"][2][1], 20.0);
-        assert!((eval(&node.lightness, 0.0, Interpolation::Cubic) - 20.0).abs() < 1e-3);
-        assert!((eval(&node.lightness, 359.9, Interpolation::Cubic) - 20.0).abs() < 1.5);
-    }
-
-    #[test]
-    fn centripetal_stays_closer_to_the_segment_than_cubic() {
+    fn smoothing_blends_towards_the_polyline() {
         let points = vec![
             Point {
                 hue: 0.0,
@@ -534,18 +552,59 @@ mod tests {
                 value: 0.0,
             },
         ];
-        let linear_mid = 50.0;
-        let cubic = eval(&points, 50.0, Interpolation::Cubic);
-        let centripetal = eval(&points, 50.0, Interpolation::Centripetal);
-        assert!(cubic > linear_mid + 1.0, "cubic should bow: {cubic}");
+        let linear = eval(&points, 50.0, Interpolation::Cubic, 0.0);
+        let half = eval(&points, 50.0, Interpolation::Cubic, 50.0);
+        let full = eval(&points, 50.0, Interpolation::Cubic, 100.0);
+        assert!((linear - 50.0).abs() < 1e-3);
+        assert!(half > linear && half < full);
+    }
+
+    #[test]
+    fn wrap_endpoints_share_one_value() {
+        let node = ColorZones::from_json(&serde_json::json!({
+            "lightness": [[0.0, 20.0], [120.0, 0.0], [360.0, -40.0]],
+        }))
+        .unwrap();
+        let json = node.to_json();
+        assert_eq!(json["lightness"][2][1], 20.0);
+        assert!((eval(&node.lightness, 0.0, Interpolation::Cubic, 100.0) - 20.0).abs() < 1e-3);
+        assert!((eval(&node.lightness, 359.9, Interpolation::Cubic, 100.0) - 20.0).abs() < 1.5);
+    }
+
+    #[test]
+    fn both_splines_hit_their_points() {
+        let points = vec![
+            Point {
+                hue: 0.0,
+                value: 0.0,
+            },
+            Point {
+                hue: 100.0,
+                value: 100.0,
+            },
+            Point {
+                hue: 200.0,
+                value: 0.0,
+            },
+        ];
+        let cubic = eval(&points, 50.0, Interpolation::Cubic, 100.0);
+        let centripetal = eval(&points, 50.0, Interpolation::Centripetal, 100.0);
+        assert!((cubic - 50.0).abs() < 10.0, "cubic={cubic}");
         assert!(
-            (centripetal - linear_mid).abs() < (cubic - linear_mid).abs(),
-            "centripetal={centripetal} cubic={cubic}"
+            (centripetal - 50.0).abs() < 10.0,
+            "centripetal={centripetal}"
+        );
+        assert!(
+            (cubic - centripetal).abs() > 0.1,
+            "the two options must differ"
         );
         for point in &points {
-            assert!((eval(&points, point.hue, Interpolation::Cubic) - point.value).abs() < 1e-3);
             assert!(
-                (eval(&points, point.hue, Interpolation::Centripetal) - point.value).abs() < 1e-3
+                (eval(&points, point.hue, Interpolation::Cubic, 100.0) - point.value).abs() < 1e-3
+            );
+            assert!(
+                (eval(&points, point.hue, Interpolation::Centripetal, 100.0) - point.value).abs()
+                    < 1e-3
             );
         }
     }

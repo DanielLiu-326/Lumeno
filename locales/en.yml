@@ -224,6 +224,7 @@ grade:
     export: "Export"
     unknown: "Node"
   field:
+    smoothing: "Smoothing"
     mix: "Mix"
     process_mode: "Process mode"
     interpolation: "Interpolation"

@@ -937,6 +937,7 @@ p = (c - domain_min) / (domain_max - domain_min) * (size - 1)
 | `chroma` | 同上 | value −100–100 | 两端 `0` |
 | `hue` | 同上 | value −180–180（度） | 两端 `0` |
 | `mix` | f32 | 0–100（%） | 100 |
+| `smoothing` | f32 | 0–100（%） | 30 |
 | `process_mode` | `smooth` \| `strong` | — | `smooth` |
 | `interpolation` | `centripetal_spline` \| `cubic_spline` \| `linear` | — | `centripetal_spline` |
 
@@ -952,7 +953,7 @@ h' = h + hue(h)
 
 `V'` 不小于 0，`h'` 取模到 `[0, 360)`。转回 HSV → 线性 sRGB → 线性 Rec.2020。没有颜色（`V ≈ 0`）的像素原样返回。`process_mode = strong` 时把三个调整量按符号平方（`x * |x|`），选择更"硬"，过渡更窄；`smooth` 直接用插值结果。
 
-`interpolation` 决定控制点之间怎么连：`linear` 是折线；`cubic_spline` 是普通三次 Hermite，切线取两侧割线的平均，段与段之间会拱过去，观感最圆；`centripetal_spline` 用按 x 间距加权的切线再乘 0.35，段内基本贴着直线走，只在控制点处倒角，是默认值。三者都只在相邻两点之间插值，不改变端点值。周期环绕的邻点按当前位置展开：最后一个点在 200° 时，它在 0° 之前的坐标是 −160°，不是 −360°。
+`interpolation` 决定控制点之间怎么连：`linear` 是折线；`cubic_spline` 是三次 Hermite，切线取两侧割线的平均；`centripetal_spline` 用按 x 间距加权的切线。`smoothing` 再把样条结果向**直线段**混合：`0` 等于折线，`100` 是完整样条，默认 `30` 只把控制点处的角磨圆，段内基本是直线。三个插值选项都只在相邻两点之间插值，不改变端点值。周期环绕的邻点按当前位置展开：最后一个点在 200° 时，它在 0° 之前的坐标是 −160°，不是 −360°。
 
 `mix = 0` 直接返回输入。否则 `out = in + mix/100 * (adjusted - in)`，在**线性**空间混合，避免在编码空间混出灰边。节点不改缓冲的 `space`，也不读掩码以外的输入。
 

@@ -224,6 +224,7 @@ grade:
     export: "导出"
     unknown: "节点"
   field:
+    smoothing: "圆滑度"
     mix: "混合"
     process_mode: "处理模式"
     interpolation: "插值方式"

@@ -103,8 +103,9 @@ function evaluate(list, hue) {
   const x1 = index + 1 < n ? x1raw : x1raw + 360;
   const span = Math.max(1e-3, x1 - x0);
   const t = Math.max(0, Math.min(1, (hue - x0) / span));
+  const linear = y0 + (y1 - y0) * t;
   if (props.node.params?.interpolation === "linear") {
-    return y0 + (y1 - y0) * t;
+    return linear;
   }
   // One slope per control point, shared by both neighbours, so the curve stays
   // differentiable at the point (per-segment tangents bend it into a corner).
@@ -112,12 +113,13 @@ function evaluate(list, hue) {
   const m1 = slope(list, (index + 1) % n);
   const t2 = t * t;
   const t3 = t2 * t;
-  return (
+  const spline =
     (2 * t3 - 3 * t2 + 1) * y0 +
     (t3 - 2 * t2 + t) * span * m0 +
     (-2 * t3 + 3 * t2) * y1 +
-    (t3 - t2) * span * m1
-  );
+    (t3 - t2) * span * m1;
+  const weight = Math.max(0, Math.min(100, Number(props.node.params?.smoothing ?? 30))) / 100;
+  return linear + (spline - linear) * weight;
 }
 
 function slope(list, index) {
@@ -135,9 +137,7 @@ function slope(list, index) {
   if (props.node.params?.interpolation !== "centripetal_spline") {
     return (next - prev) / (hPrev + hNext);
   }
-  // A full spline bows the segment into a hump; scaling the tangent down keeps
-  // it close to the straight line while still rounding the corner.
-  return ((sPrev * hNext + sNext * hPrev) / (hPrev + hNext)) * 0.35;
+  return (sPrev * hNext + sNext * hPrev) / (hPrev + hNext);
 }
 
 function commit(next) {
