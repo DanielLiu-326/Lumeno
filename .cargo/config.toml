@@ -1,0 +1,16 @@
+# AVX2/FMA for the x86_64 NAS build. Keep this target-specific: applying
+# x86-64-v3 on aarch64 is ignored but drops the default neon target feature,
+# which makes the compiler reject the standard library ABI.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# ARM64 Linux: gemm-common uses fullfp16 inline asm (fmla .8h); the generic
+# aarch64 target does not enable it. This requires an ARMv8.2+ CPU with FP16.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+fp16"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+fp16"]

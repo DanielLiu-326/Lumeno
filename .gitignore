@@ -18,3 +18,6 @@
 .vscode/
 .DS_Store
 *.log
+
+# Full-resolution screenshot sources; README uses optimized WebP copies.
+/docs/screenshots/Screenshot*.png

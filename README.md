@@ -1,72 +1,97 @@
 # Lumeno
 
-Lumeno 是一个自托管的个人文件与照片管理应用。后端使用 Rust/Axum，前端使用 Vue 3、Vite 和 Tailwind CSS；照片、用户数据和应用配置均保存在本机。
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
+![Rust nightly](https://img.shields.io/badge/rust-nightly-orange)
+![Vue 3](https://img.shields.io/badge/Vue-3-42b883)
 
-## 功能
+**A self-hosted photo and file library that keeps the originals on your disk.**
 
-- 文件浏览、创建目录、上传、下载、复制、移动、重命名和删除
-- 支持断点分块上传与后台任务进度查看
-- 相册创建、编辑、导入、导出、封面设置和共享权限
-- JPEG、PNG、GIF、BMP、WebP、TIFF 等常见图片的缩略图与 EXIF 信息读取
-- RAW 格式识别；安装 `darktable-cli` 后支持 RAW 缩略图、预览和导出
-- MP4、M4V、MOV、WebM 视频导入、封面和播放。封面需要 `ffmpeg`。浏览器播不了原片时，可按账号偏好整段转码并缓存，播放缓存需要 `ffmpeg` 和 `ffprobe`
-- 标签、评分、色标等图片元数据，写入 XMP sidecar 文件
-- 按日期、相机、镜头、标签、评分、色标和格式筛选；支持排序、时间轴和虚拟列表
-- “那年今日”和每日精选照片视图
-- 存储管理：按格式、相册和年月统计原片、缩略图与转码占用，可清理能重新生成的缓存
-- 多用户、管理员、相册读写/删除权限和 WebDAV 共享
-- 调色：桌面工作区与手机全屏编辑器，参数写在原片旁的 `.lumeno.json`
-- 中文、英文界面，以及明暗主题
+[简体中文](README.zh-CN.md) · [Screenshots](#screenshots) · [Quick start](#quick-start) · [Configuration](#configuration) · [License](#license)
 
-## 功能对照
+![Lumeno photo library](docs/screenshots/library.webp)
 
-| 功能 | 状态 |
+Lumeno is a self-hosted personal photo and file library. The backend is Rust/Axum, the frontend is Vue 3, and storage is the filesystem. It is built around two rules:
+
+- **Originals and XMP are the source of truth.** They live in your own directory and are never rewritten by the index.
+- **Indexes, thumbnails, transcodes, and face embeddings are disposable.** They can be deleted and rebuilt.
+
+The same library has a desktop shell and a mobile web shell, backed by the same API.
+
+> **Project status: early (0.1.x).** Back up `dist/data/` before upgrading. On-disk layout and APIs may still change between releases.
+
+## Features
+
+- Browse, upload, download, copy, move, rename, and delete files and folders.
+- Resumable chunked uploads with background task progress.
+- Albums with covers, imports/exports, read-only shares, and per-album permissions.
+- JPEG, PNG, GIF, BMP, WebP, TIFF, HEIC/AVIF (via `libheif`), and RAW (via LibRaw or `darktable-cli`).
+- EXIF capture details; tags, ratings, and color labels written to XMP sidecars.
+- Filter by date, camera, lens, tag, rating, color label, and format; timeline and virtual scrolling.
+- “On this day” and daily picks.
+- MP4/M4V/MOV/WebM import, cover extraction, playback, and cached transcoding with `ffmpeg`.
+- Non-destructive grade documents (`.lumeno.json` next to the original) with a desktop tune workspace and a mobile editor.
+- Multi-user administration, album roles, WebDAV shares, storage reports, and cache cleanup.
+- English and Chinese UI, light and dark themes.
+- Optional AI: text search, similar-photo search, face detection/embedding and clustering. Local models are opt-in; a remote provider is also supported.
+
+## Current limitations
+
+| Area | Status |
 | --- | --- |
-| 上传和查看照片、视频 | 照片已有；常见视频可进相册。能播的原片直接播放，不能播的可转码缓存后再播放（封面和转码需要 `ffmpeg`，探测需要 `ffprobe`） |
-| 打开应用时自动备份 | 未做 |
-| 防止重复导入 | 部分：可找出相似照片，上传时不会自动跳过 |
-| 按相册选择备份 | 未做 |
-| 下载到本地 | 照片和视频原文件可下载 |
-| 多用户 | 已有 |
-| 相册与共享相册 | 已有 |
-| 可拖动快速滚动条 | 未做 |
-| RAW | 已有（需 `darktable-cli`） |
-| 元数据（EXIF、地图） | 部分：有拍摄信息，无 GPS 与地图 |
-| 按元数据、物体、人脸和语义搜索 | 部分：元数据、人脸和文字语义搜索已有；无物体标签 |
-| 用户管理 | 已有 |
-| 后台备份 | 未做 |
-| 虚拟滚动 | 已有 |
-| 实况照片 / Motion Photo | 未做 |
-| 自定义存储目录 | 已有 |
-| 公开分享 | 未做（可分享给已有账号，或使用 WebDAV） |
-| 归档与收藏 | 部分：有评分和色标，无归档或收藏库 |
-| 全局地图 | 未做 |
-| 伙伴共享 | 未做（可按相册授权，不能共享整个图库） |
-| 人脸识别与聚类 | 已有 |
-| 回忆（那年今日） | 已有 |
-| 离线查看 | 未做 |
-| 只读相册 | 已有 |
-| 连拍堆叠 | 未做 |
-| 标签 | 已有 |
-| 文件夹视图 | 已有 |
+| Public/anonymous sharing | Not yet. Share to existing accounts or use WebDAV. |
+| Automatic backup / background import | Not yet. |
+| Live Photos / Motion Photo | Not yet. |
+| GPS and map view | Not yet. |
+| Object tags and semantic object search | Not yet. |
+| Burst stacking | Not yet. |
+| Archive/favorites library | Partial: ratings and color labels only. |
+| Duplicate prevention on import | Partial: similar-photo search exists; import does not skip duplicates automatically. |
+| Offline mode | Not yet. |
+| Native mobile app | Not yet; the mobile shell is a responsive web/PWA surface. |
+| Windows | Not supported; LibRaw through `rsraw-sys` does not support MSVC. |
 
-## 技术栈
+## Screenshots
 
-- Rust nightly、Tokio、Axum
-- Vue 3、Vite、Tailwind CSS、Virtua
-- 文件系统作为照片和应用数据存储
+### Library
 
-## 快速开始
+Filters, tags, ratings, timeline, and a virtualized photo grid.
 
-### 前置条件
+![Library with filters and tags](docs/screenshots/library.webp)
 
-- Rust nightly 工具链
-- Node.js 与 npm
-- 可选：`darktable-cli`，用于 RAW 格式的缩略图、预览与导出
-- 可选：`exiftool`，用于 RAW 与视频的拍摄信息和时长
-- 可选：`ffmpeg` 与 `ffprobe`。`ffmpeg` 抽取视频封面，并在播放缓存里转码；`ffprobe` 读取源编码
+### Photo detail and tune workspace
 
-首次启动前，前端产物目录和应用数据目录必须存在。以下命令在项目根目录执行：
+Capture details, XMP metadata, filmstrip, histogram, and the non-destructive grade stack.
+
+![Photo detail and tune workspace](docs/screenshots/tune.webp)
+
+### AI tools
+
+Face clusters, person naming, and similarity search. Local face models are optional and subject to the non-commercial InsightFace terms; a remote provider is also supported.
+
+![AI tools with face clusters and people](docs/screenshots/faces.webp)
+
+## Platform support
+
+| Platform | Builds | Notes |
+| --- | --- | --- |
+| Linux x86_64 | Yes | `.cargo/config.toml` targets `x86-64-v3` (AVX2/FMA); change it for older NAS CPUs. |
+| Linux arm64 | Yes | Requires an ARMv8.2+ CPU with FP16; `gemm-f16` needs it. Older ARMv8.0 devices (e.g. Cortex-A53) cannot build it. |
+| macOS arm64 | Yes | Local AI uses Metal; no Vulkan SDK needed. |
+| macOS x86_64 | Untested | Source build may work. |
+| Windows | No | `rsraw-sys` does not support MSVC. |
+| Docker | Not yet | No published image or production Dockerfile; run from source for now. |
+
+Optional external tools:
+
+| Tool | Enables | Required? |
+| --- | --- | --- |
+| `darktable-cli` | RAW thumbnails, previews, and exports | Optional |
+| `exiftool` | RAW/video capture details | Optional |
+| `ffmpeg`, `ffprobe` | Video covers, transcoding, source probing | Optional |
+
+## Quick start
+
+Requirements: Rust nightly, Node.js 20+, a C/C++ toolchain, `pkg-config`, `libheif >= 1.17`, and `libclang`.
 
 ```bash
 rustup toolchain install nightly
@@ -76,84 +101,254 @@ npm ci
 npm run build
 cd ..
 
-mkdir -p dist/data
 export BOOTSTRAP_ADMIN_USER=admin
 export BOOTSTRAP_ADMIN_PASSWORD='replace-with-a-strong-password'
 cargo +nightly run
 ```
 
-服务监听在 `http://localhost:3000`。首次运行时会创建管理员账户，并在 `dist/data/` 写入用户、会话、设置和 HMAC 密钥等持久化数据。
+Open `http://localhost:3000`.
 
-> 未设置 `BOOTSTRAP_ADMIN_PASSWORD` 时，首次启动会生成随机管理员密码并只打印一次到标准错误。可用 `BOOTSTRAP_ADMIN_USER` 自定义用户名（默认 `admin`）。
+If `BOOTSTRAP_ADMIN_PASSWORD` is unset, Lumeno generates a random administrator password and prints it once to stderr. `BOOTSTRAP_ADMIN_USER` defaults to `admin`.
 
-## 开发与构建
+The process reads `./dist/data` and `./dist/resources` relative to the working directory, so run it from the repository root (or set the service `WorkingDirectory` accordingly). It creates `dist/data` on first start if it is missing; `dist/resources` still needs the frontend build.
 
-构建前端静态资源：
+## Installation
+
+### System dependencies
+
+- Rust nightly. The code uses `#![feature(normalize_lexically)]`; stable Rust will not compile it.
+- Node.js 20+ and npm.
+- A C/C++ toolchain (`cc`, `c++`). LibRaw is compiled by `cc` at build time.
+- `pkg-config` for `libheif-sys`.
+- `libheif` development headers, version **>= 1.17**. The crate enables `libheif-rs/v1_17` and does not use `embedded-libheif`, so a system library is required.
+- `libclang` for `rsraw-sys`/`bindgen`. Set `LIBCLANG_PATH` if it is not found automatically.
+
+**macOS**
+
+```bash
+xcode-select --install
+brew install pkgconf libheif
+
+# If bindgen cannot find libclang:
+# brew install llvm
+# export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+```
+
+**Debian / Ubuntu**
+
+```bash
+sudo apt install build-essential pkg-config libheif-dev libclang-dev
+```
+
+Debian 12 (bookworm) ships libheif 1.15, which is too old. Use Debian 13 (trixie), Ubuntu 24.04+, enable bookworm-backports (1.19), or build libheif 1.17+ yourself.
+
+Check the version:
+
+```bash
+pkg-config --modversion libheif   # must be >= 1.17
+c++ --version
+```
+
+Platform notes:
+
+- macOS local AI uses Metal and does **not** need the Vulkan SDK. Linux uses Vulkan.
+- ARM64 Linux needs ARMv8.2+ FP16 for `gemm-f16`; see the platform table above.
+- Windows MSVC is not supported.
+
+### Build and run
 
 ```bash
 cd frontend
+npm ci
 npm run build
+cd ..
+
+cargo +nightly build --release
+./target/release/lumeno
 ```
 
-前端资源会输出到 `dist/resources/`，由 Rust 服务直接提供。启动后端：
+The frontend build writes `dist/resources/`, which Axum serves directly. `dist/data/` is the persistent root for users, sessions, settings, the HMAC key, originals, and XMP sidecars.
+
+### Run as a service
+
+Example systemd unit (adjust paths and user):
+
+```ini
+[Unit]
+Description=Lumeno
+After=network.target
+
+[Service]
+Type=simple
+User=lumeno
+Group=lumeno
+WorkingDirectory=/opt/lumeno
+Environment=LISTEN_ADDR=127.0.0.1:3000
+# Enable only behind a trusted reverse proxy:
+# Environment=TRUST_PROXY=1
+ExecStart=/opt/lumeno/target/release/lumeno
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Keep `BOOTSTRAP_ADMIN_PASSWORD` in an `EnvironmentFile` with restrictive permissions rather than a world-readable unit file. The service user must own `dist/data/`; do not run Lumeno as root.
+
+## Upgrade
 
 ```bash
-cargo +nightly run
+sudo systemctl stop lumeno
+
+# 1. Back up first. This is the only copy of the originals and XMP.
+tar -C /opt/lumeno -czf "lumeno-data-$(date +%F).tar.gz" dist/data
+
+# 2. Update code and rebuild.
+git pull --ff-only
+cd frontend && npm ci && npm run build && cd ..
+cargo +nightly build --release
+
+sudo systemctl start lumeno
 ```
 
-前端也提供独立开发服务器命令：
+Read release notes before upgrading if a release mentions a data migration. Keep the backup until you have verified the new version; downgrading after a migration may require restoring it.
+
+## Backup and restore
+
+Back up the whole `dist/data/` tree:
+
+```bash
+sudo systemctl stop lumeno
+tar -C /opt/lumeno -czf "lumeno-data-$(date +%F).tar.gz" dist/data
+sudo systemctl start lumeno
+```
+
+This includes users, sessions, settings, `hmac_key.bin`, uploaded originals, albums, and XMP sidecars. Caches, thumbnails, transcodes, and AI indexes can be rebuilt and do not need to be in the backup.
+
+To restore, stop the service, move the current `dist/data/` aside, extract the archive into the same path, restore ownership, and start the service. Keep the original `hmac_key.bin`: losing it invalidates every existing login session.
+
+## Reverse proxy
+
+Run Lumeno behind HTTPS and keep port 3000 bound to localhost.
+
+Nginx example:
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name photos.example.com;
+
+    ssl_certificate     /etc/ssl/fullchain.pem;
+    ssl_certificate_key /etc/ssl/privkey.pem;
+
+    # Lumeno accepts large uploads and streams downloads.
+    client_max_body_size 0;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_request_buffering off;
+    }
+}
+```
+
+Caddy example:
+
+```caddyfile
+photos.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+Set `TRUST_PROXY=1` **only** when the proxy overwrites `X-Forwarded-Proto`; otherwise a client could spoof it. WebDAV is served at `/dav/` on the same host and uses the same session/HTTPS policy.
+
+## Configuration
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `LISTEN_ADDR` | HTTP listen address passed to `TcpListener::bind` | `[::]:3000` |
+| `BOOTSTRAP_ADMIN_USER` | Administrator username created on first start | `admin` |
+| `BOOTSTRAP_ADMIN_PASSWORD` | Administrator password on first start | Random password printed once |
+| `TRUST_PROXY` | Trust the proxy’s `X-Forwarded-Proto` for HTTPS cookie decisions | Off |
+| `LUMENO_AI_DEVICE` | Local AI device: `auto`, `cpu`, `gpu`, `cuda`, `metal`, or `vulkan` | `auto` |
+| `AI_REMOTE_TOKEN` | Bearer token for the remote AI provider; read only from the environment | Unset |
+
+`TRUST_PROXY` must stay off unless the reverse proxy is the only path to the service.
+
+## AI models and licensing
+
+Lumeno works without AI. Local AI is an optional model pack:
+
+- SigLIP 2 is Apache-2.0.
+- InsightFace SCRFD/ArcFace pretrained weights are **non-commercial research only**.
+- The repository, container images, and releases do not bundle `dist/models/`.
+- `scripts/convert_ai_models.py --download` refuses to run without `--accept-insightface-noncommercial`.
+- For commercial deployments, use the remote AI provider (`ai_provider=remote`) or obtain a separate license for the face models.
+
+See [docs/ai-models.md](docs/ai-models.md), [docs/ai-provider-api.md](docs/ai-provider-api.md), and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+## Development
 
 ```bash
 cd frontend
-npm run dev
+npm ci
+npm run build
+cd ..
+
+cargo +nightly test
 ```
 
-仓库包含 [DockerFile](DockerFile)，用于提供带 Rust nightly 的 Debian Bookworm 开发环境；VS Code Dev Container 配置位于 [.devcontainer](.devcontainer)。
+The frontend is served by Axum from `dist/resources/`. The desktop shell lives in `frontend/src/App.vue` and its components; the mobile shell lives in `frontend/src/mobile/`. Both talk to the same backend.
 
-## 配置
+Architecture and behavior notes:
 
-| 变量 | 说明 | 默认值 |
-| --- | --- | --- |
-| `LISTEN_ADDR` | HTTP 监听地址（传给 `TcpListener::bind`） | `[::]:3000` |
-| `BOOTSTRAP_ADMIN_USER` | 首次启动时创建的管理员用户名 | `admin` |
-| `BOOTSTRAP_ADMIN_PASSWORD` | 首次启动时创建的管理员密码 | 未设置则生成随机密码并打印一次 |
-| `TRUST_PROXY` | 设为 `1` 或 `true` 后信任反向代理的 `X-Forwarded-Proto`，用于 HTTPS Cookie 判断 | 未启用 |
+- [docs/color-pipeline.md](docs/color-pipeline.md) — grade pipeline semantics.
+- [docs/tune-view.md](docs/tune-view.md) — desktop tune workspace.
+- [docs/mobile-tune-view.md](docs/mobile-tune-view.md) — mobile editor.
+- [docs/ai-models.md](docs/ai-models.md) — model pipeline and licensing.
+- [AGENTS.md](AGENTS.md) — repository conventions and security rules.
 
-只有在反向代理会正确覆盖客户端传入的 `X-Forwarded-Proto` 时，才应启用 `TRUST_PROXY`。
-
-## 数据与备份
-
-应用的持久化根目录为 `dist/data/`。部署时应将此目录挂载到持久卷，并定期备份：
-
-- 用户、设置和会话数据
-- HMAC 密钥文件
-- 用户上传的文件和相册
-- 图片 XMP sidecar 文件
-
-不要丢失 HMAC 密钥：重建该密钥会使已有登录会话失效。相册索引和缩略图缓存可以重新生成，但原始图片和 XMP 元数据不可替代。
-
-## 反向代理与安全
-
-- 使用 HTTPS 暴露服务，并仅在可信代理后启用 `TRUST_PROXY`。
-- 首次启动请从日志记下管理员密码（或自行设置 `BOOTSTRAP_ADMIN_PASSWORD`），并限制 `dist/data/` 的文件系统访问权限。
-- WebDAV 路径为 `/dav/`；应与主站使用同一套认证和 HTTPS 策略。
-- 不要将 `.env` 文件、Cloudflare 凭据或 `dist/data/` 内容提交到版本控制。
-
-## 项目结构
+## Project layout
 
 ```text
-src/                 Rust 服务与 API
-src/backend/         认证、文件、相册、设置和任务模块
-frontend/            Vue 前端源码
-locales/             后端国际化文案
-dist/resources/      前端构建产物
-dist/data/           运行时数据和用户文件
-DockerFile           Rust nightly 开发镜像
+src/backend/        auth, files, albums, settings, tasks, AI, WebDAV HTTP
+src/grade/          non-destructive grade documents, buffers, execution
+frontend/src/       desktop Vue UI and shared composables
+frontend/src/mobile/ mobile shell, routing, screens
+frontend/public/    PWA manifest, service worker, icons
+locales/            backend i18n (rust-i18n)
+docs/               architecture and operations notes
+docs/screenshots/   README screenshots
+scripts/            model conversion and test-data helpers
+dist/data/          runtime data (ignored by git)
+dist/resources/     frontend build output (ignored by git)
 ```
 
-## 验证
+## Security
 
-```bash
-cd frontend && npm run build
-cd .. && cargo +nightly test
-```
+- Serve Lumeno over HTTPS. The session cookie is `HttpOnly`, `SameSite=Strict`, and only marked `Secure` on a verified HTTPS connection.
+- Keep `dist/data/` readable only by the service user. It contains sessions, password hashes, the HMAC key, and private photos.
+- Share albums through album permissions or WebDAV; do not expose the whole library to another account.
+- Never commit `.env` files, `dist/data/`, or model weights. Use a secret manager or a protected `EnvironmentFile`.
+- Report security issues privately once the repository is public; do not open a public issue with exploit details.
+
+## Contributing
+
+Issues and pull requests are welcome. Keep changes focused, include a test or a reproducible check for behavior changes, and run the frontend build plus `cargo +nightly test` before opening a pull request.
+
+## License
+
+Lumeno is released under the **GNU Affero General Public License v3.0 or later**. See [LICENSE](LICENSE).
+
+Third-party components and model licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). In particular, the repository does not bundle InsightFace pretrained weights.
+
+## Acknowledgements
+
+Rust, Tokio, Axum, Vue, Vite, Tailwind CSS, Virtua, Burn, LibRaw, libheif, darktable, ExifTool, and FFmpeg. Optional external tools are separate programs with their own licenses.

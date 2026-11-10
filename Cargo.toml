@@ -1,9 +1,8 @@
-cargo-features = ["profile-rustflags"]
-
 [package]
 name = "lumeno"
 version = "0.1.0"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 
 [lints.rust]
 dead_code = "allow"
@@ -40,7 +39,6 @@ kamadak-exif = "0.6"
 rust-i18n = "3.1.2"
 dav-server = { version = "0.11.0", features = ["localfs"] }
 quick-xml = "0.37"
-burn = { version = "0.21.0", default-features = false, features = ["std", "flex", "store", "dispatch", "vulkan"] }
 burn-store = "0.21"
 # Direct dep so we can build a Custom CubeCL memory pool (tight VRAM).
 cubecl-runtime = "0.10"
@@ -49,8 +47,18 @@ rayon = "1.12.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
+# Burn's wgpu backend has one graphics API per build. macOS has no Vulkan; asking
+# for it enables cubecl-wgpu/spirv and requires the LunarG Vulkan SDK. Metal is
+# the native path there, Vulkan stays on Linux.
+[target.'cfg(target_os = "macos")'.dependencies]
+burn = { version = "0.21.0", default-features = false, features = ["std", "flex", "store", "dispatch", "metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+burn = { version = "0.21.0", default-features = false, features = ["std", "flex", "store", "dispatch", "vulkan"] }
+
 [features]
-# Optional NVIDIA CUDA (needs CUDA toolkit at build time). Vulkan GPU is always compiled in.
+# Optional NVIDIA CUDA (needs CUDA toolkit at build time). The platform GPU
+# backend (Metal on macOS, Vulkan elsewhere) is always compiled in.
 default = []
 cuda = ["burn/cuda"]
 
@@ -60,8 +68,3 @@ sha2 = "0.11.0"
 
 [patch.crates-io]
 rsraw-sys = { path = "vendor/rsraw-sys" }
-
-# Release code may use AVX2 and FMA. x86-64-v3, not native: the build machine
-# has AVX-512, and that must not be required on the NAS.
-[profile.release]
-rustflags = ["-C", "target-cpu=x86-64-v3"]

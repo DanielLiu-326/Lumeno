@@ -1,22 +1,32 @@
 //! Burn backend for local AI inference: GPU when available, else CPU (Flex).
 //!
-//! Selection order (override with `LUMENO_AI_DEVICE=cpu|gpu|cuda|vulkan|auto`):
+//! Selection order (override with
+//! `LUMENO_AI_DEVICE=cpu|gpu|cuda|metal|vulkan|auto`):
 //! 1. CUDA (if built with `--features cuda`)
-//! 2. Vulkan GPU (wgpu)
+//! 2. Metal GPU on macOS, Vulkan GPU elsewhere (wgpu)
 //! 3. Flex CPU
 //!
-//! Vulkan memory uses a tight CubeCL `Custom` pool: exclusive pages capped well
+//! GPU memory uses a tight CubeCL `Custom` pool: exclusive pages capped well
 //! below full VRAM, with short `dealloc_period` so idle pages return quickly.
 
 use burn::Dispatch;
 use burn::DispatchDevice;
-use burn::backend::wgpu::{
-    MemoryConfiguration, RuntimeOptions, WgpuDevice, graphics::Vulkan, init_setup,
-};
+use burn::backend::wgpu::graphics::GraphicsApi;
+use burn::backend::wgpu::{MemoryConfiguration, RuntimeOptions, WgpuDevice, init_setup};
 use burn::prelude::*;
 use cubecl_runtime::memory_management::{MemoryPoolOptions, PoolType};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::OnceLock;
+
+#[cfg(target_os = "macos")]
+type WgpuGraphics = burn::backend::wgpu::graphics::Metal;
+#[cfg(not(target_os = "macos"))]
+type WgpuGraphics = burn::backend::wgpu::graphics::Vulkan;
+
+#[cfg(target_os = "macos")]
+const GPU_LABEL: &str = "metal";
+#[cfg(not(target_os = "macos"))]
+const GPU_LABEL: &str = "vulkan";
 
 pub type AiBackend = Dispatch;
 pub type AiDevice = DispatchDevice;
@@ -38,14 +48,14 @@ pub fn selected_ai_device() -> AiDeviceChoice {
 /// Flex CPU device for the SigLIP text tower (token embedding gather + transformer).
 ///
 /// Gemma's input embedding is `[256000, 768] f32` ≈ 750 MiB. wgpu/Intel iGPU
-/// `max_*_buffer_binding_size` is 128 MiB, so binding that table on Vulkan
-/// fails (`Buffer binding range 786432000 exceeds limit 134217728`) on a
-/// worker thread that `catch_unwind` cannot see. Forward then returns a
+/// `max_*_buffer_binding_size` is 128 MiB, so binding that table on a GPU
+/// backend fails (`Buffer binding range 786432000 exceeds limit 134217728`)
+/// on a worker thread that `catch_unwind` cannot see. Forward then returns a
 /// constant vector and every text query ranks the same photos.
 ///
 /// Lookup and the rest of the text tower run here instead. Vision stays on
-/// [`selected_ai_device`] (Vulkan/CUDA). Same `Dispatch` backend, different
-/// device; vectors are L2-normalized in host memory so mixing is fine.
+/// [`selected_ai_device`] (Metal/Vulkan/CUDA). Same `Dispatch` backend,
+/// different device; vectors are L2-normalized in host memory so mixing is fine.
 pub fn cpu_flex_device() -> AiDevice {
     DispatchDevice::Flex(Default::default())
 }
@@ -59,7 +69,13 @@ fn select_ai_device() -> AiDeviceChoice {
         return cpu_choice();
     }
 
-    let force_gpu = matches!(prefer.as_str(), "gpu" | "cuda" | "vulkan");
+    let force_gpu = matches!(prefer.as_str(), "gpu" | "cuda" | "metal" | "vulkan");
+    let wants_gpu = match prefer.as_str() {
+        "auto" | "gpu" => true,
+        "metal" => cfg!(target_os = "macos"),
+        "vulkan" => cfg!(not(target_os = "macos")),
+        _ => false,
+    };
     let mut candidates: Vec<(AiDevice, &'static str)> = Vec::new();
 
     #[cfg(feature = "cuda")]
@@ -67,14 +83,14 @@ fn select_ai_device() -> AiDeviceChoice {
         candidates.push((DispatchDevice::Cuda(Default::default()), "cuda"));
     }
 
-    if matches!(prefer.as_str(), "auto" | "gpu" | "vulkan") {
-        // Must configure CubeCL before the first Vulkan tensor touch, otherwise the
+    if wants_gpu {
+        // Must configure CubeCL before the first GPU tensor touch, otherwise the
         // default SubSlices allocator wins for the process lifetime.
         let wgpu_device = WgpuDevice::DefaultDevice;
-        if init_vulkan_tight_memory(&wgpu_device) {
-            candidates.push((DispatchDevice::Vulkan(wgpu_device), "vulkan"));
+        if init_gpu_tight_memory::<WgpuGraphics>(&wgpu_device) {
+            candidates.push((gpu_device(wgpu_device), GPU_LABEL));
         } else {
-            eprintln!("[ai] vulkan tight-memory init failed; skipping vulkan backend");
+            eprintln!("[ai] {GPU_LABEL} tight-memory init failed; skipping {GPU_LABEL} backend");
         }
     }
 
@@ -136,18 +152,28 @@ fn tight_memory_config() -> MemoryConfiguration {
     }
 }
 
-fn init_vulkan_tight_memory(device: &WgpuDevice) -> bool {
+fn init_gpu_tight_memory<G: GraphicsApi>(device: &WgpuDevice) -> bool {
     catch_unwind(AssertUnwindSafe(|| {
-        let _ = init_setup::<Vulkan>(
+        let _ = init_setup::<G>(
             device,
             RuntimeOptions {
                 memory_config: tight_memory_config(),
                 tasks_max: 1,
             },
         );
-        eprintln!("[ai] vulkan memory strategy=tight (ExclusivePages + reclaim)");
+        eprintln!("[ai] {GPU_LABEL} memory strategy=tight (ExclusivePages + reclaim)");
     }))
     .is_ok()
+}
+
+#[cfg(target_os = "macos")]
+fn gpu_device(device: WgpuDevice) -> AiDevice {
+    DispatchDevice::Metal(device)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn gpu_device(device: WgpuDevice) -> AiDevice {
+    DispatchDevice::Vulkan(device)
 }
 
 fn cpu_choice() -> AiDeviceChoice {

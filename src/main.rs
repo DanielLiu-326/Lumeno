@@ -10,6 +10,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const DATA_DIR: &str = "./dist/data";
+const RESOURCES_DIR: &str = "./dist/resources";
+
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod backend;
@@ -64,11 +67,37 @@ use backend::tasks::{
     api_pause_task, api_resume_task,
 };
 
+/// Create the directory if needed, then return its canonical path.
+///
+/// Startup must not panic on a fresh checkout: `dist/data` and `dist/resources`
+/// are ignored build/runtime directories, so a clean tree does not have them.
+fn prepare_directory(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(path)?;
+    path.canonicalize()
+}
+
 #[tokio::main]
 async fn main() {
-    let data_path: PathBuf = std::path::PathBuf::from("./dist/data")
-        .canonicalize()
-        .unwrap();
+    let data_path = match prepare_directory(std::path::Path::new(DATA_DIR)) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Failed to prepare data directory {DATA_DIR}: {error}");
+            std::process::exit(1);
+        }
+    };
+    let resources_path = match prepare_directory(std::path::Path::new(RESOURCES_DIR)) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Failed to prepare resources directory {RESOURCES_DIR}: {error}");
+            std::process::exit(1);
+        }
+    };
+    if !resources_path.join("index.html").is_file() {
+        eprintln!(
+            "Warning: {}/index.html is missing; run `cd frontend && npm run build` before starting Lumeno.",
+            resources_path.display()
+        );
+    }
     let sessions_file = data_path.join("sessions.json");
     let settings_file = data_path.join("settings.json");
     let users_file = data_path.join("users.json");
@@ -100,10 +129,8 @@ async fn main() {
     let app_state = Arc::new(AppState {
         started_at: std::time::Instant::now(),
         data_path,
-        resources_path: std::path::PathBuf::from("./dist/resources")
-            .canonicalize()
-            .unwrap(),
-        egui_resources_path: std::path::PathBuf::from("./dist/resources-egui"),
+        resources_path,
+        egui_resources_path: PathBuf::from("./dist/resources-egui"),
         hmac_key,
         task_mgr: Arc::new(TaskManager::default()),
         user_manager: user_manager.clone(),
@@ -378,4 +405,22 @@ fn generate_bootstrap_password() -> String {
             CHARSET[idx] as char
         })
         .collect()
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::prepare_directory;
+
+    #[test]
+    fn creates_a_missing_directory_and_returns_its_canonical_path() {
+        let base = std::env::temp_dir().join(format!("lumeno-startup-{}", std::process::id()));
+        let nested = base.join("dist/data");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let resolved = prepare_directory(&nested).expect("prepare_directory should create it");
+
+        assert!(resolved.is_dir());
+        assert!(resolved.ends_with("dist/data"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

@@ -2,13 +2,20 @@
 """Export official models to ONNX for burn-onnx (no hand-written nets).
 
 Pipeline:
-  1) Download HF SigLIP2 + InsightFace buffalo_l
+  1) Download HF SigLIP2 (Apache-2.0) and, only after explicit acknowledgement,
+     InsightFace buffalo_l (pretrained weights: non-commercial research only)
   2) Export / upgrade ONNX into dist/models/onnx/
   3) `cargo build` runs burn-onnx → *.bpk + generated Rust
   4) This script refreshes manifest.json checksums for the .bpk files
 
+The local model pack is not distributed with Lumeno. Public releases and
+container images must not contain dist/models/ or the converted .bpk files.
+If you cannot accept the InsightFace terms, use the remote AI provider instead.
+
 Examples:
-  .venv-ai/bin/python scripts/convert_ai_models.py --out dist/models --download
+  # Local pack: requires acknowledging the non-commercial InsightFace terms.
+  .venv-ai/bin/python scripts/convert_ai_models.py --out dist/models --download \
+      --accept-insightface-noncommercial
   cargo +nightly build   # burn-onnx conversion
   .venv-ai/bin/python scripts/convert_ai_models.py --out dist/models --manifest-only
 """
@@ -32,6 +39,17 @@ ARCFACE_REV = "arcface-r50-w600k"
 BUFFALO_URL = (
     "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 )
+INSIGHTFACE_LICENSE_URL = "https://github.com/deepinsight/insightface#license"
+INSIGHTFACE_NOTICE = """\
+InsightFace buffalo_l pretrained weights are licensed for non-commercial
+research only. Review the terms before downloading:
+  {url}
+
+Pass --accept-insightface-noncommercial to acknowledge them. Public Lumeno
+releases and container images must not include dist/models/ or the converted
+.bpk files. For commercial deployments, use the remote AI provider or obtain a
+separate license for the face models.
+""".format(url=INSIGHTFACE_LICENSE_URL)
 
 
 def sha256_file(path: Path) -> str:
@@ -255,11 +273,23 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--manifest-only", action="store_true")
     parser.add_argument("--siglip-dir", type=Path)
     parser.add_argument("--buffalo-dir", type=Path)
+    parser.add_argument(
+        "--accept-insightface-noncommercial",
+        action="store_true",
+        help="Acknowledge that InsightFace pretrained weights are non-commercial research only.",
+    )
     args = parser.parse_args(argv)
 
     if args.manifest_only:
         write_manifest(args.out)
         return 0
+
+    # The local pack always includes face models, so downloading or exporting it
+    # requires an explicit acknowledgement rather than an incidental --download.
+    needs_face_models = args.download or args.buffalo_dir is not None
+    if needs_face_models and not args.accept_insightface_noncommercial:
+        print(INSIGHTFACE_NOTICE, file=sys.stderr)
+        return 2
 
     siglip_dir = args.siglip_dir
     buffalo_dir = args.buffalo_dir
@@ -279,6 +309,9 @@ def main(argv: list[str]) -> int:
     copy_tokenizer(siglip_dir, args.out)
 
     print(
+        "\nLocal model pack only: do not commit, publish, or bake dist/models/ "
+        "into images.\n"
+        "InsightFace weights remain non-commercial research only.\n"
         "\nNext: cargo +nightly build   # burn-onnx generates *.bpk + Rust modules\n"
         "Then: .venv-ai/bin/python scripts/convert_ai_models.py --manifest-only"
     )

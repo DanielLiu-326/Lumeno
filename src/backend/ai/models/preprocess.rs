@@ -229,7 +229,7 @@ pub fn prepare_scrfd_tensor(
     (normalized, det_scale, orig_w, orig_h)
 }
 
-/// Vulkan/Burn ArcFace normalize for an already-aligned 112×112 crop.
+/// GPU/Burn ArcFace normalize for an already-aligned 112×112 crop.
 pub fn prepare_arcface_tensor(rgb: &RgbImage, device: &AiDevice) -> Tensor<AiBackend, 4> {
     let tensor = upload_rgb8_nchw(rgb, device);
     let sized = bilinear_resize_nchw(tensor, 112, 112);

@@ -4,8 +4,8 @@
 //! one sample per forward to avoid seq-len / position-embed mismatches.
 //!
 //! Vision and text are separate weights so each can load and unload on its own.
-//! Vision runs on `selected_ai_device` (Vulkan/CUDA). Text — including the
-//! 256k×768 token embedding gather — always runs on CPU Flex (`cpu_flex_device`).
+//! Vision runs on `selected_ai_device` (Metal/Vulkan/CUDA). Text — including
+//! the 256k×768 token embedding gather — always runs on CPU Flex (`cpu_flex_device`).
 
 use burn::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -120,8 +120,8 @@ impl Siglip2Text {
                 tokenizer_path.ok_or_else(|| "siglip2 tokenizer missing".to_string())?;
             let tokenizer = Tokenizer::from_file(tokenizer_path)
                 .map_err(|error| format!("load siglip2 tokenizer: {error}"))?;
-            // Token embedding gather must not run on Vulkan: the table is 750 MiB
-            // and exceeds `max_storage_buffer_binding_size` (128 MiB on Intel iGPU).
+            // Token embedding gather must not run on GPU: the table is 750 MiB and
+            // exceeds `max_storage_buffer_binding_size` (128 MiB on Intel iGPU).
             let text_device = cpu_flex_device();
             let text_bpk = resolve_bpk(root, &["siglip2_text.bpk"])?;
             let model = super::onnx_gen::siglip2_text::Model::<AiBackend>::from_file(
@@ -171,7 +171,7 @@ impl Siglip2Text {
         }
         let head_ids: Vec<u32> = token_ids.iter().copied().take(8).collect();
         let ids: Vec<i32> = token_ids.into_iter().map(|v| v as i32).collect();
-        // `text_device` is Flex CPU so gather hits host RAM, not a 750 MiB Vulkan bind.
+        // `text_device` is Flex CPU so gather hits host RAM, not a 750 MiB GPU bind.
         let token_tensor =
             Tensor::<AiBackend, 1, Int>::from_ints(ids.as_slice(), &self.text_device)
                 .reshape([1, self.max_text_len]);
