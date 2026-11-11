@@ -361,6 +361,7 @@ export default {
     "albums.sortAsc": "Ascending",
     "albums.sortDesc": "Descending",
     "albums.thumbnailSize": "Thumbnail Size",
+    "albums.sidebarResizeHint": "Drag to resize; double-click to reset",
     "view.settings": "View settings",
     "view.settingsHint": "Place details on the photo corners or on rows below it. A row can hold several fields and will ellipsize when it runs out of space.",
     "view.details": "Details",

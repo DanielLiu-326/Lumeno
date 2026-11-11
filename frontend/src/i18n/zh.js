@@ -361,6 +361,7 @@ export default {
     "albums.sortAsc": "升序",
     "albums.sortDesc": "降序",
     "albums.thumbnailSize": "缩略图大小",
+    "albums.sidebarResizeHint": "拖动调整宽度；双击恢复默认",
     "view.settings": "视图设置",
     "view.settingsHint": "把信息放到相片四角或下方各行。一行里可以放多条，空间不够时会省略。",
     "view.details": "详细信息",

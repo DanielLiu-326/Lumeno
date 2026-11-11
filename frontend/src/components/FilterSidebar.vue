@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import { IconClose, IconRefresh, IconPlus, IconSort, IconGripVertical } from "../utils/icons";
 import { t } from "../i18n/index.js";
@@ -54,14 +54,47 @@ const {
 const SIDEBAR_DEFAULT_WIDTH = 272;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 600;
+const SIDEBAR_WIDTH_STORAGE_PREFIX = "lumeno.filterSidebarWidth";
 
 const isResizing = ref(false);
-const sidebarWidth = ref(SIDEBAR_DEFAULT_WIDTH);
+const sidebarWidth = ref(loadSidebarWidth());
 
 let startWidth = 0;
 let startX = 0;
 
+function clampSidebarWidth(value) {
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, value));
+}
+
+function sidebarWidthStorageKey() {
+  return `${SIDEBAR_WIDTH_STORAGE_PREFIX}.${props.currentUser || "guest"}`;
+}
+
+function loadSidebarWidth() {
+  try {
+    const raw = localStorage.getItem(sidebarWidthStorageKey());
+    const value = Number(raw);
+    return Number.isFinite(value) ? clampSidebarWidth(value) : SIDEBAR_DEFAULT_WIDTH;
+  } catch {
+    return SIDEBAR_DEFAULT_WIDTH;
+  }
+}
+
+function saveSidebarWidth() {
+  try {
+    localStorage.setItem(sidebarWidthStorageKey(), String(sidebarWidth.value));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function resetSidebarWidth() {
+  sidebarWidth.value = SIDEBAR_DEFAULT_WIDTH;
+  saveSidebarWidth();
+}
+
 function startResize(e) {
+  e.preventDefault();
   isResizing.value = true;
   startWidth = sidebarWidth.value;
   startX = e.clientX;
@@ -73,15 +106,30 @@ function startResize(e) {
 function resize(e) {
   if (!isResizing.value) return;
   const deltaX = e.clientX - startX;
-  sidebarWidth.value = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, startWidth + deltaX));
+  sidebarWidth.value = clampSidebarWidth(startWidth + deltaX);
 }
 
 function stopResize() {
+  if (!isResizing.value) return;
   isResizing.value = false;
   document.removeEventListener("mousemove", resize);
   document.removeEventListener("mouseup", stopResize);
   document.body.style.userSelect = "";
+  saveSidebarWidth();
 }
+
+watch(
+  () => props.currentUser,
+  () => {
+    sidebarWidth.value = loadSidebarWidth();
+  },
+);
+
+onBeforeUnmount(() => {
+  stopResize();
+  document.removeEventListener("mousemove", resize);
+  document.removeEventListener("mouseup", stopResize);
+});
 
 function addSortLevel() {
   emit("update-sort", withAddedSortLevel(props.sort));
@@ -115,7 +163,9 @@ function filterCardBaseClass() {
   >
     <div
       class="absolute top-0 right-0 bottom-0 w-1.5 cursor-col-resize hover:bg-amber-500/40 transition-colors z-[100]"
+      :title="t('albums.sidebarResizeHint')"
       @mousedown="startResize"
+      @dblclick="resetSidebarWidth"
     ></div>
 
     <div
