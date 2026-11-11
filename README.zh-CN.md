@@ -310,6 +310,7 @@ cargo +nightly test
 架构与行为文档：
 
 - [docs/color-pipeline.md](docs/color-pipeline.md)：调色管线语义。
+- [docs/burst-stacking.md](docs/burst-stacking.md)：连拍折叠设计。
 - [docs/tune-view.md](docs/tune-view.md)：桌面调色工作区。
 - [docs/mobile-tune-view.md](docs/mobile-tune-view.md)：手机编辑器。
 - [docs/ai-models.md](docs/ai-models.md)：模型管线与许可。
