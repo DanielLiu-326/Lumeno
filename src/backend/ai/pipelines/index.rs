@@ -96,7 +96,8 @@ impl<'a> AiIndexPipeline<'a> {
         Self::index_duplicates(&context, &state).await?;
         Self::index_embeddings(&context, &mut state).await?;
         Self::index_faces(&context, &mut state).await?;
-        Self::finalize(&context, &state).await
+        Self::finalize(&context, &state).await?;
+        Self::index_bursts(&context, &state).await
     }
 
     async fn scan(
@@ -202,6 +203,38 @@ impl<'a> AiIndexPipeline<'a> {
         .await
         .map_err(|_| context.stage_error("failed to index faces"))?
         .face_records;
+        Ok(())
+    }
+
+    async fn index_bursts(
+        context: &IndexPipelineContext<'_>,
+        state: &IndexPipelineState,
+    ) -> Result<(), IndexPipelineError> {
+        let total = state.indexed_albums.len();
+        if total == 0 {
+            return Ok(());
+        }
+        for (index, album) in state.indexed_albums.iter().enumerate() {
+            context.checkpoint().await?;
+            context
+                .progress
+                .set_cur_task(format!(
+                    "grouping bursts · {} ({}/{})",
+                    album.album,
+                    index + 1,
+                    total
+                ))
+                .await;
+            crate::backend::album::bursts::ensure_for_album(
+                context.cfg,
+                context.owner,
+                &album.album,
+                crate::backend::album::bursts::BURST_MAX_HAMMING,
+                Some(context.progress),
+            )
+            .await
+            .map_err(|error| context.stage_error(&format!("failed to group bursts: {error}")))?;
+        }
         Ok(())
     }
 

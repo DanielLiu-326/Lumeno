@@ -23,9 +23,10 @@ const props = defineProps({
   modelValue: { type: Object, required: true },
   isDark: { type: Boolean, default: false },
   formatSize: { type: Function, required: true },
+  burstThreshold: { type: Number, default: 10 },
 });
 
-const emit = defineEmits(["update:modelValue", "close"]);
+const emit = defineEmits(["update:modelValue", "update-burst-threshold", "close"]);
 
 const wrapperProps = computed(() => {
   if (props.page) return { class: "flex h-full min-h-0 flex-1 flex-col overflow-hidden" };
@@ -49,6 +50,7 @@ let lineTimer = 0;
 let ro = null;
 
 const draft = ref(cloneLayout(props.modelValue));
+const burstThresholdDraft = ref(props.burstThreshold);
 const layout = computed(() => draft.value);
 const unused = computed(() => unusedFields(layout.value));
 
@@ -92,6 +94,9 @@ function resetLayout() {
 
 function confirm() {
   emit("update:modelValue", cloneLayout(draft.value));
+  if (burstThresholdDraft.value !== props.burstThreshold) {
+    emit("update-burst-threshold", burstThresholdDraft.value);
+  }
   emit("close");
 }
 
@@ -231,6 +236,7 @@ watch(
   (open) => {
     if (!open) return;
     draft.value = cloneLayout(props.modelValue);
+    burstThresholdDraft.value = props.burstThreshold;
     selectedSlot.value = "overlay-tl";
     addMenuFor.value = "";
     nextTick(layoutStage);
@@ -310,6 +316,27 @@ watch(
         </button>
       </header>
 
+      <div
+        class="shrink-0 border-b px-4 py-3 md:px-8"
+        :class="isDark ? 'border-stone-800 bg-stone-900/50' : 'border-stone-100 bg-stone-50/80'"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <p class="text-xs font-semibold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ t('view.burstThreshold') }}</p>
+            <p class="mt-0.5 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('view.burstThresholdHint') }}</p>
+          </div>
+          <span class="shrink-0 text-sm font-semibold tabular-nums" :class="isDark ? 'text-amber-300' : 'text-amber-700'">{{ burstThresholdDraft }}</span>
+        </div>
+        <input
+          v-model.number="burstThresholdDraft"
+          type="range"
+          min="0"
+          max="32"
+          step="1"
+          class="mt-3 w-full accent-amber-500"
+          :aria-label="t('view.burstThreshold')"
+        />
+      </div>
       <div
         class="shrink-0 border-b px-4 py-3 md:px-8"
         :class="isDark ? 'border-stone-800 bg-stone-900/50' : 'border-stone-100 bg-stone-50/80'"

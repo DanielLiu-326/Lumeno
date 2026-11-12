@@ -6,9 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use futures::StreamExt;
-use sha2::{Digest, Sha256};
-
 use crate::backend::ai::album_cache::{AlbumAiCache, embedding_cache_key, face_photo_cache_key};
 use crate::backend::ai::duplicate::{compute_duplicate_hash_pair, lookup_photo_phash_async};
 use crate::backend::ai::faces::FACE_DETECTOR_REVISION;
@@ -16,6 +13,7 @@ use crate::backend::ai::models::{
     AiIndexedAlbumSummary, AiIndexedPhotoRecord, AiItemState, LoadedOwnerIndex,
     NormalizedAiIndexRequest,
 };
+use crate::backend::ai::phash::{build_photo_content_signature, build_photo_stable_identity};
 use crate::backend::album::helpers::{load_existing_album_index, read_exif_cache_if_present};
 use crate::backend::album::media::preview_thumbnail_cache_path;
 use crate::backend::album::types::AlbumPhotoItem;
@@ -29,6 +27,7 @@ use crate::backend::constants::{
 };
 use crate::backend::i18n::tr;
 use crate::backend::tasks::{TaskBase, format_subtask, task_file_name, wait_while_paused};
+use futures::StreamExt;
 
 use super::index::IndexPipelineError as PipelineError;
 
@@ -690,25 +689,6 @@ fn ai_subtask(phase: &str, path: &Path, current: usize, total: usize) -> String 
 
 fn embedding_key_for(cache_id: &str, album_relative: &str) -> String {
     format!("{cache_id}/{album_relative}")
-}
-
-fn build_photo_content_signature(size_bytes: u64, modified_unix_seconds: Option<u64>) -> String {
-    match modified_unix_seconds {
-        Some(modified) => format!("{size_bytes}:{modified}"),
-        None => format!("{size_bytes}:unknown"),
-    }
-}
-
-fn build_photo_stable_identity(owner: &str, source_key: &str, path: &str) -> (String, String) {
-    let stable_key = format!("{owner}|{source_key}|{path}");
-    let mut hasher = Sha256::new();
-    hasher.update(stable_key.as_bytes());
-    let stable_id = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    (stable_key, stable_id)
 }
 
 fn read_photo_dimensions(path: &Path) -> Option<(u32, u32)> {

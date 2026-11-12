@@ -30,9 +30,9 @@ use backend::album::{
     api_albums_delete, api_albums_delete_photos, api_albums_download, api_albums_download_file,
     api_albums_export, api_albums_export_batch, api_albums_export_batch_file, api_albums_import,
     api_albums_list, api_albums_photo_meta, api_albums_photos, api_albums_photos_query,
-    api_albums_rebuild_index, api_albums_share, api_albums_unshare, api_albums_update,
-    api_albums_upload, api_daily_picks, api_darktable_preview, api_dashboard, api_has_xmp,
-    api_on_this_day, api_thumbnail, api_video_encode, api_video_file, api_video_info,
+    api_albums_rebuild_index, api_albums_share, api_albums_stack, api_albums_unshare,
+    api_albums_update, api_albums_upload, api_daily_picks, api_darktable_preview, api_dashboard,
+    api_has_xmp, api_on_this_day, api_thumbnail, api_video_encode, api_video_file, api_video_info,
     spawn_thumbnail_prewarmer,
 };
 use backend::auth::{
@@ -208,6 +208,7 @@ async fn main() {
         .route("/api/albums/collections", get(api_albums_collections))
         .route("/api/albums/date_histogram", get(api_albums_date_histogram))
         .route("/api/albums/photo_meta", post(api_albums_photo_meta))
+        .route("/api/albums/stack", post(api_albums_stack))
         .route("/api/albums/rebuild_index", post(api_albums_rebuild_index))
         .route("/api/albums/delete_photos", post(api_albums_delete_photos))
         .route("/api/albums/copy_photo", post(api_albums_copy_photo))

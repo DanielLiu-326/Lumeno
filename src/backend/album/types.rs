@@ -60,17 +60,27 @@ pub struct AlbumPhotosQuery {
     /// Restrict to photos containing faces of these people (comma-separated person ids).
     pub(crate) person_ids: Option<String>,
     pub(crate) sort: Option<String>,
+    pub(crate) collapse: Option<String>,
+    pub(crate) burst_max_distance: Option<u32>,
     pub(crate) offset: Option<u32>,
     pub(crate) limit: Option<u32>,
 }
 
 /// Logical filter request body (preferred). `filters` uses AND/OR/AND-NOT clauses.
 #[derive(Debug, Deserialize)]
+pub struct AlbumStackBody {
+    pub(crate) album: String,
+    pub(crate) stack_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AlbumPhotosBody {
     pub(crate) album: String,
     #[serde(default)]
     pub(crate) filters: Vec<super::filters::FilterClause>,
     pub(crate) sort: Option<String>,
+    pub(crate) collapse: Option<String>,
+    pub(crate) burst_max_distance: Option<u32>,
     pub(crate) offset: Option<u32>,
     pub(crate) limit: Option<u32>,
     /// When set, only return photos whose path is in this list (from album index).

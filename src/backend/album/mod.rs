@@ -1,6 +1,7 @@
 //! Album domain: indexes, photos, thumbnails, darktable, sharing, and filters.
 
 pub mod api;
+pub(crate) mod bursts;
 pub mod decoder;
 pub mod download;
 pub mod filters;

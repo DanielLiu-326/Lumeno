@@ -8,6 +8,7 @@ mod faces;
 mod faces_config;
 mod models;
 mod people;
+mod phash;
 mod pipeline;
 mod pipelines;
 mod provider;
@@ -33,12 +34,15 @@ pub use store::FileAiIndexStore;
 pub use tasks::queue_owner_ai_index;
 pub(crate) use tasks::run_ai_index_for_album;
 
+pub(crate) use album_cache::{AlbumAiCache, PHASH_CACHE_VERSION, PhashCacheFile, phash_cache_key};
+pub(crate) use duplicate::compute_photo_phash_preferring_preview;
 use embedding::{
     calibrate_siglip_text_image_score, cosine_similarity, embedding_debug_fingerprint,
     embedding_debug_query_preview, normalize_search_text, tokenize_search_text,
 };
 pub(crate) use models::{AiFaceRecord, AiIndexedPhotoRecord};
 use models::{AiIndexedAlbumSummary, AiSimilarSearchResult, NormalizedAiIndexRequest};
+pub(crate) use phash::{build_photo_content_signature, build_photo_stable_identity};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

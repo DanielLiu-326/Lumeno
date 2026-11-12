@@ -158,6 +158,37 @@ impl TaskStep for UploadStep {
     }
 }
 
+struct BurstStep {
+    owner: String,
+    album: String,
+}
+
+#[async_trait]
+impl TaskStep for BurstStep {
+    fn label(&self, locale: &str) -> String {
+        tr(locale, "task.step_bursts")
+    }
+
+    async fn run(&self, ctx: &TaskContext<'_>) -> Result<(), StepError> {
+        match super::bursts::ensure_for_album(
+            ctx.cfg.as_ref(),
+            &self.owner,
+            &self.album,
+            super::bursts::BURST_MAX_HAMMING,
+            Some(ctx.base),
+        )
+        .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if ctx.cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                let _ = error;
+                Err(StepError::Cancelled)
+            }
+            Err(error) => Err(StepError::Failed(error)),
+        }
+    }
+}
+
 struct ImportStep {
     root_path: PathBuf,
     username: String,
@@ -227,6 +258,10 @@ fn tail_steps(
             owner: owner.to_string(),
             album: album.to_string(),
             locale: locale.to_string(),
+        }),
+        Arc::new(BurstStep {
+            owner: owner.to_string(),
+            album: album.to_string(),
         }),
     ]
 }

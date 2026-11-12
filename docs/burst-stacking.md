@@ -1,6 +1,6 @@
 # 连拍折叠设计
 
-状态：设计稿，未实现。
+状态：已实现 v1（文件级分组；阈值和页面细节仍可继续调整）。
 
 首版采用**文件级分组**：每个相册文件都是独立候选，相似度只看时间、相机、方向和 pHash。角标是 stack 内部图像文件总数。
 
@@ -199,6 +199,7 @@ dist/data/cache/bursts/{owner}/{album_cache_id}.json
     "len": 12345678
   },
   "created_at_unix_ms": 1780000000000,
+  "max_hamming": 10,
   "stacks": [
     {
       "id": "c2E6...",
@@ -249,7 +250,7 @@ dist/data/cache/bursts/{owner}/{album_cache_id}.json
 | `BURST_ALGORITHM` | `"burst-v1"` | 算法版本，进缓存 key 和 stack id |
 | `BURST_MAX_GAP_MS` | `2000` | 相邻两个文件的最大时间差 |
 | `BURST_MAX_SPAN_MS` | `15000` | 一组从第一个文件到最后一个文件的最大跨度 |
-| `BURST_MAX_HAMMING` | `10` | 64 位 pHash 的最大汉明距离 |
+| `BURST_MAX_HAMMING` | `10` | 64 位 pHash 的默认最大汉明距离；可由视图设置覆盖 |
 | `BURST_MIN_MEMBERS` | `2` | 少于 2 个文件不成组 |
 | `BURST_MAX_MEMBERS` | `20` | 一组最多 20 个文件，达到上限后封组 |
 
@@ -349,6 +350,7 @@ POST /api/albums/photos
   "filters": [],
   "sort": [{"field":"date","dir":"desc"}],
   "collapse": "bursts",
+  "burst_max_distance": 10,
   "offset": 0,
   "limit": 100
 }
@@ -393,9 +395,9 @@ POST /api/albums/photos
 | `pending` | 正在扫描 | 先显示平铺，提示“正在分析连拍” |
 | `stale` | 缓存过期，已排队刷新 | 先显示平铺，刷新后重取 |
 | `disabled` | 当前筛选/排序不支持折叠 | 平铺，不显示折叠开关的启用态 |
-| `error` | 扫描失败 | 平铺，提供重试 |
+| `error` | 缓存或索引不可读 | 平铺；任务列表里可以重试 |
 
-`disabled_reason` 可以带 `filters` / `sort` / `search` / `paths`，只用于调试和文案，不暴露内部路径。
+`reason` 首版只写 `filters_or_sort`，只用于调试和文案，不暴露内部路径。
 
 ### 7.2 现有接口不变
 
@@ -407,18 +409,25 @@ POST /api/albums/photos
 
 ### 7.3 错误码
 
-| code | 场景 |
+| HTTP | 场景 |
 | --- | --- |
-| `stack_not_found` | 组已不存在、缓存已重建或 id 无效 |
-| `stack_forbidden` | 能读相册但不能执行该操作 |
-| `bursts_disabled` | 当前视图不支持折叠 |
-| `burst_scan_failed` | 后台扫描失败，重试可恢复 |
+| `404` | 组已不存在、缓存已重建或 id 无效 |
+| `403` | 没有相册读权限，或现有逐文件操作被拒绝 |
+| `400` | 请求体缺少 `album` / `stack_id`，或相册名不合法 |
+
+后台扫描失败会出现在现有任务列表里；列表接口会继续返回平铺，前端会短暂轮询，最多重试约 20 次后停止，不会把失败伪装成空相册。
 
 ## 8. 缓存与任务
 
 ### 8.1 触发
 
-相册列表请求带 `collapse=bursts` 时：
+主路径：
+
+- 重建相册索引、云导入、本地导入的 TaskGroup 最后一步都会调用 `bursts::ensure_for_album`；
+- AI 索引流水线的最后一步也会为受影响的相册生成 burst cache；
+- 同一个 `ensure_for_album` 在缓存已有效时直接返回，不会重复计算。
+
+兜底路径：相册列表请求带 `collapse=bursts`，但缓存仍未生成时：
 
 1. 解析并鉴权相册；
 2. 读取 `cache/bursts/...json`；
@@ -429,7 +438,7 @@ POST /api/albums/photos
 
 ### 8.2 任务
 
-`BurstIndexTask`：
+`BurstIndexTask` 只用于列表请求的兜底；正常情况下由 TaskGroup / AI pipeline 完成：
 
 - 读取相册索引，按拍摄时间排序；
 - 对每个文件读同一份 `AlbumAiCache` pHash 缓存，缺失则用现有 `compute_photo_phash_preferring_preview` 计算并写回；
@@ -459,7 +468,8 @@ POST /api/albums/photos
 
 ### 9.1 开关
 
-- 放在现有 `ViewSettingsDialog` 的“视图”分组：**折叠连拍**。
+- 放在缩略图大小弹层（网格的“视图设置”入口）里：**折叠连拍**开关。
+- 同一菜单里提供相似度阈值滑块（0–32，默认 10，数值越小越严格）。
 - 默认开启；用户在设置里关闭后，请求不带 `collapse=bursts`。
 - 筛选、搜索、非日期排序时开关禁用，并提示“当前筛选/排序下不折叠”。
 - 偏好只记在本地视图设置（`localStorage` 的 UI 偏好），不进会话，不写后端设置。

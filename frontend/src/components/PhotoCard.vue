@@ -169,6 +169,7 @@ function slotFields(slotId) {
 }
 
 const isVideo = computed(() => isVideoPhoto(props.photo));
+const stackCount = computed(() => Math.max(0, Number(props.photo?.stack?.count) || 0));
 const videoInfo = ref(null);
 const videoBadge = computed(() => (isVideo.value ? videoBadgeText(videoInfo.value) : ""));
 let videoBadgeLoading = false;
@@ -208,6 +209,7 @@ function displayText(key) {
 <template>
   <article
     :class="cardClass"
+    :aria-label="stackCount ? t('albums.burstCard', { count: stackCount }) : undefined"
     :data-preview-root="preview || undefined"
     :data-flip-id="photo.path || undefined"
     @click="emit('click')"
@@ -251,6 +253,16 @@ function displayText(key) {
         v-if="videoBadge"
         class="pointer-events-none absolute bottom-1.5 left-1.5 z-20 max-w-[80%] truncate rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
       >{{ videoBadge }}</div>
+      <div
+        v-if="stackCount"
+        class="pointer-events-none absolute bottom-1.5 right-1.5 z-20 inline-flex items-center gap-1 rounded-full bg-black/70 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow-sm"
+      >
+        <svg viewBox="0 0 16 16" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+          <rect x="5.5" y="2.5" width="8" height="8" rx="1.5" />
+          <path d="M10.5 10.5v1a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h1" />
+        </svg>
+        {{ stackCount }}
+      </div>
       <div
         v-if="isVideo"
         class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"

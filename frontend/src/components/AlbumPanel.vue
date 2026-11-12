@@ -47,6 +47,9 @@ const props = defineProps({
   currentUser: { type: String, default: "" },
   albumViewMode: { type: String, default: "photos" },
   albumPhotos: { type: Array, required: true },
+  albumBursts: { type: Object, default: () => ({ state: "ready", algorithm: "burst-v1", stack_count: 0 }) },
+  collapseBursts: { type: Boolean, default: true },
+  burstThreshold: { type: Number, default: 10 },
   duplicateGroups: { type: Array, default: () => [] },
   duplicateTotal: { type: Number, default: 0 },
   similarResults: { type: Array, default: () => [] },
@@ -108,6 +111,8 @@ const emit = defineEmits([
   "copy-photo-to-album",
   "rebuild-index",
   "load-more-photos",
+  "update-collapse-bursts",
+  "update-burst-threshold",
   "delete-photos",
   "select-collection",
   "refresh-album-people",
@@ -1156,15 +1161,78 @@ function onPhotoContextMenu(photo, event) {
   openPhotoMenu(photo);
 }
 
-function onGridPhotoClick(photo) {
+function burstMemberPath(rel) {
+  const folder = albumFolderName(props.currentAlbum);
+  const value = String(rel || "");
+  if (!folder || !value) return "";
+  return value.startsWith("albums/") ? value : `albums/${folder}/${value}`;
+}
+
+async function fetchStackMembers(photo) {
+  if (!photo?.stack?.id) return [];
+  const payload = await postJson("/api/albums/stack", {
+    album: props.currentAlbum,
+    stack_id: photo.stack.id,
+  });
+  const folder = albumFolderName(props.currentAlbum);
+  const owner = payload.data?.owner || currentAlbumOwner.value;
+  const album = payload.data?.album || props.currentAlbum;
+  return (payload.data?.photos || [])
+    .map((member) => {
+      const path = burstMemberPath(member.path);
+      if (!path) return null;
+      return { ...member, path, owner, album };
+    })
+    .filter(Boolean);
+}
+
+async function openBurstStack(photo) {
+  try {
+    const members = await fetchStackMembers(photo);
+    if (!members.length) throw new Error(t('albums.burstOpenFailed'));
+    const target = members.find((member) => member.path === photo.path) || members[0];
+    await openPhotoDetail(target, { navPhotos: members });
+  } catch (error) {
+    window.alert(error?.message || t('albums.burstOpenFailed'));
+  }
+}
+
+async function toggleStackSelect(photo) {
+  try {
+    const members = await fetchStackMembers(photo);
+    const paths = members.map((member) => member.path);
+    if (!paths.length) {
+      togglePhotoSelect(photo);
+      return;
+    }
+    const next = new Set(selectedPhotoPaths.value);
+    const allSelected = paths.every((path) => next.has(path));
+    for (const path of paths) {
+      if (allSelected) next.delete(path);
+      else next.add(path);
+    }
+    selectedPhotoPaths.value = next;
+  } catch (error) {
+    window.alert(error?.message || t('albums.burstOpenFailed'));
+  }
+}
+
+async function onGridPhotoClick(photo) {
   if (suppressPhotoClick.value) {
     suppressPhotoClick.value = false;
     window.clearTimeout(suppressPhotoClickTimer);
     return;
   }
-  if (selectMode.value) togglePhotoSelect(photo);
-  else if (showingDesktopSearch.value) openPhotoDetail(photo, { navPhotos: desktopSearchPhotos.value });
-  else openDetail(photo);
+  if (selectMode.value) {
+    if (photo.stack) await toggleStackSelect(photo);
+    else togglePhotoSelect(photo);
+  } else if (showingDesktopSearch.value) {
+    openPhotoDetail(photo, { navPhotos: desktopSearchPhotos.value });
+  } else if (photo.stack) {
+    await openBurstStack(photo);
+  } else {
+    openDetail(photo);
+  }
 }
 
 async function openPhotoMenu(photo) {
@@ -1284,7 +1352,23 @@ async function selectAllPhotos() {
   if (props.loadAllPhotos) {
     await props.loadAllPhotos();
   }
-  selectedPhotoPaths.value = new Set(gridPhotos.value.map((p) => p.path));
+  const paths = new Set();
+  const stackPhotos = [];
+  for (const photo of gridPhotos.value) {
+    if (photo.stack) stackPhotos.push(photo);
+    else if (photo.path) paths.add(photo.path);
+  }
+  for (const photo of stackPhotos) {
+    try {
+      const members = await fetchStackMembers(photo);
+      const memberPaths = members.map((member) => member.path).filter(Boolean);
+      if (memberPaths.length) memberPaths.forEach((path) => paths.add(path));
+      else if (photo.path) paths.add(photo.path);
+    } catch {
+      if (photo.path) paths.add(photo.path);
+    }
+  }
+  selectedPhotoPaths.value = paths;
 }
 
 function clearSelection() {
@@ -2638,6 +2722,31 @@ defineExpose({
                     {{ t('view.thumbsOnly') }}
                   </button>
                 </div>
+                <div
+                  class="mt-2 flex items-start justify-between gap-3 rounded-xl px-1 py-1.5"
+                  :class="albumBursts.state === 'disabled' && !collapseBursts ? 'opacity-50' : ''"
+                  :title="albumBursts.state === 'disabled' ? t('view.collapseBurstsUnavailable') : t('view.collapseBurstsHint')"
+                >
+                  <span class="min-w-0">
+                    <span class="block text-[11px] font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('view.collapseBursts') }}</span>
+                    <span class="block text-[10px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('view.collapseBurstsHint') }}</span>
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    :aria-checked="collapseBursts"
+                    :aria-label="t('view.collapseBursts')"
+                    :disabled="albumBursts.state === 'disabled' && !collapseBursts"
+                    class="relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed"
+                    :class="collapseBursts ? 'bg-amber-500' : (isDark ? 'bg-stone-700' : 'bg-stone-300')"
+                    @click="$emit('update-collapse-bursts', !collapseBursts)"
+                  >
+                    <span
+                      class="inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+                      :class="collapseBursts ? 'translate-x-4' : 'translate-x-0.5'"
+                    ></span>
+                  </button>
+                </div>
                 <button type="button"
                   class="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11px] font-medium transition"
                   :class="isDark ? 'text-amber-200 hover:bg-stone-800' : 'text-amber-800 hover:bg-amber-50'"
@@ -2904,6 +3013,13 @@ defineExpose({
           </div>
 
           <template v-else>
+          <div
+            v-if="collapseBursts && !inSpecialView && !showingDesktopSearch && (albumBursts.state === 'pending' || albumBursts.state === 'stale')"
+            class="px-2 pb-1 pt-2 text-[11px] md:px-3"
+            :class="isDark ? 'text-stone-400' : 'text-stone-500'"
+          >
+            {{ albumBursts.state === 'pending' ? t('albums.burstPending') : t('albums.burstStale') }}
+          </div>
           <div v-if="desktopSearchLoading || (!showingDesktopSearch && (albumPhotoLoadHold || (busyAlbums && albumPhotos.length === 0)))" class="flex h-full flex-col items-center justify-center gap-3">
             <div class="h-8 w-8 animate-spin rounded-full border-2 border-amber-500 border-t-transparent"></div>
             <p class="text-sm" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('albums.loadingAlbum') }}</p>
@@ -3041,6 +3157,8 @@ defineExpose({
         v-model="viewLayout"
         :is-dark="isDark"
         :format-size="formatSize"
+        :burst-threshold="burstThreshold"
+        @update-burst-threshold="$emit('update-burst-threshold', $event)"
         @close="viewSettingsOpen = false"
       />
 

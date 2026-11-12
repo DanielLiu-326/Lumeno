@@ -91,6 +91,12 @@ pub const CACHE_AREAS: &[CacheArea] = &[
         layout: CacheLayout::PerOwner,
         gc: CacheGc::Never,
     },
+    // Burst grouping per album. Derived from the album index + pHash cache.
+    CacheArea {
+        name: "bursts",
+        layout: CacheLayout::PerOwner,
+        gc: CacheGc::Never,
+    },
     // Cheap to rebuild but also tiny; the account owns exactly one.
     CacheArea {
         name: "thumbnail-manifests",
