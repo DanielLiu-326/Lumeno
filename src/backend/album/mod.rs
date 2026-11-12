@@ -8,6 +8,7 @@ pub mod helpers;
 pub mod media;
 pub mod types;
 pub mod video_encode;
+pub(crate) mod workflow;
 
 pub use api::*;
 pub(crate) use api::{AiAlbumScanTarget, collect_accessible_ai_scan_targets};

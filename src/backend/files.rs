@@ -36,7 +36,7 @@ use super::common::{
     AppError, AppState, Token, create_response, into_host_path_safely, move_file_or_dir,
 };
 use super::i18n::{RequestLocale, tr, trf};
-use super::tasks::{Task, TaskBase, TaskStatus, format_subtask, task_file_name};
+use super::tasks::{Task, TaskBase, TaskStatus, UploadFeed, format_subtask, task_file_name};
 
 const UPLOAD_FEED_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -513,6 +513,10 @@ impl Task for UploadFiles {
         self.dedup_key.clone()
     }
 
+    fn upload_feed(&self) -> Option<&dyn UploadFeed> {
+        Some(self)
+    }
+
     async fn execute(&self) {
         self.base.set_status(TaskStatus::Pending).await;
         self.base.set_total_count(self.files.len());
@@ -706,6 +710,18 @@ impl Task for UploadFiles {
     async fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
         // Drop the sender to close the channel; recv() returns None immediately
+        self.ch_sender.lock().await.take();
+    }
+}
+
+#[async_trait]
+impl UploadFeed for UploadFiles {
+    async fn feed_bytes(&self, request_path: String, bytes: Bytes) -> Result<(), AppError> {
+        self.feed_bytes(request_path, bytes).await
+    }
+
+    async fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
         self.ch_sender.lock().await.take();
     }
 }
@@ -1826,7 +1842,7 @@ pub async fn api_upload_feed(
             "error.task_id_invalid",
         )));
     };
-    let Some(task) = (&*task as &dyn Any).downcast_ref::<UploadFiles>() else {
+    let Some(feed) = task.upload_feed() else {
         return Err(AppError::BadRequest(tr(
             locale.as_str(),
             "error.upload_task_mismatch",
@@ -1851,7 +1867,7 @@ pub async fn api_upload_feed(
             Ok(read) => read,
             Err(error) => return Err(AppError::Unknown(error.to_string())),
         };
-        task.feed_bytes(path.clone(), Bytes::copy_from_slice(&buffer[..read]))
+        feed.feed_bytes(path.clone(), Bytes::copy_from_slice(&buffer[..read]))
             .await?;
     }
     drop(reader);

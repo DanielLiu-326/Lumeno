@@ -80,6 +80,9 @@ defineEmits(["clear-finished", "cancel-task", "pause-task", "resume-task"]);
           </div>
         </div>
 
+        <p v-if="task.phase_count" class="mb-1 text-[11px] font-medium uppercase tracking-wide text-amber-700">
+          {{ task.phase_index }} / {{ task.phase_count }} · {{ task.phase_name }}
+        </p>
         <div class="flex min-w-0 items-center justify-between gap-3">
           <p class="min-w-0 truncate text-sm text-stone-500" :title="task.current_task">{{ task.current_task || t("tasks.waitingForUpdate") }}</p>
           <span class="shrink-0 text-sm font-medium tabular-nums text-stone-600">{{ progressPercent(task) }}%</span>

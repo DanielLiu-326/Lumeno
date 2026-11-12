@@ -1232,21 +1232,15 @@ pub(crate) async fn queue_rebuild_album_index(
     album_name: String,
     locale: &str,
 ) {
-    let task = Arc::new(RebuildIndexTask::new(
-        trf(
-            locale,
-            "task.rebuild_index",
-            &[("album", album_name.clone())],
-        ),
+    let _ = super::workflow::queue_reindex_only(
+        cfg,
         task_owner,
-        Some(cfg.clone()),
-        cfg.data_path.clone(),
         root_path,
         album_owner,
         album_name,
         locale.to_string(),
-    ));
-    let _ = cfg.task_mgr.add_task_if_absent(task).await;
+    )
+    .await;
 }
 
 pub(crate) async fn refresh_album_index_after_changes(
@@ -1534,7 +1528,7 @@ impl Task for RebuildIndexTask {
 
 /// Drop leftover files under `albums/__uploading/...` after a successful import.
 /// Regular user folders passed as import sources are never removed.
-async fn cleanup_upload_staging_sources(root_path: &FsPath, sources: &[String]) {
+pub(crate) async fn cleanup_upload_staging_sources(root_path: &FsPath, sources: &[String]) {
     let staging_root = albums_root(root_path).join("__uploading");
     for source in sources {
         let Ok(full) = into_host_path_safely(root_path, source) else {

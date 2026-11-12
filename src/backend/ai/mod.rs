@@ -31,6 +31,7 @@ pub use provider::{
 };
 pub use store::FileAiIndexStore;
 pub use tasks::queue_owner_ai_index;
+pub(crate) use tasks::run_ai_index_for_album;
 
 use embedding::{
     calibrate_siglip_text_image_score, cosine_similarity, embedding_debug_fingerprint,

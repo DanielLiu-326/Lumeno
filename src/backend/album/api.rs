@@ -3,7 +3,6 @@ use axum::extract::Query;
 use axum::{Extension, Json};
 use chrono::{Datelike, NaiveDate};
 use function_name::named;
-use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -366,30 +365,25 @@ pub async fn api_albums_import(
         }
     }
 
-    let task = Arc::new(ImportAlbumTask::new(
-        trf(
-            locale.as_str(),
-            "task.import_album",
-            &[("album", album_name.clone())],
-        ),
-        username,
+    let (task_id, _) = super::workflow::queue_import_workflow(
         cfg.clone(),
+        username.clone(),
         root_path,
+        username,
         album_name,
         sources,
         move_files.unwrap_or(false),
         conflict,
         locale.as_str().to_string(),
-    ));
-    let task_id = task.uuid().to_string();
-    cfg.task_mgr.add_task(task).await;
+    )
+    .await;
 
     let message = tr(locale.as_str(), "response.album_import_task_created");
     Ok(create_response(
         true,
         &message,
         0,
-        Some(json!({ "task_id": task_id })),
+        Some(json!({ "task_id": task_id.to_string() })),
     ))
 }
 
@@ -1279,22 +1273,15 @@ pub async fn api_albums_rebuild_index(
     let resolved =
         resolve_album_access(&cfg, &username, &user_root, &payload.album, locale.as_str()).await?;
 
-    let album_label = resolved.album_name.clone();
-    let task = Arc::new(RebuildIndexTask::new(
-        trf(
-            locale.as_str(),
-            "task.rebuild_index",
-            &[("album", album_label.clone())],
-        ),
+    let (task_id, created) = super::workflow::queue_rebuild_workflow(
+        cfg.clone(),
         username,
-        Some(cfg.clone()),
-        cfg.data_path.clone(),
         resolved.root_path,
         resolved.owner,
         resolved.album_name,
         locale.as_str().to_string(),
-    ));
-    let (task_id, created) = cfg.task_mgr.add_task_if_absent(task).await;
+    )
+    .await;
 
     let message = if created {
         tr(locale.as_str(), "response.rebuild_index_task_created")
@@ -2397,58 +2384,32 @@ pub async fn api_albums_upload(
         "task.upload_album",
         &[("album", album_name.clone())],
     );
-
-    // Receive every byte into staging first. Import (EXIF + move) starts only
-    // after the upload task finishes, so a slow RAW decode cannot stall the
-    // chunk channel and trip the idle timeout.
-    let import_key = crate::backend::album::helpers::import_album_task_key(&username, &album_name);
-    let cfg_done = cfg.clone();
-    let root_done = root_path.clone();
-    let user_done = username.clone();
-    let album_done = album_name.clone();
-    let locale_done = locale.as_str().to_string();
     let staging_rel = format!("albums/__uploading/{}", staging_uuid);
-    let conflict_done = conflict;
-    let on_finished = move || {
-        let cfg = cfg_done.clone();
-        let root_path = root_done.clone();
-        let username = user_done.clone();
-        let album_name = album_done.clone();
-        let locale = locale_done.clone();
-        let staging_rel = staging_rel.clone();
-        let conflict = conflict_done;
-        Box::pin(async move {
-            let task = Arc::new(ImportAlbumTask::new(
-                trf(
-                    locale.as_str(),
-                    "task.import_album",
-                    &[("album", album_name.clone())],
-                ),
-                username.clone(),
-                cfg.clone(),
-                root_path,
-                album_name,
-                vec![staging_rel],
-                true,
-                conflict,
-                locale,
-            ));
-            cfg.task_mgr.add_task(task).await;
-        }) as BoxFuture<'static, ()>
-    };
-
-    let task = Arc::new(
-        crate::backend::files::UploadFiles::new(
-            task_name,
-            username,
-            root_path.clone(),
-            metas,
-            conflict,
-        )
-        .with_on_finished(on_finished)
-        .with_dedup_key(import_key),
-    );
-    cfg.task_mgr.add_task(task.clone()).await;
+    let upload = Arc::new(crate::backend::files::UploadFiles::new(
+        task_name,
+        username.clone(),
+        root_path.clone(),
+        metas,
+        conflict,
+    ));
+    let (task_id, created) = super::workflow::queue_upload_workflow(
+        cfg.clone(),
+        username.clone(),
+        root_path,
+        username,
+        album_name,
+        upload,
+        staging_rel,
+        conflict,
+        locale.as_str().to_string(),
+    )
+    .await;
+    if !created {
+        return Err(AppError::BadRequest(tr(
+            locale.as_str(),
+            "error.upload_task_running",
+        )));
+    }
 
     let message = tr(locale.as_str(), "response.upload_started");
     Ok(create_response(
@@ -2456,7 +2417,7 @@ pub async fn api_albums_upload(
         &message,
         0,
         Some(json!({
-            "task_id": task.uuid().to_string(),
+            "task_id": task_id.to_string(),
             "staging_prefix": format!("albums/__uploading/{}", staging_uuid)
         })),
     ))

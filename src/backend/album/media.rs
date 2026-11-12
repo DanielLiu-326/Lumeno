@@ -854,6 +854,61 @@ pub(crate) fn preview_thumbnail_cache_path(
     find_existing_thumbnail(&dir, &key, ThumbFormat::Avif).map(|(path, _)| path)
 }
 
+/// Generate thumbs for one album as part of a larger workflow. Returns
+/// per-file errors instead of failing the workflow; callers decide whether a
+/// partial thumbnail pass is fatal.
+pub(crate) async fn generate_album_thumbnails(
+    cfg: &AppState,
+    owner: &str,
+    album_name: &str,
+    base: &TaskBase,
+    cancel: &AtomicBool,
+    paused: &AtomicBool,
+) -> Vec<String> {
+    let album_dir = albums_root(&cfg.user_root_path(owner)).join(album_name);
+    if !album_dir.exists() {
+        return Vec::new();
+    }
+    let mut sources = Vec::new();
+    collect_album_media(album_dir.as_path(), &mut sources).await;
+    let mut thumbnails = Vec::with_capacity(sources.len());
+    for source in sources {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(metadata) = tokio::fs::metadata(&source).await else {
+            continue;
+        };
+        if !source.starts_with(&album_dir) {
+            continue;
+        }
+        let cache_key = thumbnail_cache_key(
+            owner,
+            cfg.data_path.as_path(),
+            &source,
+            THUMBNAIL_SIZE,
+            &metadata,
+            ThumbnailGenerator::Lumeno,
+        );
+        thumbnails.push((source, cache_key));
+    }
+    base.set_total_count(thumbnails.len());
+    base.set_processed_count(0);
+    let format = ThumbFormat::preferred(&cfg.settings_manager.thumbnail_format().await);
+    let quality = cfg.settings_manager.thumbnail_quality().await;
+    generate_thumbnail_batch(
+        base,
+        cfg,
+        thumbnails,
+        format,
+        quality,
+        cfg.thumbnail_limiter.limit(),
+        cancel,
+        paused,
+    )
+    .await
+}
+
 pub(crate) async fn generate_thumbnail_batch(
     base: &TaskBase,
     cfg: &AppState,

@@ -125,6 +125,38 @@ impl Task for AiIndexTask {
     }
 }
 
+/// Run the AI index pipeline synchronously as one step of a TaskGroup.
+/// Returns false when AI is disabled and there is no existing index to update.
+pub(crate) async fn run_ai_index_for_album(
+    cfg: &AppState,
+    owner: &str,
+    album: &str,
+    locale: &str,
+    base: &TaskBase,
+    cancel: &Arc<AtomicBool>,
+    paused: &AtomicBool,
+) -> Result<bool, String> {
+    let ai_enabled = cfg.settings_manager.ai_enabled().await;
+    let has_index = cfg.ai_service.store().owner_has_current_index(owner).await;
+    if !ai_enabled && !has_index {
+        return Ok(false);
+    }
+
+    let request = NormalizedAiIndexRequest {
+        album: Some(album.to_string()),
+        mode: "incremental".to_string(),
+        features: NormalizedAiIndexRequest::default_incremental_features(),
+    };
+    AiIndexPipeline::new(cfg, locale, &request, base, cancel, paused)
+        .run()
+        .await
+        .map_err(|error| match error {
+            IndexPipelineError::Cancelled => "cancelled".to_string(),
+            IndexPipelineError::Failed(error) => error,
+        })?;
+    Ok(true)
+}
+
 pub async fn queue_owner_ai_index(
     cfg: Arc<AppState>,
     owner: String,

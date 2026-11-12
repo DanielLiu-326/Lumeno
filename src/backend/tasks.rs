@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use axum::body::Bytes;
 use axum::extract::Path;
 use axum::{Extension, Json};
 use function_name::named;
@@ -106,6 +107,9 @@ pub struct TaskBase {
     pub processed_count: AtomicUsize,
     pub total_cost: AtomicU64,
     pub processed_cost: AtomicU64,
+    pub phase_index: AtomicUsize,
+    pub phase_count: AtomicUsize,
+    pub phase_name: Mutex<String>,
     pub error_msg: Mutex<Option<String>>,
 }
 
@@ -121,6 +125,9 @@ impl TaskBase {
             processed_count: 0.into(),
             total_cost: 0.into(),
             processed_cost: 0.into(),
+            phase_index: 0.into(),
+            phase_count: 0.into(),
+            phase_name: Mutex::new(String::new()),
             error_msg: Mutex::new(None),
         }
     }
@@ -139,6 +146,12 @@ impl TaskBase {
 
     pub fn set_processed_count(&self, count: usize) {
         self.processed_count.store(count, Ordering::Relaxed);
+    }
+
+    pub async fn set_phase(&self, index: usize, count: usize, name: String) {
+        self.phase_index.store(index, Ordering::Relaxed);
+        self.phase_count.store(count, Ordering::Relaxed);
+        *self.phase_name.lock().await = name;
     }
 
     pub fn add_processed_count(&self, count: usize) {
@@ -191,6 +204,12 @@ pub trait Task: Send + Sync + Any {
         false
     }
 
+    /// Tasks that accept chunked uploads expose a feed; composite workflows
+    /// forward the feed of their first upload step.
+    fn upload_feed(&self) -> Option<&dyn UploadFeed> {
+        None
+    }
+
     async fn status(&self) -> Value {
         let base = self.base();
         json!({
@@ -201,10 +220,175 @@ pub trait Task: Send + Sync + Any {
             "processed_count": base.processed_count.load(Ordering::Relaxed),
             "total_cost": base.total_cost.load(Ordering::Relaxed),
             "processed_cost": base.processed_cost.load(Ordering::Relaxed),
+            "phase_index": base.phase_index.load(Ordering::Relaxed),
+            "phase_count": base.phase_count.load(Ordering::Relaxed),
+            "phase_name": &*base.phase_name.lock().await,
             "error_msg": base.error_msg.lock().await.as_deref(),
             "cancellable": self.cancellable(),
             "pausable": self.pausable(),
         })
+    }
+}
+
+#[derive(Debug)]
+pub enum StepError {
+    Cancelled,
+    Failed(String),
+}
+
+pub struct TaskContext<'a> {
+    pub cfg: &'a Arc<AppState>,
+    pub base: &'a TaskBase,
+    pub cancel: &'a Arc<AtomicBool>,
+    pub paused: &'a AtomicBool,
+}
+
+#[async_trait]
+pub trait TaskStep: Send + Sync {
+    fn label(&self, locale: &str) -> String;
+    async fn run(&self, ctx: &TaskContext<'_>) -> Result<(), StepError>;
+}
+
+#[async_trait]
+pub trait UploadFeed: Send + Sync {
+    async fn feed_bytes(&self, request_path: String, bytes: Bytes) -> Result<(), AppError>;
+    async fn cancel(&self);
+}
+
+/// A single TaskManager entry that executes steps in order.
+pub struct TaskGroup {
+    base: TaskBase,
+    cfg: Arc<AppState>,
+    locale: String,
+    cancel: Arc<AtomicBool>,
+    paused: AtomicBool,
+    steps: Vec<Arc<dyn TaskStep>>,
+    upload_feed: Option<Arc<dyn UploadFeed>>,
+    dedup_key: Option<String>,
+}
+
+impl TaskGroup {
+    pub fn new(
+        name: String,
+        owner: String,
+        cfg: Arc<AppState>,
+        locale: String,
+        dedup_key: Option<String>,
+    ) -> Self {
+        Self {
+            base: TaskBase::new(name, owner),
+            cfg,
+            locale,
+            cancel: Arc::new(AtomicBool::new(false)),
+            paused: AtomicBool::new(false),
+            steps: Vec::new(),
+            upload_feed: None,
+            dedup_key,
+        }
+    }
+
+    pub fn with_steps(mut self, steps: Vec<Arc<dyn TaskStep>>) -> Self {
+        self.steps = steps;
+        self
+    }
+
+    pub fn with_upload_feed(mut self, feed: Arc<dyn UploadFeed>) -> Self {
+        self.upload_feed = Some(feed);
+        self
+    }
+
+    async fn finish_cancelled(&self) {
+        self.base.set_cur_task("Cancelled".to_string()).await;
+        self.base.set_status(TaskStatus::Cancelled).await;
+    }
+
+    async fn finish_failed(&self, error: String) {
+        self.base.set_error_msg(error).await;
+        self.base.set_status(TaskStatus::Failed).await;
+    }
+}
+
+#[async_trait]
+impl Task for TaskGroup {
+    fn base(&self) -> &TaskBase {
+        &self.base
+    }
+
+    fn deduplication_key(&self) -> Option<String> {
+        self.dedup_key.clone()
+    }
+
+    fn cancellable(&self) -> bool {
+        true
+    }
+
+    fn pausable(&self) -> bool {
+        true
+    }
+
+    fn upload_feed(&self) -> Option<&dyn UploadFeed> {
+        self.upload_feed.as_deref()
+    }
+
+    async fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.paused.store(false, Ordering::Relaxed);
+        if let Some(feed) = &self.upload_feed {
+            feed.cancel().await;
+        }
+        self.finish_cancelled().await;
+    }
+
+    async fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+        self.base.set_status(TaskStatus::Paused).await;
+    }
+
+    async fn resume(&self, _extra_info: Value) {
+        self.paused.store(false, Ordering::Relaxed);
+        self.base.set_status(TaskStatus::Running).await;
+    }
+
+    async fn execute(&self) {
+        self.base.set_status(TaskStatus::Running).await;
+        self.base
+            .set_phase(0, self.steps.len(), String::new())
+            .await;
+
+        for (index, step) in self.steps.iter().enumerate() {
+            if wait_while_paused(self.cancel.as_ref(), &self.paused).await
+                || self.cancel.load(Ordering::Relaxed)
+            {
+                self.finish_cancelled().await;
+                return;
+            }
+            self.base
+                .set_phase(index + 1, self.steps.len(), step.label(&self.locale))
+                .await;
+            let ctx = TaskContext {
+                cfg: &self.cfg,
+                base: &self.base,
+                cancel: &self.cancel,
+                paused: &self.paused,
+            };
+            match step.run(&ctx).await {
+                Ok(()) => {}
+                Err(StepError::Cancelled) => {
+                    self.finish_cancelled().await;
+                    return;
+                }
+                Err(StepError::Failed(error)) => {
+                    self.finish_failed(error).await;
+                    return;
+                }
+            }
+        }
+
+        if self.cancel.load(Ordering::Relaxed) {
+            self.finish_cancelled().await;
+        } else {
+            self.base.set_status(TaskStatus::Finished).await;
+        }
     }
 }
 
