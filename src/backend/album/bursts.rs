@@ -63,8 +63,13 @@ pub(crate) struct BurstCacheFile {
     pub(crate) algorithm: String,
     pub(crate) source_index: BurstSourceIndex,
     pub(crate) created_at_unix_ms: u128,
+    #[serde(default = "default_burst_max_hamming")]
     pub(crate) max_hamming: u32,
     pub(crate) stacks: Vec<BurstStack>,
+}
+
+fn default_burst_max_hamming() -> u32 {
+    BURST_MAX_HAMMING
 }
 
 impl BurstCacheFile {
@@ -767,6 +772,19 @@ mod tests {
         let stacks = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING);
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].members, vec!["a.jpg", "b.jpg"]);
+    }
+
+    #[test]
+    fn old_cache_without_threshold_uses_default() {
+        let raw = r#"{
+            "schema_version": 1,
+            "algorithm": "burst-v1",
+            "source_index": {"entries": 0, "modified_unix_ms": 0, "len": 0},
+            "created_at_unix_ms": 0,
+            "stacks": []
+        }"#;
+        let cache: super::BurstCacheFile = serde_json::from_str(raw).unwrap();
+        assert_eq!(cache.max_hamming, super::BURST_MAX_HAMMING);
     }
 
     #[test]
