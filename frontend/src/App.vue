@@ -617,6 +617,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             :burst-threshold="app.burstThreshold"
             :burst-algorithm="app.burstAlgorithm"
             :burst-embedding-threshold="app.burstEmbeddingThreshold"
+            :burst-time-window="app.burstTimeWindow"
             :duplicate-groups="app.albumDuplicateGroups"
             :duplicate-total="app.albumDuplicateTotal"
             :similar-results="app.aiSimilarResults"

@@ -25,6 +25,8 @@ pub struct UpdateAlbumPayload {
     pub(crate) burst_algorithm: Option<String>,
     #[serde(default)]
     pub(crate) burst_embedding_threshold: Option<u32>,
+    #[serde(default)]
+    pub(crate) burst_time_window_seconds: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,6 +381,9 @@ pub struct AlbumMeta {
     /// Embedding cosine threshold in percent (30–100).
     #[serde(default = "default_burst_embedding_threshold")]
     pub(crate) burst_embedding_threshold: u32,
+    /// Maximum gap between adjacent files in a burst, in seconds (1–86400).
+    #[serde(default = "default_burst_time_window_seconds")]
+    pub(crate) burst_time_window_seconds: u32,
 }
 
 pub(crate) fn default_burst_threshold() -> u32 {
@@ -393,6 +398,10 @@ pub(crate) fn default_burst_embedding_threshold() -> u32 {
     80
 }
 
+pub(crate) fn default_burst_time_window_seconds() -> u32 {
+    2
+}
+
 impl Default for AlbumMeta {
     fn default() -> Self {
         Self {
@@ -404,6 +413,7 @@ impl Default for AlbumMeta {
             burst_threshold: default_burst_threshold(),
             burst_algorithm: default_burst_algorithm(),
             burst_embedding_threshold: default_burst_embedding_threshold(),
+            burst_time_window_seconds: default_burst_time_window_seconds(),
         }
     }
 }
@@ -423,6 +433,10 @@ impl AlbumMeta {
 
     pub(crate) fn burst_embedding_threshold(&self) -> u32 {
         self.burst_embedding_threshold.clamp(30, 100)
+    }
+
+    pub(crate) fn burst_time_window_seconds(&self) -> u32 {
+        self.burst_time_window_seconds.clamp(1, 86_400)
     }
 }
 

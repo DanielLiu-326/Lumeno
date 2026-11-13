@@ -26,6 +26,7 @@ const props = defineProps({
   burstThreshold: { type: Number, default: 10 },
   burstAlgorithm: { type: String, default: "dct" },
   burstEmbeddingThreshold: { type: Number, default: 80 },
+  burstTimeWindow: { type: Number, default: 2 },
 });
 
 const emit = defineEmits(["update:modelValue", "update-burst-settings", "close"]);
@@ -55,6 +56,20 @@ const draft = ref(cloneLayout(props.modelValue));
 const burstThresholdDraft = ref(props.burstThreshold);
 const burstAlgorithmDraft = ref(props.burstAlgorithm === "embedding" ? "embedding" : "dct");
 const burstEmbeddingThresholdDraft = ref(props.burstEmbeddingThreshold);
+const burstTimeWindowDraft = ref(props.burstTimeWindow);
+const burstTimeWindowOptions = [
+  { value: 1, label: "1s" },
+  { value: 2, label: "2s" },
+  { value: 5, label: "5s" },
+  { value: 10, label: "10s" },
+  { value: 30, label: "30s" },
+  { value: 60, label: "1m" },
+  { value: 300, label: "5m" },
+  { value: 1800, label: "30m" },
+  { value: 3600, label: "1h" },
+  { value: 21600, label: "6h" },
+  { value: 86400, label: "24h" },
+];
 const layout = computed(() => draft.value);
 const unused = computed(() => unusedFields(layout.value));
 
@@ -102,11 +117,13 @@ function confirm() {
     burstAlgorithmDraft.value !== (props.burstAlgorithm === "embedding" ? "embedding" : "dct")
     || burstThresholdDraft.value !== props.burstThreshold
     || burstEmbeddingThresholdDraft.value !== props.burstEmbeddingThreshold
+    || burstTimeWindowDraft.value !== props.burstTimeWindow
   ) {
     emit("update-burst-settings", {
       algorithm: burstAlgorithmDraft.value,
       threshold: burstThresholdDraft.value,
       embeddingThreshold: burstEmbeddingThresholdDraft.value,
+      timeWindow: burstTimeWindowDraft.value,
     });
   }
   emit("close");
@@ -251,6 +268,7 @@ watch(
     burstThresholdDraft.value = props.burstThreshold;
     burstAlgorithmDraft.value = props.burstAlgorithm === "embedding" ? "embedding" : "dct";
     burstEmbeddingThresholdDraft.value = props.burstEmbeddingThreshold;
+    burstTimeWindowDraft.value = props.burstTimeWindow;
     selectedSlot.value = "overlay-tl";
     addMenuFor.value = "";
     nextTick(layoutStage);
@@ -349,6 +367,22 @@ watch(
           <option value="dct">{{ t('view.burstAlgorithmDct') }}</option>
           <option value="embedding">{{ t('view.burstAlgorithmEmbedding') }}</option>
         </select>
+
+        <label class="mt-3 block text-xs font-semibold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">
+          {{ t('view.burstTimeWindow') }}
+        </label>
+        <select
+          v-model.number="burstTimeWindowDraft"
+          class="mt-2 w-full rounded-xl border px-3 py-2 text-sm"
+          :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-200 bg-white text-stone-800'"
+        >
+          <option v-for="option in burstTimeWindowOptions" :key="option.value" :value="option.value">
+            {{ option.label }}
+          </option>
+        </select>
+        <p class="mt-1 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+          {{ t('view.burstTimeWindowHint') }}
+        </p>
 
         <div class="mt-3 flex items-center justify-between gap-4">
           <div class="min-w-0">

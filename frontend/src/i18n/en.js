@@ -376,6 +376,8 @@ export default {
     "view.burstAlgorithmDct": "DCT pHash (fast, no AI)",
     "view.burstAlgorithm": "Burst grouping signal",
     "view.burstSettings": "Burst folding",
+    "view.burstTimeWindowHint": "Maximum gap between adjacent files; up to 24 hours.",
+    "view.burstTimeWindow": "Time window",
     "view.collapseBurstsHint": "Group adjacent similar images. The badge counts files.",
     "view.collapseBurstsUnavailable": "Not available while filtering or using another sort.",
     "view.settings": "View settings",

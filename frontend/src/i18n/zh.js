@@ -376,6 +376,8 @@ export default {
     "view.burstAlgorithmDct": "DCT pHash（快，不需 AI）",
     "view.burstAlgorithm": "连拍分组信号",
     "view.burstSettings": "连拍折叠",
+    "view.burstTimeWindowHint": "相邻文件的最大时间差，最长 24 小时。",
+    "view.burstTimeWindow": "时间窗口",
     "view.collapseBurstsHint": "把相邻的相似图片合并成一项；角标是文件数。",
     "view.collapseBurstsUnavailable": "筛选或其他排序下不可用。",
     "view.settings": "视图设置",

@@ -89,6 +89,7 @@ pub async fn api_albums_list(
             "burst_threshold": meta.burst_threshold(),
             "burst_algorithm": meta.burst_algorithm(),
             "burst_embedding_threshold": meta.burst_embedding_threshold(),
+            "burst_time_window_seconds": meta.burst_time_window_seconds(),
         }));
     }
 
@@ -268,6 +269,9 @@ pub async fn api_albums_update(
     if let Some(threshold) = payload.burst_embedding_threshold {
         meta.burst_embedding_threshold = threshold.clamp(30, 100);
     }
+    if let Some(window) = payload.burst_time_window_seconds {
+        meta.burst_time_window_seconds = window.clamp(1, 86_400);
+    }
     write_album_meta(album_dir.as_path(), &meta).await?;
     let message = tr(locale.as_str(), "response.album_updated");
     Ok(create_response(
@@ -282,6 +286,7 @@ pub async fn api_albums_update(
             "burst_threshold": meta.burst_threshold(),
             "burst_algorithm": meta.burst_algorithm(),
             "burst_embedding_threshold": meta.burst_embedding_threshold(),
+            "burst_time_window_seconds": meta.burst_time_window_seconds(),
             "owner": resolved.owner,
         })),
     ))
@@ -1138,6 +1143,10 @@ pub(crate) async fn list_album_photos_with_filters(
         .as_ref()
         .map(|lookup| lookup.threshold)
         .unwrap_or(super::bursts::BURST_MAX_HAMMING);
+    let burst_time_window = burst_lookup
+        .as_ref()
+        .map(|lookup| lookup.time_window_seconds)
+        .unwrap_or(2);
 
     let mut display_values: Vec<Value> = Vec::new();
     let mut photo_count = 0usize;
@@ -1260,6 +1269,7 @@ pub(crate) async fn list_album_photos_with_filters(
             "version": super::bursts::BURST_ALGORITHM,
             "max_distance": burst_max_distance,
             "threshold": burst_max_distance,
+            "time_window_seconds": burst_time_window,
             "stack_count": lookup.cache.as_ref().map(|cache| cache.stacks.len()).unwrap_or(0),
         });
         if let Some(reason) = lookup.reason {
@@ -2376,6 +2386,7 @@ pub(crate) async fn collect_shared_albums(
         burst_threshold: u32,
         burst_algorithm: String,
         burst_embedding_threshold: u32,
+        burst_time_window_seconds: u32,
         can_write: bool,
         can_delete: bool,
     }
@@ -2410,6 +2421,7 @@ pub(crate) async fn collect_shared_albums(
             let burst_threshold = meta.burst_threshold();
             let burst_algorithm = meta.burst_algorithm().to_string();
             let burst_embedding_threshold = meta.burst_embedding_threshold();
+            let burst_time_window_seconds = meta.burst_time_window_seconds();
             candidates.push(Candidate {
                 owner: owner.clone(),
                 owner_root: owner_root.clone(),
@@ -2420,6 +2432,7 @@ pub(crate) async fn collect_shared_albums(
                 burst_threshold,
                 burst_algorithm,
                 burst_embedding_threshold,
+                burst_time_window_seconds,
                 can_write: share.can_write,
                 can_delete: share.can_delete,
             });
@@ -2445,6 +2458,7 @@ pub(crate) async fn collect_shared_albums(
             "burst_threshold": c.burst_threshold,
             "burst_algorithm": c.burst_algorithm,
             "burst_embedding_threshold": c.burst_embedding_threshold,
+            "burst_time_window_seconds": c.burst_time_window_seconds,
             "owner": c.owner,
             "can_write": c.can_write,
             "can_delete": c.can_delete,

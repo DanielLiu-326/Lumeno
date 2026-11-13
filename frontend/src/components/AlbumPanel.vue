@@ -51,7 +51,8 @@ const props = defineProps({
   collapseBursts: { type: Boolean, default: true },
   burstThreshold: { type: Number, default: 10 },
   burstAlgorithm: { type: String, default: "dct" },
-  burstEmbeddingThreshold: { type: Number, default: 90 },
+  burstEmbeddingThreshold: { type: Number, default: 80 },
+  burstTimeWindow: { type: Number, default: 2 },
   duplicateGroups: { type: Array, default: () => [] },
   duplicateTotal: { type: Number, default: 0 },
   similarResults: { type: Array, default: () => [] },
@@ -3162,6 +3163,7 @@ defineExpose({
         :burst-threshold="burstThreshold"
         :burst-algorithm="burstAlgorithm"
         :burst-embedding-threshold="burstEmbeddingThreshold"
+        :burst-time-window="burstTimeWindow"
         @update-burst-settings="$emit('update-burst-settings', $event)"
         @close="viewSettingsOpen = false"
       />

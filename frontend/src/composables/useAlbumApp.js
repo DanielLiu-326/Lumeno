@@ -69,6 +69,7 @@ export function useAlbumApp() {
     const burstThreshold = ref(10);
     const burstAlgorithm = ref("dct");
     const burstEmbeddingThreshold = ref(80);
+    const burstTimeWindow = ref(2);
     let albumPhotosFillQueued = false;
     let burstRefreshTimer = null;
     let burstRefreshAttempts = 0;
@@ -986,11 +987,12 @@ export function useAlbumApp() {
         }
     }
 
-    async function setBurstSettings({ algorithm, threshold, embeddingThreshold }) {
+    async function setBurstSettings({ algorithm, threshold, embeddingThreshold, timeWindow }) {
         if (!currentAlbum.value) return;
         const nextAlgorithm = algorithm === "embedding" ? "embedding" : "dct";
         const nextThreshold = Math.max(0, Math.min(32, Math.round(Number(threshold) || 0)));
         const nextEmbedding = Math.max(30, Math.min(100, Math.round(Number(embeddingThreshold) || 80)));
+        const nextTimeWindow = Math.max(1, Math.min(86_400, Math.round(Number(timeWindow) || 2)));
         try {
             await apiFetch("/api/albums/update", {
                 method: "POST",
@@ -1000,11 +1002,13 @@ export function useAlbumApp() {
                     burst_algorithm: nextAlgorithm,
                     burst_threshold: nextThreshold,
                     burst_embedding_threshold: nextEmbedding,
+                    burst_time_window_seconds: nextTimeWindow,
                 }),
             });
             burstAlgorithm.value = nextAlgorithm;
             burstThreshold.value = nextThreshold;
             burstEmbeddingThreshold.value = nextEmbedding;
+            burstTimeWindow.value = nextTimeWindow;
             refreshAlbumPhotos();
         } catch (error) {
             setMessage(error.message, "error");
@@ -1479,6 +1483,9 @@ export function useAlbumApp() {
             }
             albumPhotoTotal.value = data.total_count || 0;
             albumBursts.value = data.bursts || { state: "ready", algorithm: "burst-v1", stack_count: 0 };
+            if (Number.isFinite(Number(data.bursts?.time_window_seconds))) {
+                burstTimeWindow.value = Math.max(1, Math.min(86_400, Math.round(Number(data.bursts.time_window_seconds))));
+            }
             if (data.bursts?.algorithm === "embedding") {
                 burstAlgorithm.value = "embedding";
                 if (Number.isFinite(Number(data.bursts?.threshold))) {
@@ -1591,6 +1598,9 @@ export function useAlbumApp() {
             }
             if (Number.isFinite(Number(selectedMeta.burst_embedding_threshold))) {
                 burstEmbeddingThreshold.value = Math.max(30, Math.min(100, Math.round(Number(selectedMeta.burst_embedding_threshold))));
+            }
+            if (Number.isFinite(Number(selectedMeta.burst_time_window_seconds))) {
+                burstTimeWindow.value = Math.max(1, Math.min(86_400, Math.round(Number(selectedMeta.burst_time_window_seconds))));
             }
         }
         albumViewMode.value = "photos";
@@ -2482,6 +2492,7 @@ export function useAlbumApp() {
         burstThreshold,
         burstAlgorithm,
         burstEmbeddingThreshold,
+        burstTimeWindow,
         setCollapseBursts,
         setBurstSettings,
         albumSort,

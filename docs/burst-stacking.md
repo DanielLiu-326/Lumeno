@@ -248,10 +248,11 @@ dist/data/cache/bursts/{owner}/{album_cache_id}.json
 | 常量 | 初值 | 说明 |
 | --- | --- | --- |
 | `BURST_ALGORITHM` | `"burst-v1"` | 算法版本，进缓存 key 和 stack id |
-| `BURST_MAX_GAP_MS` | `2000` | 相邻两个文件的最大时间差 |
+| `BURST_MAX_GAP_MS` | `2000` | 相邻文件时间窗口的默认值；由相册级时间窗口覆盖 |
 | `BURST_MAX_SPAN_MS` | `15000` | 一组从第一个文件到最后一个文件的最大跨度 |
 | `BURST_MAX_HAMMING` | `10` | DCT 算法的默认汉明距离；由相册级阈值覆盖 |
 | `BURST_EMBEDDING_THRESHOLD` | `80` | Embedding 算法的默认余弦相似度百分比 |
+| `BURST_MAX_TIME_WINDOW_SECONDS` | `86400` | 时间窗口上限，24 小时 |
 | `BURST_MIN_MEMBERS` | `2` | 少于 2 个文件不成组 |
 | `BURST_MAX_MEMBERS` | `20` | 一组最多 20 个文件，达到上限后封组 |
 
@@ -327,7 +328,9 @@ dist/data/cache/ai/{owner}/albums/{cache_id}/phash/{key}.json
 - `dct`：复用 DCT pHash，汉明距离 ≤ `burst_threshold`（0–32）；
 - `embedding`：读取 AI 索引里的图像 embedding，余弦相似度 ≥ `burst_embedding_threshold / 100`（30–100）。
 
-两种算法共用相同的时间、相机、方向和最大组大小约束。Embedding 算法需要已经存在的 AI 图像索引；没有 embedding 时不会生成组，不会自动回退到 DCT。
+两种算法共用相同的时间窗口、相机、方向和最大组大小约束。时间窗口是相册级设置，范围 1 秒到 24 小时，表示相邻文件的最大时间差；整组跨度至少保留原来的 15 秒，窗口更大时按窗口放宽。
+
+Embedding 算法需要已经存在的 AI 图像索引；没有 embedding 时不会生成组，不会自动回退到 DCT。
 
 缓存文件记录 `algorithm` 和 `threshold`，切换算法或阈值都会使旧缓存失效。
 
@@ -485,6 +488,7 @@ POST /api/albums/photos
 
 - 放在缩略图大小弹层（网格的“视图设置”入口）里：**折叠连拍**开关。
 - 折叠算法和阈值都是**相册级配置**，在“更多设置”里修改。
+- 时间窗口：1 秒到 24 小时，默认 2 秒。
 - DCT：阈值 0–32，默认 10，数值越小越严格。
 - Embedding：余弦阈值 30–100%，默认 80%，数值越高越严格。
 - 配置写入 `album_meta.json`，同一相册的所有查看者共用。
@@ -567,6 +571,7 @@ POST /api/albums/photos
 - 链式相似（1↔2、2↔3、1↔3 超阈值）→ 不成一组；
 - DCT 阈值实际参与分组比较；
 - Embedding 余弦阈值能区分相近和相反的向量；
+- 时间窗口可以跨过默认的 2 秒；
 - 超过 `BURST_MAX_MEMBERS` → 按上限封组，后面的文件重新开始；
 - 封面评分/分辨率/中间帧优先级；
 - 空 `datetime`、视频 → 单张；

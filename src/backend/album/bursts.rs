@@ -34,6 +34,7 @@ use crate::backend::tasks::{Task, TaskBase, TaskStatus};
 pub(crate) const BURST_ALGORITHM: &str = "burst-v1";
 pub(crate) const BURST_MAX_GAP_MS: i64 = 2_000;
 pub(crate) const BURST_MAX_SPAN_MS: i64 = 15_000;
+pub(crate) const BURST_MAX_TIME_WINDOW_SECONDS: u32 = 86_400;
 pub(crate) const BURST_MAX_HAMMING: u32 = 10;
 pub(crate) const BURST_MAX_HAMMING_LIMIT: u32 = 32;
 pub(crate) const BURST_MIN_MEMBERS: usize = 2;
@@ -102,11 +103,17 @@ pub(crate) struct BurstCacheFile {
     pub(crate) max_hamming: u32,
     #[serde(default)]
     pub(crate) threshold: u32,
+    #[serde(default = "default_time_window_seconds")]
+    pub(crate) time_window_seconds: u32,
     pub(crate) stacks: Vec<BurstStack>,
 }
 
 fn default_burst_max_hamming() -> u32 {
     BURST_MAX_HAMMING
+}
+
+fn default_time_window_seconds() -> u32 {
+    2
 }
 
 impl BurstCacheFile {
@@ -115,6 +122,7 @@ impl BurstCacheFile {
         source_index: &BurstSourceIndex,
         algorithm: BurstAlgorithm,
         threshold: u32,
+        time_window_seconds: u32,
     ) -> bool {
         let legacy_dct = algorithm == BurstAlgorithm::Dct && self.algorithm == BURST_ALGORITHM;
         let cache_threshold = if self.threshold == 0 {
@@ -125,6 +133,7 @@ impl BurstCacheFile {
         self.schema_version == BURST_CACHE_VERSION
             && (legacy_dct || self.algorithm == algorithm.cache_name())
             && cache_threshold == threshold
+            && self.time_window_seconds == time_window_seconds
             && &self.source_index == source_index
     }
 }
@@ -136,6 +145,7 @@ pub(crate) struct BurstLookup {
     pub(crate) task_key: Option<String>,
     pub(crate) algorithm: BurstAlgorithm,
     pub(crate) threshold: u32,
+    pub(crate) time_window_seconds: u32,
     pub(crate) cache: Option<BurstCacheFile>,
 }
 
@@ -231,7 +241,10 @@ pub(crate) fn build_stacks(
     album_name: &str,
     phashes: &HashMap<String, u64>,
     max_hamming: u32,
+    time_window_seconds: u32,
 ) -> Vec<BurstStack> {
+    let max_gap_ms = i64::from(time_window_seconds.clamp(1, BURST_MAX_TIME_WINDOW_SECONDS)) * 1000;
+    let max_span_ms = BURST_MAX_SPAN_MS.max(max_gap_ms);
     let mut candidates: Vec<BurstCandidate<'_>> = entries
         .iter()
         .filter(|entry| entry.duration_ms == 0)
@@ -267,7 +280,7 @@ pub(crate) fn build_stacks(
                 .time
                 .signed_duration_since(last.time)
                 .num_milliseconds()
-                > BURST_MAX_GAP_MS
+                > max_gap_ms
             {
                 break;
             }
@@ -275,7 +288,7 @@ pub(crate) fn build_stacks(
                 .time
                 .signed_duration_since(first.time)
                 .num_milliseconds()
-                > BURST_MAX_SPAN_MS
+                > max_span_ms
             {
                 break;
             }
@@ -363,7 +376,10 @@ pub(crate) fn build_stacks_embeddings(
     album_name: &str,
     embeddings: &HashMap<String, Vec<f32>>,
     min_cosine: f32,
+    time_window_seconds: u32,
 ) -> Vec<BurstStack> {
+    let max_gap_ms = i64::from(time_window_seconds.clamp(1, BURST_MAX_TIME_WINDOW_SECONDS)) * 1000;
+    let max_span_ms = BURST_MAX_SPAN_MS.max(max_gap_ms);
     let mut candidates: Vec<BurstCandidate<'_>> = entries
         .iter()
         .filter(|entry| entry.duration_ms == 0)
@@ -399,7 +415,7 @@ pub(crate) fn build_stacks_embeddings(
                 .time
                 .signed_duration_since(last.time)
                 .num_milliseconds()
-                > BURST_MAX_GAP_MS
+                > max_gap_ms
             {
                 break;
             }
@@ -407,7 +423,7 @@ pub(crate) fn build_stacks_embeddings(
                 .time
                 .signed_duration_since(first.time)
                 .num_milliseconds()
-                > BURST_MAX_SPAN_MS
+                > max_span_ms
             {
                 break;
             }
@@ -657,6 +673,7 @@ pub(crate) async fn build_cache(
     index: &AlbumIndex,
     algorithm: BurstAlgorithm,
     threshold: u32,
+    time_window_seconds: u32,
     base: Option<&TaskBase>,
 ) -> Result<BurstCacheFile, String> {
     let album_dir = albums_root(&cfg.user_root_path(owner)).join(album_name);
@@ -671,7 +688,13 @@ pub(crate) async fn build_cache(
         BurstAlgorithm::Dct => {
             let hashes =
                 load_phash_map(cfg, owner, album_name, &album_dir, index, cache_id, base).await;
-            build_stacks(&index.entries, album_name, &hashes, threshold)
+            build_stacks(
+                &index.entries,
+                album_name,
+                &hashes,
+                threshold,
+                time_window_seconds,
+            )
         }
         BurstAlgorithm::Embedding => {
             let vectors = load_embedding_map(cfg, owner, cache_id).await;
@@ -680,6 +703,7 @@ pub(crate) async fn build_cache(
                 album_name,
                 &vectors,
                 threshold as f32 / 100.0,
+                time_window_seconds,
             )
         }
     };
@@ -697,6 +721,7 @@ pub(crate) async fn build_cache(
             0
         },
         threshold,
+        time_window_seconds,
         stacks,
     })
 }
@@ -718,6 +743,7 @@ pub(crate) async fn ensure_for_album(
     let meta = read_album_meta(&album_dir).await;
     let algorithm = BurstAlgorithm::from_meta(&meta);
     let threshold = algorithm.threshold(&meta);
+    let time_window_seconds = meta.burst_time_window_seconds();
     let cache_id = ensure_album_cache_id(&album_dir)
         .await
         .map_err(|error| format!("{error}"))?;
@@ -725,12 +751,20 @@ pub(crate) async fn ensure_for_album(
         .await
         .map_err(|error| format!("{error}"))?;
     if let Some(cache) = read_cache(&cfg.data_path, owner, &cache_id).await
-        && cache.is_valid_for(&source, algorithm, threshold)
+        && cache.is_valid_for(&source, algorithm, threshold, time_window_seconds)
     {
         return Ok(cache.stacks.len());
     }
     let cache = build_cache(
-        cfg, owner, album_name, &cache_id, &index, algorithm, threshold, base,
+        cfg,
+        owner,
+        album_name,
+        &cache_id,
+        &index,
+        algorithm,
+        threshold,
+        time_window_seconds,
+        base,
     )
     .await?;
     write_cache(&cfg.data_path, owner, &cache_id, &cache).await?;
@@ -745,10 +779,11 @@ pub(crate) async fn queue_burst_index(
     cache_id: String,
     algorithm: BurstAlgorithm,
     threshold: u32,
+    time_window_seconds: u32,
     locale: String,
 ) -> String {
     let key = format!(
-        "burst-index:{owner}:{album_name}:{}:{threshold}",
+        "burst-index:{owner}:{album_name}:{}:{threshold}:{time_window_seconds}",
         algorithm.as_str()
     );
     let name = trf(
@@ -764,6 +799,7 @@ pub(crate) async fn queue_burst_index(
         cache_id,
         algorithm,
         threshold,
+        time_window_seconds,
         locale,
     });
     let task_manager = task.cfg.task_mgr.clone();
@@ -784,6 +820,7 @@ pub(crate) async fn lookup(
     let meta = read_album_meta(album_dir).await;
     let algorithm = BurstAlgorithm::from_meta(&meta);
     let threshold = algorithm.threshold(&meta);
+    let time_window_seconds = meta.burst_time_window_seconds();
     if !eligible {
         return BurstLookup {
             state: "disabled",
@@ -791,6 +828,7 @@ pub(crate) async fn lookup(
             task_key: None,
             algorithm,
             threshold,
+            time_window_seconds,
             cache: None,
         };
     }
@@ -801,6 +839,7 @@ pub(crate) async fn lookup(
             task_key: None,
             algorithm,
             threshold,
+            time_window_seconds,
             cache: None,
         };
     };
@@ -812,12 +851,13 @@ pub(crate) async fn lookup(
             task_key: None,
             algorithm,
             threshold,
+            time_window_seconds,
             cache: None,
         };
     };
     let cached = read_cache(&cfg.data_path, owner, &cache_id).await;
     if let Some(cache) = cached.as_ref()
-        && cache.is_valid_for(&source, algorithm, threshold)
+        && cache.is_valid_for(&source, algorithm, threshold, time_window_seconds)
     {
         return BurstLookup {
             state: "ready",
@@ -825,6 +865,7 @@ pub(crate) async fn lookup(
             task_key: None,
             algorithm,
             threshold,
+            time_window_seconds,
             cache: cached,
         };
     }
@@ -836,6 +877,7 @@ pub(crate) async fn lookup(
         cache_id,
         algorithm,
         threshold,
+        time_window_seconds,
         locale.to_string(),
     )
     .await;
@@ -845,6 +887,7 @@ pub(crate) async fn lookup(
         task_key: Some(key),
         algorithm,
         threshold,
+        time_window_seconds,
         cache: None,
     }
 }
@@ -867,6 +910,7 @@ struct BurstIndexTask {
     cache_id: String,
     algorithm: BurstAlgorithm,
     threshold: u32,
+    time_window_seconds: u32,
     locale: String,
 }
 
@@ -878,11 +922,12 @@ impl Task for BurstIndexTask {
 
     fn deduplication_key(&self) -> Option<String> {
         Some(format!(
-            "burst-index:{}:{}:{}:{}",
+            "burst-index:{}:{}:{}:{}:{}",
             self.owner,
             self.album_name,
             self.algorithm.as_str(),
-            self.threshold
+            self.threshold,
+            self.time_window_seconds
         ))
     }
 
@@ -914,6 +959,7 @@ impl Task for BurstIndexTask {
             &index,
             self.algorithm,
             self.threshold,
+            self.time_window_seconds,
             Some(&self.base),
         )
         .await
@@ -998,7 +1044,7 @@ mod tests {
             photo("b.jpg", "2026-04-01 18:31:01", "Panasonic", 1),
             photo("c.jpg", "2026-04-01 18:31:02", "Panasonic", 2),
         ];
-        let stacks = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING);
+        let stacks = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING, 2);
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].count, 3);
         assert_eq!(stacks[0].members.len(), 3);
@@ -1015,11 +1061,11 @@ mod tests {
         vectors.insert("a.jpg".to_string(), vec![1.0, 0.0]);
         vectors.insert("b.jpg".to_string(), vec![0.98, 0.02]);
         assert_eq!(
-            super::build_stacks_embeddings(&entries, "trip", &vectors, 0.90).len(),
+            super::build_stacks_embeddings(&entries, "trip", &vectors, 0.90, 2).len(),
             1
         );
         vectors.insert("b.jpg".to_string(), vec![0.0, 1.0]);
-        assert!(super::build_stacks_embeddings(&entries, "trip", &vectors, 0.90).is_empty());
+        assert!(super::build_stacks_embeddings(&entries, "trip", &vectors, 0.90, 2).is_empty());
     }
 
     #[test]
@@ -1028,9 +1074,9 @@ mod tests {
             photo("a.jpg", "2026-04-01 18:31:00", "Panasonic", 0),
             photo("b.jpg", "2026-04-01 18:31:01", "Panasonic", 1),
         ];
-        assert!(build_stacks(&entries, "trip", &hashes(&entries), 0).is_empty());
+        assert!(build_stacks(&entries, "trip", &hashes(&entries), 0, 2).is_empty());
         assert_eq!(
-            build_stacks(&entries, "trip", &hashes(&entries), 1).len(),
+            build_stacks(&entries, "trip", &hashes(&entries), 1, 2).len(),
             1
         );
     }
@@ -1041,7 +1087,20 @@ mod tests {
             photo("a.jpg", "2026-04-01 18:31:00", "Panasonic", 0),
             photo("b.jpg", "2026-04-01 18:31:05", "Panasonic", 1),
         ];
-        assert!(build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING).is_empty());
+        assert!(build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING, 2).is_empty());
+    }
+
+    #[test]
+    fn time_window_can_span_the_configured_gap() {
+        let entries = vec![
+            photo("a.jpg", "2026-04-01 18:31:00", "Panasonic", 0),
+            photo("b.jpg", "2026-04-01 18:31:05", "Panasonic", 1),
+        ];
+        assert!(build_stacks(&entries, "trip", &hashes(&entries), 10, 2).is_empty());
+        assert_eq!(
+            build_stacks(&entries, "trip", &hashes(&entries), 10, 10).len(),
+            1
+        );
     }
 
     #[test]
@@ -1051,7 +1110,7 @@ mod tests {
             photo("b.jpg", "2026-04-01 18:31:01", "Panasonic", 1),
             photo("d.jpg", "2026-04-01 18:31:02", "Panasonic", 1 << 20),
         ];
-        let stacks = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING);
+        let stacks = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING, 2);
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].members, vec!["a.jpg", "b.jpg"]);
     }
@@ -1083,6 +1142,7 @@ mod tests {
             created_at_unix_ms: 0,
             max_hamming: BURST_MAX_HAMMING,
             threshold: BURST_MAX_HAMMING,
+            time_window_seconds: 2,
             stacks: vec![super::BurstStack {
                 id: "s".to_string(),
                 cover: "a.jpg".to_string(),
@@ -1109,8 +1169,8 @@ mod tests {
             photo("a.jpg", "2026-04-01 18:31:00", "Panasonic", 0),
             photo("b.jpg", "2026-04-01 18:31:01", "Panasonic", 1),
         ];
-        let first = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING);
-        let second = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING);
+        let first = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING, 2);
+        let second = build_stacks(&entries, "trip", &hashes(&entries), BURST_MAX_HAMMING, 2);
         assert_eq!(first[0].id, second[0].id);
         assert_eq!(first[0].id.len(), 43);
         assert_eq!(BURST_ALGORITHM, "burst-v1");
