@@ -234,9 +234,10 @@ pub(crate) fn build_stacks(
             {
                 break;
             }
-            if group.iter().any(|member| {
-                hamming(candidates[*member].phash, candidate.phash) > BURST_MAX_HAMMING
-            }) {
+            if group
+                .iter()
+                .any(|member| hamming(candidates[*member].phash, candidate.phash) > max_hamming)
+            {
                 break;
             }
             group.push(next);
@@ -758,6 +759,19 @@ mod tests {
         assert_eq!(stacks[0].count, 3);
         assert_eq!(stacks[0].members.len(), 3);
         assert_eq!(stacks[0].id.len(), 43);
+    }
+
+    #[test]
+    fn threshold_controls_grouping_distance() {
+        let entries = vec![
+            photo("a.jpg", "2026-04-01 18:31:00", "Panasonic", 0),
+            photo("b.jpg", "2026-04-01 18:31:01", "Panasonic", 1),
+        ];
+        assert!(build_stacks(&entries, "trip", &hashes(&entries), 0).is_empty());
+        assert_eq!(
+            build_stacks(&entries, "trip", &hashes(&entries), 1).len(),
+            1
+        );
     }
 
     #[test]
