@@ -67,6 +67,8 @@ export function useAlbumApp() {
     const albumBursts = ref({ state: "ready", algorithm: "burst-v1", stack_count: 0 });
     const collapseBursts = ref(readCollapseBurstsPreference());
     const burstThreshold = ref(10);
+    const burstAlgorithm = ref("dct");
+    const burstEmbeddingThreshold = ref(90);
     let albumPhotosFillQueued = false;
     let burstRefreshTimer = null;
     let burstRefreshAttempts = 0;
@@ -984,19 +986,25 @@ export function useAlbumApp() {
         }
     }
 
-    async function setBurstThreshold(value) {
+    async function setBurstSettings({ algorithm, threshold, embeddingThreshold }) {
         if (!currentAlbum.value) return;
-        const next = Math.max(0, Math.min(32, Math.round(Number(value) || 0)));
+        const nextAlgorithm = algorithm === "embedding" ? "embedding" : "dct";
+        const nextThreshold = Math.max(0, Math.min(32, Math.round(Number(threshold) || 0)));
+        const nextEmbedding = Math.max(50, Math.min(100, Math.round(Number(embeddingThreshold) || 90)));
         try {
             await apiFetch("/api/albums/update", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     dir_name: currentAlbum.value,
-                    burst_threshold: next,
+                    burst_algorithm: nextAlgorithm,
+                    burst_threshold: nextThreshold,
+                    burst_embedding_threshold: nextEmbedding,
                 }),
             });
-            burstThreshold.value = next;
+            burstAlgorithm.value = nextAlgorithm;
+            burstThreshold.value = nextThreshold;
+            burstEmbeddingThreshold.value = nextEmbedding;
             refreshAlbumPhotos();
         } catch (error) {
             setMessage(error.message, "error");
@@ -1471,8 +1479,16 @@ export function useAlbumApp() {
             }
             albumPhotoTotal.value = data.total_count || 0;
             albumBursts.value = data.bursts || { state: "ready", algorithm: "burst-v1", stack_count: 0 };
-            if (Number.isFinite(Number(data.bursts?.max_distance))) {
-                burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(data.bursts.max_distance))));
+            if (data.bursts?.algorithm === "embedding") {
+                burstAlgorithm.value = "embedding";
+                if (Number.isFinite(Number(data.bursts?.threshold))) {
+                    burstEmbeddingThreshold.value = Math.max(50, Math.min(100, Math.round(Number(data.bursts.threshold))));
+                }
+            } else if (data.bursts) {
+                burstAlgorithm.value = "dct";
+                if (Number.isFinite(Number(data.bursts?.threshold ?? data.bursts?.max_distance))) {
+                    burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(data.bursts.threshold ?? data.bursts.max_distance))));
+                }
             }
             albumPhotoOffset.value += newPhotos.length;
             if (albumPhotoOffset.value === newPhotos.length) scheduleBurstRefresh(data, fetchId);
@@ -1568,8 +1584,14 @@ export function useAlbumApp() {
         const selectedMeta = [...albums.value, ...sharedAlbums.value].find(
             (album) => album?.dir_name === dirName,
         );
-        if (selectedMeta && Number.isFinite(Number(selectedMeta.burst_threshold))) {
-            burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(selectedMeta.burst_threshold))));
+        if (selectedMeta) {
+            burstAlgorithm.value = selectedMeta.burst_algorithm === "embedding" ? "embedding" : "dct";
+            if (Number.isFinite(Number(selectedMeta.burst_threshold))) {
+                burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(selectedMeta.burst_threshold))));
+            }
+            if (Number.isFinite(Number(selectedMeta.burst_embedding_threshold))) {
+                burstEmbeddingThreshold.value = Math.max(50, Math.min(100, Math.round(Number(selectedMeta.burst_embedding_threshold))));
+            }
         }
         albumViewMode.value = "photos";
         albumDuplicateGroups.value = [];
@@ -2458,8 +2480,10 @@ export function useAlbumApp() {
         albumBursts,
         collapseBursts,
         burstThreshold,
+        burstAlgorithm,
+        burstEmbeddingThreshold,
         setCollapseBursts,
-        setBurstThreshold,
+        setBurstSettings,
         albumSort,
         albumViewMode,
         albums,

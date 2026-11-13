@@ -24,9 +24,11 @@ const props = defineProps({
   isDark: { type: Boolean, default: false },
   formatSize: { type: Function, required: true },
   burstThreshold: { type: Number, default: 10 },
+  burstAlgorithm: { type: String, default: "dct" },
+  burstEmbeddingThreshold: { type: Number, default: 90 },
 });
 
-const emit = defineEmits(["update:modelValue", "update-burst-threshold", "close"]);
+const emit = defineEmits(["update:modelValue", "update-burst-settings", "close"]);
 
 const wrapperProps = computed(() => {
   if (props.page) return { class: "flex h-full min-h-0 flex-1 flex-col overflow-hidden" };
@@ -51,6 +53,8 @@ let ro = null;
 
 const draft = ref(cloneLayout(props.modelValue));
 const burstThresholdDraft = ref(props.burstThreshold);
+const burstAlgorithmDraft = ref(props.burstAlgorithm === "embedding" ? "embedding" : "dct");
+const burstEmbeddingThresholdDraft = ref(props.burstEmbeddingThreshold);
 const layout = computed(() => draft.value);
 const unused = computed(() => unusedFields(layout.value));
 
@@ -94,8 +98,16 @@ function resetLayout() {
 
 function confirm() {
   emit("update:modelValue", cloneLayout(draft.value));
-  if (burstThresholdDraft.value !== props.burstThreshold) {
-    emit("update-burst-threshold", burstThresholdDraft.value);
+  if (
+    burstAlgorithmDraft.value !== (props.burstAlgorithm === "embedding" ? "embedding" : "dct")
+    || burstThresholdDraft.value !== props.burstThreshold
+    || burstEmbeddingThresholdDraft.value !== props.burstEmbeddingThreshold
+  ) {
+    emit("update-burst-settings", {
+      algorithm: burstAlgorithmDraft.value,
+      threshold: burstThresholdDraft.value,
+      embeddingThreshold: burstEmbeddingThresholdDraft.value,
+    });
   }
   emit("close");
 }
@@ -237,6 +249,8 @@ watch(
     if (!open) return;
     draft.value = cloneLayout(props.modelValue);
     burstThresholdDraft.value = props.burstThreshold;
+    burstAlgorithmDraft.value = props.burstAlgorithm === "embedding" ? "embedding" : "dct";
+    burstEmbeddingThresholdDraft.value = props.burstEmbeddingThreshold;
     selectedSlot.value = "overlay-tl";
     addMenuFor.value = "";
     nextTick(layoutStage);
@@ -320,21 +334,50 @@ watch(
         class="shrink-0 border-b px-4 py-3 md:px-8"
         :class="isDark ? 'border-stone-800 bg-stone-900/50' : 'border-stone-100 bg-stone-50/80'"
       >
-        <div class="flex items-center justify-between gap-4">
+        <label class="block text-xs font-semibold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">
+          {{ t('view.burstAlgorithm') }}
+        </label>
+        <select
+          v-model="burstAlgorithmDraft"
+          class="mt-2 w-full rounded-xl border px-3 py-2 text-sm"
+          :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-200 bg-white text-stone-800'"
+        >
+          <option value="dct">{{ t('view.burstAlgorithmDct') }}</option>
+          <option value="embedding">{{ t('view.burstAlgorithmEmbedding') }}</option>
+        </select>
+
+        <div class="mt-3 flex items-center justify-between gap-4">
           <div class="min-w-0">
-            <p class="text-xs font-semibold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">{{ t('view.burstThreshold') }}</p>
-            <p class="mt-0.5 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('view.burstThresholdHint') }}</p>
+            <p class="text-xs font-semibold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">
+              {{ burstAlgorithmDraft === 'embedding' ? t('view.burstThresholdEmbedding') : t('view.burstThresholdDct') }}
+            </p>
+            <p class="mt-0.5 text-[11px]" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
+              {{ burstAlgorithmDraft === 'embedding' ? t('view.burstEmbeddingHint') : t('view.burstThresholdHint') }}
+            </p>
           </div>
-          <span class="shrink-0 text-sm font-semibold tabular-nums" :class="isDark ? 'text-amber-300' : 'text-amber-700'">{{ burstThresholdDraft }}</span>
+          <span class="shrink-0 text-sm font-semibold tabular-nums" :class="isDark ? 'text-amber-300' : 'text-amber-700'">
+            {{ burstAlgorithmDraft === 'embedding' ? `${burstEmbeddingThresholdDraft}%` : burstThresholdDraft }}
+          </span>
         </div>
         <input
+          v-if="burstAlgorithmDraft === 'dct'"
           v-model.number="burstThresholdDraft"
           type="range"
           min="0"
           max="32"
           step="1"
           class="mt-3 w-full accent-amber-500"
-          :aria-label="t('view.burstThreshold')"
+          :aria-label="t('view.burstThresholdDct')"
+        />
+        <input
+          v-else
+          v-model.number="burstEmbeddingThresholdDraft"
+          type="range"
+          min="50"
+          max="100"
+          step="1"
+          class="mt-3 w-full accent-amber-500"
+          :aria-label="t('view.burstThresholdEmbedding')"
         />
       </div>
       <div

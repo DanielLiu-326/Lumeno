@@ -250,7 +250,8 @@ dist/data/cache/bursts/{owner}/{album_cache_id}.json
 | `BURST_ALGORITHM` | `"burst-v1"` | 算法版本，进缓存 key 和 stack id |
 | `BURST_MAX_GAP_MS` | `2000` | 相邻两个文件的最大时间差 |
 | `BURST_MAX_SPAN_MS` | `15000` | 一组从第一个文件到最后一个文件的最大跨度 |
-| `BURST_MAX_HAMMING` | `10` | 64 位 pHash 的默认最大汉明距离；由相册级阈值覆盖 |
+| `BURST_MAX_HAMMING` | `10` | DCT 算法的默认汉明距离；由相册级阈值覆盖 |
+| `BURST_EMBEDDING_THRESHOLD` | `90` | Embedding 算法的默认余弦相似度百分比 |
 | `BURST_MIN_MEMBERS` | `2` | 少于 2 个文件不成组 |
 | `BURST_MAX_MEMBERS` | `20` | 一组最多 20 个文件，达到上限后封组 |
 
@@ -319,7 +320,18 @@ dist/data/cache/ai/{owner}/albums/{cache_id}/phash/{key}.json
 
 这样删除 `cache/ai/.../phash/` 后，重复图像和连拍会一起重建，不会出现两套“相似度真相”。
 
-### 6.5 封面选择
+### 6.5 算法选择
+
+相册级 `burst_algorithm` 可以选择：
+
+- `dct`：复用 DCT pHash，汉明距离 ≤ `burst_threshold`（0–32）；
+- `embedding`：读取 AI 索引里的图像 embedding，余弦相似度 ≥ `burst_embedding_threshold / 100`（50–100）。
+
+两种算法共用相同的时间、相机、方向和最大组大小约束。Embedding 算法需要已经存在的 AI 图像索引；没有 embedding 时不会生成组，不会自动回退到 DCT。
+
+缓存文件记录 `algorithm` 和 `threshold`，切换算法或阈值都会使旧缓存失效。
+
+### 6.6 封面选择
 
 组内选一个文件作为封面，优先级：
 
@@ -330,7 +342,7 @@ dist/data/cache/ai/{owner}/albums/{cache_id}/phash/{key}.json
 
 封面只是展示；组内所有文件都在成员接口里，不做“只保留封面”的删除。封面可能是组内任意一个文件。
 
-### 6.6 组的排序
+### 6.7 组的排序
 
 折叠时，stack 作为一个整体参与排序：
 
@@ -472,8 +484,10 @@ POST /api/albums/photos
 ### 9.1 开关
 
 - 放在缩略图大小弹层（网格的“视图设置”入口）里：**折叠连拍**开关。
-- 相似度阈值是**相册级配置**，在“更多设置”里修改（0–32，默认 10，数值越小越严格）。
-- 阈值写入 `album_meta.json`，同一相册的所有查看者共用。
+- 折叠算法和阈值都是**相册级配置**，在“更多设置”里修改。
+- DCT：阈值 0–32，默认 10，数值越小越严格。
+- Embedding：余弦阈值 50–100%，默认 90%，数值越高越严格。
+- 配置写入 `album_meta.json`，同一相册的所有查看者共用。
 - 折叠开关本身仍记在本地视图偏好里。
 - 默认开启；用户关闭后，请求不带 `collapse=bursts`。
 
@@ -551,6 +565,8 @@ POST /api/albums/photos
 - 相机型号不同 → 不合并；
 - 横竖方向不同 → 不合并；
 - 链式相似（1↔2、2↔3、1↔3 超阈值）→ 不成一组；
+- DCT 阈值实际参与分组比较；
+- Embedding 余弦阈值能区分相近和相反的向量；
 - 超过 `BURST_MAX_MEMBERS` → 按上限封组，后面的文件重新开始；
 - 封面评分/分辨率/中间帧优先级；
 - 空 `datetime`、视频 → 单张；

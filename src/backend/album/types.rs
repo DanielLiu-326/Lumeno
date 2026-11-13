@@ -21,6 +21,10 @@ pub struct UpdateAlbumPayload {
     pub(crate) description: Option<String>,
     #[serde(default)]
     pub(crate) burst_threshold: Option<u32>,
+    #[serde(default)]
+    pub(crate) burst_algorithm: Option<String>,
+    #[serde(default)]
+    pub(crate) burst_embedding_threshold: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,10 +373,24 @@ pub struct AlbumMeta {
     /// Per-album burst grouping threshold. Shared by every viewer.
     #[serde(default = "default_burst_threshold")]
     pub(crate) burst_threshold: u32,
+    /// `dct` or `embedding`; shared by every viewer.
+    #[serde(default = "default_burst_algorithm")]
+    pub(crate) burst_algorithm: String,
+    /// Embedding cosine threshold in percent (50–100).
+    #[serde(default = "default_burst_embedding_threshold")]
+    pub(crate) burst_embedding_threshold: u32,
 }
 
 pub(crate) fn default_burst_threshold() -> u32 {
     10
+}
+
+pub(crate) fn default_burst_algorithm() -> String {
+    "dct".to_string()
+}
+
+pub(crate) fn default_burst_embedding_threshold() -> u32 {
+    90
 }
 
 impl Default for AlbumMeta {
@@ -384,6 +402,8 @@ impl Default for AlbumMeta {
             description: String::new(),
             shares: Vec::new(),
             burst_threshold: default_burst_threshold(),
+            burst_algorithm: default_burst_algorithm(),
+            burst_embedding_threshold: default_burst_embedding_threshold(),
         }
     }
 }
@@ -391,6 +411,18 @@ impl Default for AlbumMeta {
 impl AlbumMeta {
     pub(crate) fn burst_threshold(&self) -> u32 {
         self.burst_threshold.clamp(0, 32)
+    }
+
+    pub(crate) fn burst_algorithm(&self) -> &'static str {
+        if self.burst_algorithm.eq_ignore_ascii_case("embedding") {
+            "embedding"
+        } else {
+            "dct"
+        }
+    }
+
+    pub(crate) fn burst_embedding_threshold(&self) -> u32 {
+        self.burst_embedding_threshold.clamp(50, 100)
     }
 }
 

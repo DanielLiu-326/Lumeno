@@ -50,6 +50,8 @@ const props = defineProps({
   albumBursts: { type: Object, default: () => ({ state: "ready", algorithm: "burst-v1", stack_count: 0 }) },
   collapseBursts: { type: Boolean, default: true },
   burstThreshold: { type: Number, default: 10 },
+  burstAlgorithm: { type: String, default: "dct" },
+  burstEmbeddingThreshold: { type: Number, default: 90 },
   duplicateGroups: { type: Array, default: () => [] },
   duplicateTotal: { type: Number, default: 0 },
   similarResults: { type: Array, default: () => [] },
@@ -112,7 +114,7 @@ const emit = defineEmits([
   "rebuild-index",
   "load-more-photos",
   "update-collapse-bursts",
-  "update-burst-threshold",
+  "update-burst-settings",
   "delete-photos",
   "select-collection",
   "refresh-album-people",
@@ -3158,7 +3160,9 @@ defineExpose({
         :is-dark="isDark"
         :format-size="formatSize"
         :burst-threshold="burstThreshold"
-        @update-burst-threshold="$emit('update-burst-threshold', $event)"
+        :burst-algorithm="burstAlgorithm"
+        :burst-embedding-threshold="burstEmbeddingThreshold"
+        @update-burst-settings="$emit('update-burst-settings', $event)"
         @close="viewSettingsOpen = false"
       />
 

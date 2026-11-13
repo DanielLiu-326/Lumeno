@@ -615,6 +615,8 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             :album-bursts="app.albumBursts"
             :collapse-bursts="app.collapseBursts"
             :burst-threshold="app.burstThreshold"
+            :burst-algorithm="app.burstAlgorithm"
+            :burst-embedding-threshold="app.burstEmbeddingThreshold"
             :duplicate-groups="app.albumDuplicateGroups"
             :duplicate-total="app.albumDuplicateTotal"
             :similar-results="app.aiSimilarResults"
@@ -673,7 +675,7 @@ function openDiscoveryPhoto({ photo, navPhotos, fullscreen = true }) {
             @rebuild-index="app.rebuildAlbumIndex"
             @load-more-photos="app.loadMoreAlbumPhotos"
             @update-collapse-bursts="app.setCollapseBursts"
-            @update-burst-threshold="app.setBurstThreshold"
+            @update-burst-settings="app.setBurstSettings"
             @select-collection="app.selectCollection"
           />
         </div>
