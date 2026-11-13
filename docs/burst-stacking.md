@@ -251,7 +251,7 @@ dist/data/cache/bursts/{owner}/{album_cache_id}.json
 | `BURST_MAX_GAP_MS` | `2000` | 相邻两个文件的最大时间差 |
 | `BURST_MAX_SPAN_MS` | `15000` | 一组从第一个文件到最后一个文件的最大跨度 |
 | `BURST_MAX_HAMMING` | `10` | DCT 算法的默认汉明距离；由相册级阈值覆盖 |
-| `BURST_EMBEDDING_THRESHOLD` | `90` | Embedding 算法的默认余弦相似度百分比 |
+| `BURST_EMBEDDING_THRESHOLD` | `80` | Embedding 算法的默认余弦相似度百分比 |
 | `BURST_MIN_MEMBERS` | `2` | 少于 2 个文件不成组 |
 | `BURST_MAX_MEMBERS` | `20` | 一组最多 20 个文件，达到上限后封组 |
 
@@ -325,7 +325,7 @@ dist/data/cache/ai/{owner}/albums/{cache_id}/phash/{key}.json
 相册级 `burst_algorithm` 可以选择：
 
 - `dct`：复用 DCT pHash，汉明距离 ≤ `burst_threshold`（0–32）；
-- `embedding`：读取 AI 索引里的图像 embedding，余弦相似度 ≥ `burst_embedding_threshold / 100`（50–100）。
+- `embedding`：读取 AI 索引里的图像 embedding，余弦相似度 ≥ `burst_embedding_threshold / 100`（30–100）。
 
 两种算法共用相同的时间、相机、方向和最大组大小约束。Embedding 算法需要已经存在的 AI 图像索引；没有 embedding 时不会生成组，不会自动回退到 DCT。
 
@@ -486,7 +486,7 @@ POST /api/albums/photos
 - 放在缩略图大小弹层（网格的“视图设置”入口）里：**折叠连拍**开关。
 - 折叠算法和阈值都是**相册级配置**，在“更多设置”里修改。
 - DCT：阈值 0–32，默认 10，数值越小越严格。
-- Embedding：余弦阈值 50–100%，默认 90%，数值越高越严格。
+- Embedding：余弦阈值 30–100%，默认 80%，数值越高越严格。
 - 配置写入 `album_meta.json`，同一相册的所有查看者共用。
 - 折叠开关本身仍记在本地视图偏好里。
 - 默认开启；用户关闭后，请求不带 `collapse=bursts`。

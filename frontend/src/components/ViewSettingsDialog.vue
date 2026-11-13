@@ -25,7 +25,7 @@ const props = defineProps({
   formatSize: { type: Function, required: true },
   burstThreshold: { type: Number, default: 10 },
   burstAlgorithm: { type: String, default: "dct" },
-  burstEmbeddingThreshold: { type: Number, default: 90 },
+  burstEmbeddingThreshold: { type: Number, default: 80 },
 });
 
 const emit = defineEmits(["update:modelValue", "update-burst-settings", "close"]);
@@ -377,7 +377,7 @@ watch(
           v-else
           v-model.number="burstEmbeddingThresholdDraft"
           type="range"
-          min="50"
+          min="30"
           max="100"
           step="1"
           class="mt-3 w-full accent-amber-500"

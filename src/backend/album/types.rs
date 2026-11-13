@@ -376,7 +376,7 @@ pub struct AlbumMeta {
     /// `dct` or `embedding`; shared by every viewer.
     #[serde(default = "default_burst_algorithm")]
     pub(crate) burst_algorithm: String,
-    /// Embedding cosine threshold in percent (50–100).
+    /// Embedding cosine threshold in percent (30–100).
     #[serde(default = "default_burst_embedding_threshold")]
     pub(crate) burst_embedding_threshold: u32,
 }
@@ -390,7 +390,7 @@ pub(crate) fn default_burst_algorithm() -> String {
 }
 
 pub(crate) fn default_burst_embedding_threshold() -> u32 {
-    90
+    80
 }
 
 impl Default for AlbumMeta {
@@ -422,7 +422,7 @@ impl AlbumMeta {
     }
 
     pub(crate) fn burst_embedding_threshold(&self) -> u32 {
-        self.burst_embedding_threshold.clamp(50, 100)
+        self.burst_embedding_threshold.clamp(30, 100)
     }
 }
 

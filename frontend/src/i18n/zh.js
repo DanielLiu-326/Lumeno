@@ -369,7 +369,7 @@ export default {
     "view.collapseBursts": "折叠连拍",
     "view.burstThresholdHint": "数值越小越严格，默认 10。",
     "view.burstThreshold": "连拍相似度阈值",
-    "view.burstEmbeddingHint": "数值越高越严格，默认 90%；需要已有图像 embedding。",
+    "view.burstEmbeddingHint": "数值越高越严格，默认 80%；需要已有图像 embedding。",
     "view.burstThresholdEmbedding": "Embedding 余弦阈值",
     "view.burstThresholdDct": "DCT 相似度阈值",
     "view.burstAlgorithmEmbedding": "Embedding 余弦（需要 AI 索引）",

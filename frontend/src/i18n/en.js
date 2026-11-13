@@ -369,7 +369,7 @@ export default {
     "view.collapseBursts": "Collapse bursts",
     "view.burstThresholdHint": "Lower is stricter. 10 is the default.",
     "view.burstThreshold": "Burst similarity threshold",
-    "view.burstEmbeddingHint": "Higher is stricter. Requires image embeddings; 90% is the default.",
+    "view.burstEmbeddingHint": "Higher is stricter. Requires image embeddings; 80% is the default.",
     "view.burstThresholdEmbedding": "Embedding cosine threshold",
     "view.burstThresholdDct": "DCT similarity threshold",
     "view.burstAlgorithmEmbedding": "Embedding cosine (needs AI index)",

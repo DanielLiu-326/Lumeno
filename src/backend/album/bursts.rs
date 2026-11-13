@@ -39,7 +39,7 @@ pub(crate) const BURST_MAX_HAMMING_LIMIT: u32 = 32;
 pub(crate) const BURST_MIN_MEMBERS: usize = 2;
 pub(crate) const BURST_MAX_MEMBERS: usize = 20;
 const BURST_CACHE_VERSION: u32 = 1;
-pub(crate) const BURST_EMBEDDING_THRESHOLD: u32 = 90;
+pub(crate) const BURST_EMBEDDING_THRESHOLD: u32 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BurstAlgorithm {

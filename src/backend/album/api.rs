@@ -266,7 +266,7 @@ pub async fn api_albums_update(
         };
     }
     if let Some(threshold) = payload.burst_embedding_threshold {
-        meta.burst_embedding_threshold = threshold.clamp(50, 100);
+        meta.burst_embedding_threshold = threshold.clamp(30, 100);
     }
     write_album_meta(album_dir.as_path(), &meta).await?;
     let message = tr(locale.as_str(), "response.album_updated");

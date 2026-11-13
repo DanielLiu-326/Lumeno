@@ -68,7 +68,7 @@ export function useAlbumApp() {
     const collapseBursts = ref(readCollapseBurstsPreference());
     const burstThreshold = ref(10);
     const burstAlgorithm = ref("dct");
-    const burstEmbeddingThreshold = ref(90);
+    const burstEmbeddingThreshold = ref(80);
     let albumPhotosFillQueued = false;
     let burstRefreshTimer = null;
     let burstRefreshAttempts = 0;
@@ -990,7 +990,7 @@ export function useAlbumApp() {
         if (!currentAlbum.value) return;
         const nextAlgorithm = algorithm === "embedding" ? "embedding" : "dct";
         const nextThreshold = Math.max(0, Math.min(32, Math.round(Number(threshold) || 0)));
-        const nextEmbedding = Math.max(50, Math.min(100, Math.round(Number(embeddingThreshold) || 90)));
+        const nextEmbedding = Math.max(30, Math.min(100, Math.round(Number(embeddingThreshold) || 80)));
         try {
             await apiFetch("/api/albums/update", {
                 method: "POST",
@@ -1482,7 +1482,7 @@ export function useAlbumApp() {
             if (data.bursts?.algorithm === "embedding") {
                 burstAlgorithm.value = "embedding";
                 if (Number.isFinite(Number(data.bursts?.threshold))) {
-                    burstEmbeddingThreshold.value = Math.max(50, Math.min(100, Math.round(Number(data.bursts.threshold))));
+                    burstEmbeddingThreshold.value = Math.max(30, Math.min(100, Math.round(Number(data.bursts.threshold))));
                 }
             } else if (data.bursts) {
                 burstAlgorithm.value = "dct";
@@ -1590,7 +1590,7 @@ export function useAlbumApp() {
                 burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(selectedMeta.burst_threshold))));
             }
             if (Number.isFinite(Number(selectedMeta.burst_embedding_threshold))) {
-                burstEmbeddingThreshold.value = Math.max(50, Math.min(100, Math.round(Number(selectedMeta.burst_embedding_threshold))));
+                burstEmbeddingThreshold.value = Math.max(30, Math.min(100, Math.round(Number(selectedMeta.burst_embedding_threshold))));
             }
         }
         albumViewMode.value = "photos";
