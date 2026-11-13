@@ -86,6 +86,7 @@ pub async fn api_albums_list(
             "description": meta.description,
             "photo_count": photo_count,
             "shares": meta.shares,
+            "burst_threshold": meta.burst_threshold(),
         }));
     }
 
@@ -252,6 +253,9 @@ pub async fn api_albums_update(
     if let Some(desc) = &payload.description {
         meta.description = desc.clone();
     }
+    if let Some(threshold) = payload.burst_threshold {
+        meta.burst_threshold = threshold.min(32);
+    }
     write_album_meta(album_dir.as_path(), &meta).await?;
     let message = tr(locale.as_str(), "response.album_updated");
     Ok(create_response(
@@ -263,6 +267,7 @@ pub async fn api_albums_update(
             "cache": meta.cache,
             "name": meta.name,
             "cover": meta.cover,
+            "burst_threshold": meta.burst_threshold(),
             "owner": resolved.owner,
         })),
     ))
@@ -866,7 +871,6 @@ pub async fn api_albums_photos(
         &clauses,
         query.sort.as_deref(),
         query.collapse.as_deref(),
-        query.burst_max_distance,
         query.offset,
         query.limit,
         None,
@@ -889,12 +893,38 @@ pub async fn api_albums_photos_query(
         &body.filters,
         body.sort.as_deref(),
         body.collapse.as_deref(),
-        body.burst_max_distance,
         body.offset,
         body.limit,
         body.paths.as_deref(),
     )
     .await
+}
+
+fn compare_album_photos(
+    left: &AlbumPhotoItem,
+    right: &AlbumPhotoItem,
+    sort_criteria: &[(&str, bool)],
+) -> std::cmp::Ordering {
+    for &(field, desc) in sort_criteria {
+        let ord = match field {
+            "name" => left.name.cmp(&right.name),
+            "date" => left.date.cmp(&right.date),
+            "size" => left.size.cmp(&right.size),
+            "rating" => left.rating.cmp(&right.rating),
+            "camera" => {
+                let left_camera = format!("{} {}", left.camera_make, left.camera_model);
+                let right_camera = format!("{} {}", right.camera_make, right.camera_model);
+                left_camera.cmp(&right_camera)
+            }
+            "lens" => left.lens.cmp(&right.lens),
+            _ => std::cmp::Ordering::Equal,
+        };
+        let ord = if desc { ord.reverse() } else { ord };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 pub(crate) async fn list_album_photos_with_filters(
@@ -905,7 +935,6 @@ pub(crate) async fn list_album_photos_with_filters(
     clauses: &[super::filters::FilterClause],
     sort: Option<&str>,
     collapse: Option<&str>,
-    burst_max_distance: Option<u32>,
     offset: Option<u32>,
     limit: Option<u32>,
     paths: Option<&[String]>,
@@ -1072,43 +1101,7 @@ pub(crate) async fn list_album_photos_with_filters(
 
     let album_key = album_access_key(&username, &owner, &album_name);
     let collapse_requested = collapse == Some("bursts");
-    let filters_empty = clauses.is_empty() && path_allowlist.is_none();
-    let date_sort =
-        sort_criteria.is_empty() || (sort_criteria.len() == 1 && sort_criteria[0].0 == "date");
-    let can_collapse = collapse_requested && filters_empty && date_sort;
-    let burst_max_distance = burst_max_distance
-        .unwrap_or(super::bursts::BURST_MAX_HAMMING)
-        .min(super::bursts::BURST_MAX_HAMMING_LIMIT);
-
-    let mut filtered: Vec<&AlbumPhotoItem> = index
-        .entries
-        .iter()
-        .filter(|photo| matches_path_allowlist(photo) && matches_filters(photo))
-        .collect();
-    if !sort_criteria.is_empty() {
-        filtered.sort_by(|a, b| {
-            for &(field, desc) in &sort_criteria {
-                let ord = match field {
-                    "name" => a.name.cmp(&b.name),
-                    "date" => a.date.cmp(&b.date),
-                    "size" => a.size.cmp(&b.size),
-                    "rating" => a.rating.cmp(&b.rating),
-                    "camera" => {
-                        let ca = format!("{} {}", a.camera_make, a.camera_model);
-                        let cb = format!("{} {}", b.camera_make, b.camera_model);
-                        ca.cmp(&cb)
-                    }
-                    "lens" => a.lens.cmp(&b.lens),
-                    _ => std::cmp::Ordering::Equal,
-                };
-                let ord = if desc { ord.reverse() } else { ord };
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-    }
+    let can_collapse = collapse_requested;
 
     let burst_lookup = if collapse_requested {
         Some(
@@ -1120,7 +1113,6 @@ pub(crate) async fn list_album_photos_with_filters(
                 album_dir.as_path(),
                 &index,
                 can_collapse,
-                burst_max_distance,
                 locale.as_str(),
             )
             .await,
@@ -1128,75 +1120,124 @@ pub(crate) async fn list_album_photos_with_filters(
     } else {
         None
     };
+    let burst_max_distance = burst_lookup
+        .as_ref()
+        .map(|lookup| lookup.max_hamming)
+        .unwrap_or(super::bursts::BURST_MAX_HAMMING);
 
-    let photo_count = filtered.len();
-    let mut paginated_values: Vec<Value> = Vec::new();
-    let total_count;
+    let mut display_values: Vec<Value> = Vec::new();
+    let mut photo_count = 0usize;
     if let Some(cache) = burst_lookup
         .as_ref()
         .and_then(|lookup| lookup.cache.as_ref())
     {
+        let by_rel: HashMap<String, &AlbumPhotoItem> = index
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                super::bursts::album_relative_path(&album_name, &entry.path).map(|rel| (rel, entry))
+            })
+            .collect();
         let mut items = super::bursts::display_items(&index, cache, &album_name);
-        let sort_desc = sort_criteria.first().map(|(_, desc)| *desc).unwrap_or(true);
         items.sort_by(|left, right| {
-            let (left_time, left_name) = match left {
-                super::bursts::BurstDisplay::Photo(photo) => {
-                    (photo.datetime.as_str(), photo.name.as_str())
-                }
-                super::bursts::BurstDisplay::Stack { stack, .. } => {
-                    if sort_desc {
-                        (stack.end_datetime.as_str(), stack.cover.as_str())
-                    } else {
-                        (stack.start_datetime.as_str(), stack.cover.as_str())
-                    }
-                }
+            let left = match left {
+                super::bursts::BurstDisplay::Photo(photo) => *photo,
+                super::bursts::BurstDisplay::Stack { cover, .. } => *cover,
             };
-            let (right_time, right_name) = match right {
-                super::bursts::BurstDisplay::Photo(photo) => {
-                    (photo.datetime.as_str(), photo.name.as_str())
-                }
-                super::bursts::BurstDisplay::Stack { stack, .. } => {
-                    if sort_desc {
-                        (stack.end_datetime.as_str(), stack.cover.as_str())
-                    } else {
-                        (stack.start_datetime.as_str(), stack.cover.as_str())
-                    }
-                }
+            let right = match right {
+                super::bursts::BurstDisplay::Photo(photo) => *photo,
+                super::bursts::BurstDisplay::Stack { cover, .. } => *cover,
             };
-            let time_order = if sort_desc {
-                right_time.cmp(left_time)
+            if sort_criteria.is_empty() {
+                right
+                    .date
+                    .cmp(&left.date)
+                    .then_with(|| left.name.cmp(&right.name))
             } else {
-                left_time.cmp(right_time)
-            };
-            time_order.then_with(|| left_name.cmp(right_name))
+                compare_album_photos(left, right, &sort_criteria)
+            }
         });
-        total_count = items.len();
-        for item in items.into_iter().skip(offset).take(limit) {
-            let (photo, stack) = match item {
-                super::bursts::BurstDisplay::Photo(photo) => (photo, None),
-                super::bursts::BurstDisplay::Stack { stack, cover } => (cover, Some(stack)),
-            };
-            let mut value = serde_json::to_value(photo).unwrap_or_else(|_| json!({}));
-            if let Some(object) = value.as_object_mut() {
-                object.insert("owner".to_string(), json!(&owner));
-                object.insert("album".to_string(), json!(&album_key));
-                if let Some(stack) = stack {
-                    object.insert("stack".to_string(), super::bursts::stack_json(stack));
+
+        for item in items {
+            match item {
+                super::bursts::BurstDisplay::Photo(photo) => {
+                    if !matches_path_allowlist(photo) || !matches_filters(photo) {
+                        continue;
+                    }
+                    photo_count += 1;
+                    let mut value = serde_json::to_value(photo).unwrap_or_else(|_| json!({}));
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("owner".to_string(), json!(&owner));
+                        object.insert("album".to_string(), json!(&album_key));
+                    }
+                    display_values.push(value);
+                }
+                super::bursts::BurstDisplay::Stack { stack, cover } => {
+                    let matching: Vec<&AlbumPhotoItem> = stack
+                        .members
+                        .iter()
+                        .filter_map(|rel| by_rel.get(rel).copied())
+                        .filter(|photo| matches_path_allowlist(photo) && matches_filters(photo))
+                        .collect();
+                    if matching.is_empty() {
+                        continue;
+                    }
+                    photo_count += matching.len();
+                    let display_cover = if matching.iter().any(|photo| photo.path == cover.path) {
+                        cover
+                    } else {
+                        matching[0]
+                    };
+                    let mut value =
+                        serde_json::to_value(display_cover).unwrap_or_else(|_| json!({}));
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("owner".to_string(), json!(&owner));
+                        object.insert("album".to_string(), json!(&album_key));
+                        let mut summary = super::bursts::stack_json(stack);
+                        summary["count"] = json!(matching.len());
+                        object.insert("stack".to_string(), summary);
+                    }
+                    display_values.push(value);
                 }
             }
-            paginated_values.push(value);
         }
     } else {
-        total_count = filtered.len();
-        for photo in filtered.into_iter().skip(offset).take(limit) {
-            let mut value = serde_json::to_value(photo).unwrap_or_else(|_| json!({}));
-            if let Some(object) = value.as_object_mut() {
-                object.insert("owner".to_string(), json!(&owner));
-                object.insert("album".to_string(), json!(&album_key));
-            }
-            paginated_values.push(value);
+        let mut filtered: Vec<&AlbumPhotoItem> = index
+            .entries
+            .iter()
+            .filter(|photo| matches_path_allowlist(photo) && matches_filters(photo))
+            .collect();
+        if !sort_criteria.is_empty() {
+            filtered.sort_by(|left, right| compare_album_photos(left, right, &sort_criteria));
         }
+        photo_count = filtered.len();
+        display_values = filtered
+            .into_iter()
+            .map(|photo| {
+                let mut value = serde_json::to_value(photo).unwrap_or_else(|_| json!({}));
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("owner".to_string(), json!(&owner));
+                    object.insert("album".to_string(), json!(&album_key));
+                }
+                value
+            })
+            .collect();
     }
+
+    let total_count = display_values.len();
+    let paginated_values: Vec<Value> = if burst_lookup
+        .as_ref()
+        .and_then(|lookup| lookup.cache.as_ref())
+        .is_some()
+    {
+        display_values
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect()
+    } else {
+        display_values
+    };
 
     let bursts_value = burst_lookup.as_ref().map(|lookup| {
         let mut value = json!({
@@ -2316,6 +2357,7 @@ pub(crate) async fn collect_shared_albums(
         display_name: String,
         cover: String,
         description: String,
+        burst_threshold: u32,
         can_write: bool,
         can_delete: bool,
     }
@@ -2347,6 +2389,7 @@ pub(crate) async fn collect_shared_albums(
             let Some(share) = meta.shares.iter().find(|s| s.username == username) else {
                 continue;
             };
+            let burst_threshold = meta.burst_threshold();
             candidates.push(Candidate {
                 owner: owner.clone(),
                 owner_root: owner_root.clone(),
@@ -2354,6 +2397,7 @@ pub(crate) async fn collect_shared_albums(
                 display_name: album_display_name(&meta, &dir_name),
                 cover: meta.cover,
                 description: meta.description,
+                burst_threshold,
                 can_write: share.can_write,
                 can_delete: share.can_delete,
             });
@@ -2376,6 +2420,7 @@ pub(crate) async fn collect_shared_albums(
             "cover": c.cover,
             "description": c.description,
             "photo_count": photo_count,
+            "burst_threshold": c.burst_threshold,
             "owner": c.owner,
             "can_write": c.can_write,
             "can_delete": c.can_delete,

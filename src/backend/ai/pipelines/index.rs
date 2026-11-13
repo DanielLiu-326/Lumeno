@@ -229,7 +229,6 @@ impl<'a> AiIndexPipeline<'a> {
                 context.cfg,
                 context.owner,
                 &album.album,
-                crate::backend::album::bursts::BURST_MAX_HAMMING,
                 Some(context.progress),
             )
             .await

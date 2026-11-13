@@ -174,7 +174,6 @@ impl TaskStep for BurstStep {
             ctx.cfg.as_ref(),
             &self.owner,
             &self.album,
-            super::bursts::BURST_MAX_HAMMING,
             Some(ctx.base),
         )
         .await

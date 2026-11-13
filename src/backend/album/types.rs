@@ -19,6 +19,8 @@ pub struct UpdateAlbumPayload {
     pub(crate) cover: Option<String>,
     #[serde(default)]
     pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) burst_threshold: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +63,6 @@ pub struct AlbumPhotosQuery {
     pub(crate) person_ids: Option<String>,
     pub(crate) sort: Option<String>,
     pub(crate) collapse: Option<String>,
-    pub(crate) burst_max_distance: Option<u32>,
     pub(crate) offset: Option<u32>,
     pub(crate) limit: Option<u32>,
 }
@@ -80,7 +81,6 @@ pub struct AlbumPhotosBody {
     pub(crate) filters: Vec<super::filters::FilterClause>,
     pub(crate) sort: Option<String>,
     pub(crate) collapse: Option<String>,
-    pub(crate) burst_max_distance: Option<u32>,
     pub(crate) offset: Option<u32>,
     pub(crate) limit: Option<u32>,
     /// When set, only return photos whose path is in this list (from album index).
@@ -352,7 +352,7 @@ pub struct AlbumIndex {
     pub(crate) entries: Vec<AlbumPhotoItem>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AlbumMeta {
     #[serde(default)]
     pub(crate) name: String,
@@ -366,6 +366,32 @@ pub struct AlbumMeta {
     pub(crate) description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) shares: Vec<AlbumShare>,
+    /// Per-album burst grouping threshold. Shared by every viewer.
+    #[serde(default = "default_burst_threshold")]
+    pub(crate) burst_threshold: u32,
+}
+
+pub(crate) fn default_burst_threshold() -> u32 {
+    10
+}
+
+impl Default for AlbumMeta {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            cache: String::new(),
+            cover: String::new(),
+            description: String::new(),
+            shares: Vec::new(),
+            burst_threshold: default_burst_threshold(),
+        }
+    }
+}
+
+impl AlbumMeta {
+    pub(crate) fn burst_threshold(&self) -> u32 {
+        self.burst_threshold.clamp(0, 32)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

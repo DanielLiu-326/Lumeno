@@ -66,7 +66,7 @@ export function useAlbumApp() {
     const albumPhotoTotal = ref(0);
     const albumBursts = ref({ state: "ready", algorithm: "burst-v1", stack_count: 0 });
     const collapseBursts = ref(readCollapseBurstsPreference());
-    const burstThreshold = ref(readBurstThreshold());
+    const burstThreshold = ref(10);
     let albumPhotosFillQueued = false;
     let burstRefreshTimer = null;
     let burstRefreshAttempts = 0;
@@ -984,24 +984,23 @@ export function useAlbumApp() {
         }
     }
 
-    function readBurstThreshold() {
-        try {
-            const value = Number(localStorage.getItem("lumeno.burstThreshold"));
-            return Number.isFinite(value) ? Math.max(0, Math.min(32, Math.round(value))) : 10;
-        } catch {
-            return 10;
-        }
-    }
-
-    function setBurstThreshold(value) {
+    async function setBurstThreshold(value) {
+        if (!currentAlbum.value) return;
         const next = Math.max(0, Math.min(32, Math.round(Number(value) || 0)));
-        burstThreshold.value = next;
         try {
-            localStorage.setItem("lumeno.burstThreshold", String(next));
-        } catch {
-            /* ignore quota / private mode */
+            await apiFetch("/api/albums/update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    dir_name: currentAlbum.value,
+                    burst_threshold: next,
+                }),
+            });
+            burstThreshold.value = next;
+            refreshAlbumPhotos();
+        } catch (error) {
+            setMessage(error.message, "error");
         }
-        refreshAlbumPhotos();
     }
 
     function setCollapseBursts(value) {
@@ -1043,10 +1042,7 @@ export function useAlbumApp() {
             offset,
             limit: limit == null ? photosPerPage.value : limit,
         };
-        if (collapseBursts.value) {
-            body.collapse = "bursts";
-            body.burst_max_distance = burstThreshold.value;
-        }
+        if (collapseBursts.value) body.collapse = "bursts";
         if (Array.isArray(paths) && paths.length > 0) {
             body.paths = paths;
         }
@@ -1475,6 +1471,9 @@ export function useAlbumApp() {
             }
             albumPhotoTotal.value = data.total_count || 0;
             albumBursts.value = data.bursts || { state: "ready", algorithm: "burst-v1", stack_count: 0 };
+            if (Number.isFinite(Number(data.bursts?.max_distance))) {
+                burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(data.bursts.max_distance))));
+            }
             albumPhotoOffset.value += newPhotos.length;
             if (albumPhotoOffset.value === newPhotos.length) scheduleBurstRefresh(data, fetchId);
         } catch { /* ignore transient fetch errors for photo loading */ }
@@ -1566,6 +1565,12 @@ export function useAlbumApp() {
         const dirName = albumDirName(input);
 
         currentAlbum.value = dirName;
+        const selectedMeta = [...albums.value, ...sharedAlbums.value].find(
+            (album) => album?.dir_name === dirName,
+        );
+        if (selectedMeta && Number.isFinite(Number(selectedMeta.burst_threshold))) {
+            burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(selectedMeta.burst_threshold))));
+        }
         albumViewMode.value = "photos";
         albumDuplicateGroups.value = [];
         albumDuplicateTotal.value = 0;

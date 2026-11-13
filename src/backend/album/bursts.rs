@@ -22,6 +22,7 @@ use crate::backend::ai::{
 };
 use crate::backend::album::helpers::{
     album_index_path_for_dir, albums_root, ensure_album_cache_id, load_existing_album_index,
+    read_album_meta,
 };
 use crate::backend::album::media::preview_thumbnail_cache_path;
 use crate::backend::album::types::{AlbumIndex, AlbumPhotoItem};
@@ -86,6 +87,7 @@ pub(crate) struct BurstLookup {
     pub(crate) state: &'static str,
     pub(crate) reason: Option<&'static str>,
     pub(crate) task_key: Option<String>,
+    pub(crate) max_hamming: u32,
     pub(crate) cache: Option<BurstCacheFile>,
 }
 
@@ -483,7 +485,6 @@ pub(crate) async fn ensure_for_album(
     cfg: &AppState,
     owner: &str,
     album_name: &str,
-    max_hamming: u32,
     base: Option<&TaskBase>,
 ) -> Result<usize, String> {
     let root_path = cfg.user_root_path(owner);
@@ -492,6 +493,7 @@ pub(crate) async fn ensure_for_album(
         .await
         .map_err(|error| format!("{error}"))?
         .ok_or_else(|| "album index not found".to_string())?;
+    let max_hamming = read_album_meta(&album_dir).await.burst_threshold();
     let cache_id = ensure_album_cache_id(&album_dir)
         .await
         .map_err(|error| format!("{error}"))?;
@@ -545,14 +547,15 @@ pub(crate) async fn lookup(
     album_dir: &Path,
     index: &AlbumIndex,
     eligible: bool,
-    max_hamming: u32,
     locale: &str,
 ) -> BurstLookup {
+    let max_hamming = read_album_meta(album_dir).await.burst_threshold();
     if !eligible {
         return BurstLookup {
             state: "disabled",
             reason: Some("filters_or_sort"),
             task_key: None,
+            max_hamming,
             cache: None,
         };
     }
@@ -561,6 +564,7 @@ pub(crate) async fn lookup(
             state: "error",
             reason: None,
             task_key: None,
+            max_hamming,
             cache: None,
         };
     };
@@ -570,6 +574,7 @@ pub(crate) async fn lookup(
             state: "error",
             reason: None,
             task_key: None,
+            max_hamming,
             cache: None,
         };
     };
@@ -581,6 +586,7 @@ pub(crate) async fn lookup(
             state: "ready",
             reason: None,
             task_key: None,
+            max_hamming,
             cache: cached,
         };
     }
@@ -598,6 +604,7 @@ pub(crate) async fn lookup(
         state: if cached.is_some() { "stale" } else { "pending" },
         reason: None,
         task_key: Some(key),
+        max_hamming,
         cache: None,
     }
 }
