@@ -375,6 +375,7 @@ export default {
     "view.burstAlgorithmEmbedding": "Embedding cosine (needs AI index)",
     "view.burstAlgorithmDct": "DCT pHash (fast, no AI)",
     "view.burstAlgorithm": "Burst grouping signal",
+    "view.burstSettings": "Burst folding",
     "view.collapseBurstsHint": "Group adjacent similar images. The badge counts files.",
     "view.collapseBurstsUnavailable": "Not available while filtering or using another sort.",
     "view.settings": "View settings",

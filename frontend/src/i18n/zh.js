@@ -375,6 +375,7 @@ export default {
     "view.burstAlgorithmEmbedding": "Embedding 余弦（需要 AI 索引）",
     "view.burstAlgorithmDct": "DCT pHash（快，不需 AI）",
     "view.burstAlgorithm": "连拍分组信号",
+    "view.burstSettings": "连拍折叠",
     "view.collapseBurstsHint": "把相邻的相似图片合并成一项；角标是文件数。",
     "view.collapseBurstsUnavailable": "筛选或其他排序下不可用。",
     "view.settings": "视图设置",

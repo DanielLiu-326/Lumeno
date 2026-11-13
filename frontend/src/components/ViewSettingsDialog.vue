@@ -330,10 +330,14 @@ watch(
         </button>
       </header>
 
-      <div
-        class="shrink-0 border-b px-4 py-3 md:px-8"
-        :class="isDark ? 'border-stone-800 bg-stone-900/50' : 'border-stone-100 bg-stone-50/80'"
-      >
+      <div class="shrink-0 px-4 pb-3 pt-3 md:px-8">
+        <div
+          class="rounded-2xl border p-3.5 shadow-sm md:p-4"
+          :class="isDark ? 'border-amber-900/60 bg-amber-950/25' : 'border-amber-200/80 bg-amber-50/75'"
+        >
+        <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide" :class="isDark ? 'text-amber-300' : 'text-amber-800'">
+          {{ t('view.burstSettings') }}
+        </p>
         <label class="block text-xs font-semibold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">
           {{ t('view.burstAlgorithm') }}
         </label>
@@ -379,6 +383,7 @@ watch(
           class="mt-3 w-full accent-amber-500"
           :aria-label="t('view.burstThresholdEmbedding')"
         />
+        </div>
       </div>
       <div
         class="shrink-0 border-b px-4 py-3 md:px-8"
