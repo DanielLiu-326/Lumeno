@@ -391,6 +391,8 @@ export default {
     "view.grade": "Grade",
     "view.gradeBack": "Back to browse",
     "grade.group.active": "Active",
+    "grade.showAlbum": "View album",
+    "grade.burstGroup": "Burst",
     "grade.group.base": "Base",
     "grade.group.tone": "Tone",
     "grade.group.color": "Color",
@@ -499,6 +501,7 @@ export default {
 
     // Photo detail
     "detail.collapse": "Collapse",
+    "detail.burstGroup": "Burst",
     "detail.viewOriginal": "View Original",
     "detail.fullscreen": "Fullscreen",
     "detail.showDetails": "Show details",

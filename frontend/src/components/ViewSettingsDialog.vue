@@ -348,11 +348,11 @@ watch(
         </button>
       </header>
 
-      <div class="shrink-0 px-4 pb-3 pt-3 md:px-8">
-        <div
-          class="rounded-2xl border p-3.5 shadow-sm md:p-4"
-          :class="isDark ? 'border-amber-900/60 bg-amber-950/25' : 'border-amber-200/80 bg-amber-50/75'"
-        >
+      <div class="app-scrollbar min-h-0 flex-1 overflow-y-auto">
+      <div
+        class="border-b px-4 py-3 md:px-8"
+        :class="isDark ? 'border-stone-800 bg-amber-950/25' : 'border-stone-100 bg-amber-50/75'"
+      >
         <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide" :class="isDark ? 'text-amber-300' : 'text-amber-800'">
           {{ t('view.burstSettings') }}
         </p>
@@ -417,10 +417,10 @@ watch(
           class="mt-3 w-full accent-amber-500"
           :aria-label="t('view.burstThresholdEmbedding')"
         />
-        </div>
       </div>
+
       <div
-        class="shrink-0 border-b px-4 py-3 md:px-8"
+        class="border-b px-4 py-3 md:px-8"
         :class="isDark ? 'border-stone-800 bg-stone-900/50' : 'border-stone-100 bg-stone-50/80'"
       >
         <p class="text-[11px] font-semibold uppercase tracking-wide" :class="isDark ? 'text-stone-500' : 'text-stone-400'">
@@ -443,7 +443,7 @@ watch(
         </p>
       </div>
 
-      <div class="app-scrollbar min-h-0 flex-1 overflow-y-auto">
+
         <div ref="canvasRef" class="relative mx-auto w-full px-4 py-5 md:px-8 md:py-7">
           <svg
             v-if="!page"

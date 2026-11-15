@@ -26,6 +26,7 @@ const props = defineProps({
   formatSize: { type: Function, required: true },
   availableTags: { type: Array, default: () => [] },
   thumbFor: { type: Function, required: true },
+  isBurstStack: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -34,6 +35,7 @@ const emit = defineEmits([
   "export",
   "save-meta",
   "load-more",
+  "scope-album",
 ]);
 
 const nodes = ref([]);
@@ -102,6 +104,10 @@ const dimensions = computed(() => {
   return `${photo.width} * ${photo.height}`;
 });
 const durationLabel = computed(() => formatDurationMs(props.photo?.duration_ms));
+const burstPosition = computed(() => {
+  const index = props.photos.findIndex((item) => item?.path === props.photo?.path);
+  return { index: index >= 0 ? index : 0, total: props.photos.length };
+});
 const caption = computed(() => {
   const photo = props.photo;
   if (!photo) return "";
@@ -1082,6 +1088,18 @@ defineExpose({ syncMeta });
         @pointerup="onStagePointerUp"
         @pointercancel="onStagePointerUp"
         @dblclick="resetView">
+        <div
+          v-if="isBurstStack && photo && photos.length > 1"
+          class="absolute left-3 top-3 z-20 flex items-center gap-2 rounded-full bg-black/60 px-3 py-1.5 text-xs text-white backdrop-blur-sm"
+        >
+          <span class="font-medium">{{ t('grade.burstGroup') }}</span>
+          <span class="tabular-nums text-white/75">{{ burstPosition.index + 1 }} / {{ burstPosition.total }}</span>
+          <button
+            type="button"
+            class="rounded-full bg-white/15 px-2 py-0.5 text-[11px] hover:bg-white/25"
+            @click.stop="$emit('scope-album')"
+          >{{ t('grade.showAlbum') }}</button>
+        </div>
         <div v-if="preview" class="absolute" :style="whiteStyle">
           <div class="absolute overflow-hidden" :style="clipStyle">
             <div class="absolute" :class="placed?.showCanvas ? '' : 'overflow-hidden'" :style="imageStyle">
@@ -1256,7 +1274,7 @@ defineExpose({ syncMeta });
       :thumb-for="thumbFor"
       :height="stripHeight"
       @select="pickPhoto"
-      @load-more="emit('load-more')"
+      @load-more="!isBurstStack && emit('load-more')"
     />
   </div>
 </template>

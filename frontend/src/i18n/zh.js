@@ -391,6 +391,8 @@ export default {
     "view.grade": "调色视图",
     "view.gradeBack": "返回浏览",
     "grade.group.active": "当前打开",
+    "grade.showAlbum": "查看相册",
+    "grade.burstGroup": "连拍组",
     "grade.group.base": "基础",
     "grade.group.tone": "影调",
     "grade.group.color": "色彩",
@@ -499,6 +501,7 @@ export default {
 
     // Photo detail
     "detail.collapse": "收起",
+    "detail.burstGroup": "连拍组",
     "detail.viewOriginal": "查看原图",
     "detail.fullscreen": "全屏查看",
     "detail.showDetails": "显示照片信息",

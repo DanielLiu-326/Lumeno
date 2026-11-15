@@ -369,6 +369,26 @@ watch(detailPhoto, (p) => {
 const detailClosing = ref(false);
 /** When set, detail prev/next navigates this list instead of albumPhotos (AI tools context). */
 const detailNavPhotos = ref(null);
+/** path → the stack member list that contains it, for the active viewer session. */
+const detailStackByPath = ref(new Map());
+const gradeStackPhotos = ref([]);
+const gradeAlbumPhotos = ref([]);
+let gradeExpandToken = 0;
+watch(gradeView, (open) => {
+  if (!open) {
+    gradeExpandToken += 1;
+    gradeStackPhotos.value = [];
+    gradeAlbumPhotos.value = [];
+  }
+});
+watch(
+  () => [props.albumPhotos.length, showingDesktopSearch.value],
+  () => {
+    if (gradeView.value && gradeStackPhotos.value.length <= 1) {
+      void prepareGradeAlbumPhotos();
+    }
+  },
+);
 const detailExpanded = ref(false);
 const detailFullscreen = ref(false);
 const detailFullscreenControlsVisible = ref(false);
@@ -1069,6 +1089,7 @@ function enterAlbum(album) {
 function exitAlbum() {
   gradeView.value = false;
   gradePhoto.value = null;
+  gradeStackPhotos.value = [];
   albumHeroId.value = props.currentAlbum;
   selectMode.value = false;
   selectedPhotoPaths.value.clear();
@@ -1189,12 +1210,63 @@ async function fetchStackMembers(photo) {
     .filter(Boolean);
 }
 
+async function expandPhotoList(source) {
+  const stackCovers = [];
+  const seen = new Set();
+  for (const photo of source) {
+    const id = photo?.stack?.id;
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      stackCovers.push(photo);
+    }
+  }
+  const membersByStack = new Map();
+  let nextStack = 0;
+  const expandWorker = async () => {
+    while (nextStack < stackCovers.length) {
+      const cover = stackCovers[nextStack++];
+      try {
+        const members = await fetchStackMembers(cover);
+        if (members.length) membersByStack.set(cover.stack.id, members);
+      } catch {
+        /* Keep the cover if the stack cannot be expanded. */
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(4, stackCovers.length) }, () => expandWorker()),
+  );
+  const photos = [];
+  const stackByPath = new Map();
+  for (const photo of source) {
+    const members = photo?.stack?.id ? membersByStack.get(photo.stack.id) : null;
+    if (members?.length) {
+      photos.push(...members);
+      for (const member of members) stackByPath.set(member.path, members);
+    } else {
+      photos.push(photo);
+    }
+  }
+  return { photos, stackByPath };
+}
+
+async function prepareGradeAlbumPhotos() {
+  const token = ++gradeExpandToken;
+  const { photos } = await expandPhotoList(gridPhotos.value);
+  if (token === gradeExpandToken) gradeAlbumPhotos.value = photos;
+}
+
 async function openBurstStack(photo) {
   try {
-    const members = await fetchStackMembers(photo);
+    const { photos, stackByPath } = await expandPhotoList(gridPhotos.value);
+    const members = stackByPath.get(photo.path) || await fetchStackMembers(photo);
     if (!members.length) throw new Error(t('albums.burstOpenFailed'));
     const target = members.find((member) => member.path === photo.path) || members[0];
-    await openPhotoDetail(target, { navPhotos: members });
+    if (!stackByPath.has(photo.path)) {
+      for (const member of members) stackByPath.set(member.path, members);
+    }
+    detailStackByPath.value = stackByPath;
+    await openPhotoDetail(target, { navPhotos: photos, stackPhotos: members });
   } catch (error) {
     window.alert(error?.message || t('albums.burstOpenFailed'));
   }
@@ -1559,6 +1631,14 @@ function getGridThumbnail(photo) {
 }
 
 const detailPhotoList = computed(() => detailNavPhotos.value || props.albumPhotos);
+const detailStackPhotos = computed(() => {
+  const members = detailStackByPath.value.get(detailPhoto.value?.path);
+  return members && members.length > 1 ? members : [];
+});
+const detailStackIndex = computed(() => (
+  detailStackPhotos.value.findIndex((photo) => photo.path === detailPhoto.value?.path)
+));
+const detailStackPosition = computed(() => Math.max(0, detailStackIndex.value) + 1);
 
 const detailIndex = computed(() => {
   if (!detailPhoto.value) return -1;
@@ -1677,6 +1757,7 @@ function openDetail(photo, expanded = detailOriginalPreference.value, options = 
   videoUnplayable.value = false;
   if (!options.fromNav) {
     detailNavPhotos.value = options.navPhotos ?? null;
+    if (!options.stackPhotos) detailStackByPath.value = new Map();
     const fullscreen = options.fullscreen ?? detailFullscreenPreference.value;
     detailFullscreen.value = fullscreen;
     if (fullscreen) showFullscreenControls();
@@ -1700,7 +1781,7 @@ function openDetail(photo, expanded = detailOriginalPreference.value, options = 
 
 function openPhotoDetail(photo, options = {}) {
   if (!photo?.path) return;
-  const { navPhotos = null, fullscreen, expanded } = options;
+  const { navPhotos = null, stackPhotos = null, fullscreen, expanded } = options;
   void (async () => {
     const stubs = (navPhotos?.length ? navPhotos : [photo]).map((entry) => ({
       ...entry,
@@ -1711,6 +1792,7 @@ function openPhotoDetail(photo, options = {}) {
     if (!main) return;
     openDetail(main, expanded ?? detailOriginalPreference.value, {
       navPhotos: enriched.length > 1 ? enriched : null,
+      stackPhotos: stackPhotos && enriched.length > 1 ? enriched : null,
       fullscreen,
     });
   })();
@@ -1747,6 +1829,7 @@ function finishCloseDetail() {
   if (!detailClosing.value) return;
   detailPhoto.value = null;
   detailNavPhotos.value = null;
+  detailStackByPath.value = new Map();
   detailExpanded.value = false;
   detailFullscreen.value = false;
   hideFullscreenControls();
@@ -2167,6 +2250,7 @@ function toggleGradeView() {
   thumbnailPopoverOpen.value = false;
   if (gradeView.value) {
     gradeView.value = false;
+    gradeStackPhotos.value = [];
     return;
   }
   if (isMobile.value) return;
@@ -2174,6 +2258,16 @@ function toggleGradeView() {
   if (!photo) {
     alert(t("grade.noPhoto"));
     return;
+  }
+  const stackPhotos = detailStackPhotos.value;
+  gradeStackPhotos.value = Array.isArray(stackPhotos) && stackPhotos.length > 1
+    ? [...stackPhotos]
+    : [];
+  if (gradeStackPhotos.value.length > 1) {
+    gradeExpandToken += 1;
+    gradeAlbumPhotos.value = [];
+  } else {
+    void prepareGradeAlbumPhotos();
   }
   if (detailPhoto.value) {
     closeDetail();
@@ -2185,6 +2279,11 @@ function toggleGradeView() {
 
 function onGradeSelect(photo) {
   void useGradePhoto(photo);
+}
+
+function showGradeAlbum() {
+  gradeStackPhotos.value = [];
+  void prepareGradeAlbumPhotos();
 }
 
 function downloadGradePhoto(photo) {
@@ -2873,7 +2972,8 @@ defineExpose({
         <GradeWorkspace
           v-if="gradeView && !isMobile"
           :photo="gradePhoto"
-          :photos="gridPhotos"
+          :photos="gradeStackPhotos.length > 1 ? gradeStackPhotos : gradeAlbumPhotos"
+          :is-burst-stack="gradeStackPhotos.length > 1"
           :is-dark="isDark"
           :format-size="formatSize"
           :available-tags="availableTags"
@@ -2883,6 +2983,7 @@ defineExpose({
           @export="exportGradePhoto"
           @save-meta="saveGradeMeta"
           @load-more="handlePhotosScrollNearBottom"
+          @scope-album="showGradeAlbum"
         />
 
         <!-- Photo grid / duplicate groups -->
@@ -3453,8 +3554,10 @@ defineExpose({
               :disabled="!hasNext" @click="goDetailNext">
               <IconChevronRight class="h-4 w-4" />
             </button>
-            <span class="ml-1 text-xs tabular-nums" :class="isDark ? 'text-stone-400' : 'text-stone-500'"
-              v-if="detailIndex >= 0">{{ detailIndex + 1 }} / {{ detailPhotoList.length }}</span>
+            <span v-if="detailStackPhotos.length > 1" class="ml-1 text-xs font-medium tabular-nums" :class="isDark ? 'text-amber-300' : 'text-amber-700'">
+              {{ t('detail.burstGroup') }} {{ detailStackPosition }} / {{ detailStackPhotos.length }}
+            </span>
+            <span v-else-if="detailIndex >= 0" class="ml-1 text-xs tabular-nums" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ detailIndex + 1 }} / {{ detailPhotoList.length }}</span>
             <div class="flex-1"></div>
             <button class="rounded-full p-1.5 transition"
               :class="isDark ? 'bg-stone-800 text-stone-200 hover:bg-stone-700' : 'bg-stone-200 text-stone-700 hover:bg-stone-300'"
@@ -3565,7 +3668,8 @@ defineExpose({
               <div v-if="detailFullscreen"
                 class="pointer-events-none absolute left-4 top-4 max-w-[calc(100%-10rem)] rounded-md bg-black/40 px-3 py-2 text-white backdrop-blur-sm transition-opacity"
                 :class="detailFullscreenControlsVisible ? 'opacity-100' : 'opacity-0'">
-                <p v-if="detailIndex >= 0" class="text-xs tabular-nums text-white/80">{{ detailIndex + 1 }} / {{ detailPhotoList.length }}</p>
+                <p v-if="detailStackPhotos.length > 1" class="text-xs font-medium tabular-nums text-amber-200">{{ t('detail.burstGroup') }} {{ detailStackPosition }} / {{ detailStackPhotos.length }}</p>
+                <p v-else-if="detailIndex >= 0" class="text-xs tabular-nums text-white/80">{{ detailIndex + 1 }} / {{ detailPhotoList.length }}</p>
                 <p class="truncate text-sm font-medium" :title="detailPhoto.name">{{ detailPhoto.name }}</p>
               </div>
 
@@ -3633,6 +3737,7 @@ defineExpose({
               />
             </div>
           </div>
+
         </div>
     </AppDialog>
 
