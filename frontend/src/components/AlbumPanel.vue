@@ -50,7 +50,7 @@ const props = defineProps({
   albumBursts: { type: Object, default: () => ({ state: "ready", algorithm: "burst-v1", stack_count: 0 }) },
   collapseBursts: { type: Boolean, default: true },
   burstThreshold: { type: Number, default: 10 },
-  burstAlgorithm: { type: String, default: "dct" },
+  burstAlgorithm: { type: String, default: "embedding" },
   burstEmbeddingThreshold: { type: Number, default: 80 },
   burstTimeWindow: { type: Number, default: 2 },
   duplicateGroups: { type: Array, default: () => [] },

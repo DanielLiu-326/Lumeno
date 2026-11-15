@@ -67,7 +67,7 @@ export function useAlbumApp() {
     const albumBursts = ref({ state: "ready", algorithm: "burst-v1", stack_count: 0 });
     const collapseBursts = ref(readCollapseBurstsPreference());
     const burstThreshold = ref(10);
-    const burstAlgorithm = ref("dct");
+    const burstAlgorithm = ref("embedding");
     const burstEmbeddingThreshold = ref(80);
     const burstTimeWindow = ref(2);
     let albumPhotosFillQueued = false;
@@ -1592,7 +1592,7 @@ export function useAlbumApp() {
             (album) => album?.dir_name === dirName,
         );
         if (selectedMeta) {
-            burstAlgorithm.value = selectedMeta.burst_algorithm === "embedding" ? "embedding" : "dct";
+            burstAlgorithm.value = selectedMeta.burst_algorithm === "dct" ? "dct" : "embedding";
             if (Number.isFinite(Number(selectedMeta.burst_threshold))) {
                 burstThreshold.value = Math.max(0, Math.min(32, Math.round(Number(selectedMeta.burst_threshold))));
             }

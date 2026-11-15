@@ -267,6 +267,7 @@ export default {
     "albums.showDuplicates": "重复图",
     "albums.duplicatesExact": "完全重复",
     "albums.duplicatesNear": "近似重复",
+    "albums.duplicatesBest": "推荐保留",
     "albums.duplicatesDistance": "最大汉明距离 {distance}",
     "albums.duplicateGroupPhotos": "{count} 张匹配照片",
     "albums.duplicatesShowMore": "再显示 {count} 张",

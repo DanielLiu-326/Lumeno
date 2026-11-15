@@ -794,6 +794,12 @@ async function loadDuplicates() {
   }
 }
 
+function duplicateIsBest(group, photo) {
+  const recommended = group?.recommended_path;
+  if (!recommended || !photo) return false;
+  return recommended === photo.path;
+}
+
 function dupGroupKey(group, index = 0) {
   return group?.group_key || group?.id || `dup-${index}`;
 }
@@ -1252,8 +1258,11 @@ function expandDupGroup(group, index = 0) {
                           <div
                             v-for="photo in dupGroupPhotos(group, index)"
                             :key="photo.path || photo.stable_id"
-                            class="cursor-pointer overflow-hidden rounded-lg"
-                            :class="isDark ? 'bg-stone-800' : 'bg-stone-100'"
+                            class="relative cursor-pointer overflow-hidden rounded-lg"
+                            :class="[
+                              isDark ? 'bg-stone-800' : 'bg-stone-100',
+                              duplicateIsBest(group, photo) ? 'ring-2 ring-amber-300' : '',
+                            ]"
                             @click="openDuplicatePhoto(photo, group)"
                           >
                             <div class="aspect-square">
@@ -1263,6 +1272,17 @@ function expandDupGroup(group, index = 0) {
                                 alt=""
                               />
                             </div>
+                            <div
+                              v-if="duplicateIsBest(group, photo)"
+                              class="pointer-events-none absolute right-0 top-0 h-0 w-0 border-l-[30px] border-l-transparent border-t-[30px] border-t-stone-900/85"
+                              :title="t('albums.duplicatesBest')"
+                              :aria-label="t('albums.duplicatesBest')"
+                            ></div>
+                            <span
+                              v-if="duplicateIsBest(group, photo)"
+                              class="pointer-events-none absolute right-1 top-0.5 text-[12px] leading-none text-amber-300"
+                              aria-hidden="true"
+                            >★</span>
                             <p class="truncate px-1 py-0.5 text-[9px]" :class="isDark ? 'text-stone-400' : 'text-stone-500'">
                               {{ photo.name || String(photo.path || "").split("/").pop() }}
                             </p>

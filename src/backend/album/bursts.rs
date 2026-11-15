@@ -297,10 +297,7 @@ pub(crate) fn build_stacks(
             {
                 break;
             }
-            if group
-                .iter()
-                .any(|member| hamming(candidates[*member].phash, candidate.phash) > max_hamming)
-            {
+            if hamming(candidates[group[0]].phash, candidate.phash) > max_hamming {
                 break;
             }
             group.push(next);
@@ -435,12 +432,10 @@ pub(crate) fn build_stacks_embeddings(
             let Some(candidate_vector) = candidate.embedding else {
                 break;
             };
-            if group.iter().any(|member| {
-                let Some(vector) = candidates[*member].embedding else {
-                    return true;
-                };
-                cosine_similarity(vector, candidate_vector) < min_cosine
-            }) {
+            let Some(first_vector) = candidates[group[0]].embedding else {
+                break;
+            };
+            if cosine_similarity(first_vector, candidate_vector) < min_cosine {
                 break;
             }
             group.push(next);
@@ -646,13 +641,16 @@ async fn load_phash_map(
 async fn load_embedding_map(
     cfg: &AppState,
     owner: &str,
+    album_name: &str,
     cache_id: &str,
+    index: &AlbumIndex,
+    base: Option<&TaskBase>,
 ) -> HashMap<String, Vec<f32>> {
     let cache = AlbumAiCache::new(cfg.ai_service.store().root(), owner, cache_id);
     let Ok(entries) = cache.list_embeddings_async().await else {
         return HashMap::new();
     };
-    let mut vectors = HashMap::new();
+    let mut all_vectors = HashMap::new();
     for (_, file) in entries {
         let Ok(vector) = file.decode_vector() else {
             continue;
@@ -660,7 +658,18 @@ async fn load_embedding_map(
         if vector.is_empty() {
             continue;
         }
-        vectors.insert(file.source.replace('\\', "/"), vector);
+        all_vectors.insert(file.source.replace('\\', "/"), vector);
+    }
+    let mut vectors = HashMap::new();
+    for (position, entry) in index.entries.iter().enumerate() {
+        if let Some(rel) = album_relative_path(album_name, &entry.path)
+            && let Some(vector) = all_vectors.remove(&rel)
+        {
+            vectors.insert(rel, vector);
+        }
+        if let Some(base) = base {
+            base.set_processed_count(position + 1);
+        }
     }
     vectors
 }
@@ -697,7 +706,7 @@ pub(crate) async fn build_cache(
             )
         }
         BurstAlgorithm::Embedding => {
-            let vectors = load_embedding_map(cfg, owner, cache_id).await;
+            let vectors = load_embedding_map(cfg, owner, album_name, cache_id, index, base).await;
             build_stacks_embeddings(
                 &index.entries,
                 album_name,
@@ -707,6 +716,9 @@ pub(crate) async fn build_cache(
             )
         }
     };
+    if let Some(base) = base {
+        base.set_processed_count(index.entries.len());
+    }
     Ok(BurstCacheFile {
         schema_version: BURST_CACHE_VERSION,
         algorithm: algorithm.cache_name(),
@@ -979,6 +991,11 @@ impl Task for BurstIndexTask {
                         &[("count", cache.stacks.len().to_string())],
                     ))
                     .await;
+                self.base.set_processed_count(
+                    self.base
+                        .total_count
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
                 self.base.set_status(TaskStatus::Finished).await;
             }
             Err(error) => {
@@ -1101,6 +1118,19 @@ mod tests {
             build_stacks(&entries, "trip", &hashes(&entries), 10, 10).len(),
             1
         );
+    }
+
+    #[test]
+    fn grouping_is_anchored_to_the_first_file() {
+        // a=0, b=1, c=2: a is within 1 of both b and c, but b and c differ by 2.
+        let entries = vec![
+            photo("a.jpg", "2026-04-01 18:31:00", "Panasonic", 0),
+            photo("b.jpg", "2026-04-01 18:31:01", "Panasonic", 1),
+            photo("c.jpg", "2026-04-01 18:31:02", "Panasonic", 2),
+        ];
+        let stacks = build_stacks(&entries, "trip", &hashes(&entries), 1, 2);
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].members, vec!["a.jpg", "b.jpg", "c.jpg"]);
     }
 
     #[test]

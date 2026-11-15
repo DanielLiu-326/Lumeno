@@ -37,6 +37,7 @@ export function formatTime(timestamp) {
 }
 
 export function progressPercent(task) {
+    if (task.status === 3) return 100;
     if (task.total_cost > 0) {
         return Math.min(100, Math.round((task.processed_cost / task.total_cost) * 100));
     }
@@ -45,7 +46,7 @@ export function progressPercent(task) {
         return Math.min(100, Math.round((task.processed_count / task.total_count) * 100));
     }
 
-    return task.status === 3 ? 100 : 0;
+    return 0;
 }
 
 export function statusLabel(status) {

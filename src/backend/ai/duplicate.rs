@@ -37,6 +37,9 @@ pub(crate) struct AiDuplicateGroup {
     pub(crate) max_hamming_distance: Option<u32>,
     pub(crate) photo_count: usize,
     pub(crate) photos: Vec<AiDuplicatePhotoItem>,
+    /// Filled only in API responses, never persisted in the index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recommended_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,6 +476,7 @@ pub(crate) fn build_near_duplicate_groups(
                 max_hamming_distance: Some(max_observed_distance),
                 photo_count: photos.len(),
                 photos,
+                recommended_path: None,
             })
         })
         .collect()

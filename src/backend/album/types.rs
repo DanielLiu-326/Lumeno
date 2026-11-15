@@ -391,7 +391,7 @@ pub(crate) fn default_burst_threshold() -> u32 {
 }
 
 pub(crate) fn default_burst_algorithm() -> String {
-    "dct".to_string()
+    "embedding".to_string()
 }
 
 pub(crate) fn default_burst_embedding_threshold() -> u32 {

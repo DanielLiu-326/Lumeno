@@ -387,6 +387,17 @@ impl Task for TaskGroup {
         if self.cancel.load(Ordering::Relaxed) {
             self.finish_cancelled().await;
         } else {
+            // Finished means all steps returned success. Do not leave a stale
+            // per-phase counter behind, especially for phases that only read
+            // cached results and therefore report no incremental progress.
+            if self.base.total_count.load(Ordering::Relaxed) > 0 {
+                self.base
+                    .set_processed_count(self.base.total_count.load(Ordering::Relaxed));
+            }
+            if self.base.total_cost.load(Ordering::Relaxed) > 0 {
+                self.base
+                    .set_processed_cost(self.base.total_cost.load(Ordering::Relaxed));
+            }
             self.base.set_status(TaskStatus::Finished).await;
         }
     }

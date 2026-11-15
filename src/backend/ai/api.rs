@@ -5,6 +5,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use super::super::album::evaluator::{EvalParams, Evaluator};
+use super::super::album::helpers::load_existing_album_index;
+use super::super::album::types::{AlbumIndex, AlbumPhotoItem};
 use super::super::album::{AiAlbumScanTarget, collect_accessible_ai_scan_targets};
 use super::super::common::{AppError, AppState, Token, create_response};
 use super::super::i18n::{RequestLocale, tr, trf};
@@ -373,6 +376,68 @@ async fn load_similar_search_candidates(
     loaded
 }
 
+async fn attach_duplicate_recommendations(
+    cfg: &AppState,
+    targets: &[AiAlbumScanTarget],
+    groups: &mut [super::duplicate::AiDuplicateGroup],
+) {
+    let Ok(evaluator) = Evaluator::new(EvalParams::default()) else {
+        return;
+    };
+    let mut indexes: HashMap<(String, String), AlbumIndex> = HashMap::new();
+    for group in groups.iter_mut() {
+        let Some(first) = group.photos.first() else {
+            continue;
+        };
+        let owner = first.owner.clone();
+        let album = first.album.clone();
+        if !targets
+            .iter()
+            .any(|target| target.owner == owner && target.album_name == album)
+        {
+            continue;
+        }
+        let index_key = (owner.clone(), album.clone());
+        if !indexes.contains_key(&index_key) {
+            let root = cfg.user_root_path(&owner);
+            let loaded =
+                load_existing_album_index(cfg.data_path.as_path(), root.as_path(), &owner, &album)
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(index) = loaded {
+                indexes.insert(index_key.clone(), index);
+            } else {
+                continue;
+            }
+        }
+        let Some(index) = indexes.get(&index_key) else {
+            continue;
+        };
+        let candidates: Vec<AlbumPhotoItem> = group
+            .photos
+            .iter()
+            .filter_map(|photo| {
+                index
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == photo.path)
+                    .cloned()
+            })
+            .collect();
+        if candidates.len() < 2 {
+            continue;
+        }
+        let exact = group.kind == "exact";
+        if let Ok(evaluation) = evaluator
+            .rank(cfg, &owner, &album, &candidates, exact)
+            .await
+        {
+            group.recommended_path = Some(evaluation.recommended_path);
+        }
+    }
+}
+
 #[named]
 pub async fn api_ai_duplicates(
     locale: RequestLocale,
@@ -435,11 +500,12 @@ pub async fn api_ai_duplicates(
     });
 
     let total = groups.len();
-    let groups = groups
+    let mut groups = groups
         .into_iter()
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
+    attach_duplicate_recommendations(cfg.as_ref(), &targets, &mut groups).await;
     let message = tr(locale.as_str(), "response.success");
 
     Ok(create_response(

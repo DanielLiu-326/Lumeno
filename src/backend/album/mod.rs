@@ -4,6 +4,7 @@ pub mod api;
 pub(crate) mod bursts;
 pub mod decoder;
 pub mod download;
+pub(crate) mod evaluator;
 pub mod filters;
 pub mod helpers;
 pub mod media;

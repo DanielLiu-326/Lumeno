@@ -270,7 +270,7 @@ for j in i+1..:
     if j.time - group.first.time > BURST_MAX_SPAN_MS: break
     if camera_mismatch(group.first, j): break
     if orientation_mismatch(group.first, j): break
-    if any hamming(phash[k], phash[j]) > BURST_MAX_HAMMING for k in group: break
+    if hamming(group.first.phash, phash[j]) > threshold: break
     group.push(j)
 
 if group.len >= 2: emit group
@@ -278,7 +278,8 @@ if group.len >= 2: emit group
 
 关键点：
 
-- **和组内每一个文件都比较**，不是只比上一张。这样不会因为“1 像 2、2 像 3、3 像 4”把一段长链滚成一组。
+- **和组内第一张比较**，不是只和上一张比较。这样不会因为“1 像 2、2 像 3、3 像 4”把一段长链滚成一组。
+- 后续文件不需要和组内每个成员都相似，只要求与第一张相似；这样不会因为中间帧的局部差异把语义越滚越大。
 - 第一个不满足就停止向后，不跳过中间文件继续找；连拍在时间线上是连续的。
 - 相机字段两边都有值时要求相同；有一边为空时允许，但时间和 pHash 仍然要过。
 - 方向用 `width >= height` 的横/竖分类；两边都有尺寸时要求一致。
@@ -325,8 +326,8 @@ dist/data/cache/ai/{owner}/albums/{cache_id}/phash/{key}.json
 
 相册级 `burst_algorithm` 可以选择：
 
-- `dct`：复用 DCT pHash，汉明距离 ≤ `burst_threshold`（0–32）；
-- `embedding`：读取 AI 索引里的图像 embedding，余弦相似度 ≥ `burst_embedding_threshold / 100`（30–100）。
+- `embedding`（默认）：读取 AI 索引里的图像 embedding，余弦相似度 ≥ `burst_embedding_threshold / 100`（30–100）；
+- `dct`：复用 DCT pHash，汉明距离 ≤ `burst_threshold`（0–32）。
 
 两种算法共用相同的时间窗口、相机、方向和最大组大小约束。时间窗口是相册级设置，范围 1 秒到 24 小时，表示相邻文件的最大时间差；整组跨度至少保留原来的 15 秒，窗口更大时按窗口放宽。
 

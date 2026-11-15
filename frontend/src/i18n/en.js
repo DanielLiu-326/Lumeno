@@ -267,6 +267,7 @@ export default {
     "albums.showDuplicates": "Duplicates",
     "albums.duplicatesExact": "Exact duplicates",
     "albums.duplicatesNear": "Near duplicates",
+    "albums.duplicatesBest": "Best pick",
     "albums.duplicatesDistance": "max Hamming distance {distance}",
     "albums.duplicateGroupPhotos": "{count} matching photos",
     "albums.duplicatesShowMore": "Show {count} more",

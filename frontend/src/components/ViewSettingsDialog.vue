@@ -24,7 +24,7 @@ const props = defineProps({
   isDark: { type: Boolean, default: false },
   formatSize: { type: Function, required: true },
   burstThreshold: { type: Number, default: 10 },
-  burstAlgorithm: { type: String, default: "dct" },
+  burstAlgorithm: { type: String, default: "embedding" },
   burstEmbeddingThreshold: { type: Number, default: 80 },
   burstTimeWindow: { type: Number, default: 2 },
 });
@@ -54,7 +54,7 @@ let ro = null;
 
 const draft = ref(cloneLayout(props.modelValue));
 const burstThresholdDraft = ref(props.burstThreshold);
-const burstAlgorithmDraft = ref(props.burstAlgorithm === "embedding" ? "embedding" : "dct");
+const burstAlgorithmDraft = ref(props.burstAlgorithm === "dct" ? "dct" : "embedding");
 const burstEmbeddingThresholdDraft = ref(props.burstEmbeddingThreshold);
 const burstTimeWindowDraft = ref(props.burstTimeWindow);
 const burstTimeWindowOptions = [
@@ -114,7 +114,7 @@ function resetLayout() {
 function confirm() {
   emit("update:modelValue", cloneLayout(draft.value));
   if (
-    burstAlgorithmDraft.value !== (props.burstAlgorithm === "embedding" ? "embedding" : "dct")
+    burstAlgorithmDraft.value !== (props.burstAlgorithm === "dct" ? "dct" : "embedding")
     || burstThresholdDraft.value !== props.burstThreshold
     || burstEmbeddingThresholdDraft.value !== props.burstEmbeddingThreshold
     || burstTimeWindowDraft.value !== props.burstTimeWindow
@@ -266,7 +266,7 @@ watch(
     if (!open) return;
     draft.value = cloneLayout(props.modelValue);
     burstThresholdDraft.value = props.burstThreshold;
-    burstAlgorithmDraft.value = props.burstAlgorithm === "embedding" ? "embedding" : "dct";
+    burstAlgorithmDraft.value = props.burstAlgorithm === "dct" ? "dct" : "embedding";
     burstEmbeddingThresholdDraft.value = props.burstEmbeddingThreshold;
     burstTimeWindowDraft.value = props.burstTimeWindow;
     selectedSlot.value = "overlay-tl";
@@ -364,8 +364,8 @@ watch(
           class="mt-2 w-full rounded-xl border px-3 py-2 text-sm"
           :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100' : 'border-stone-200 bg-white text-stone-800'"
         >
-          <option value="dct">{{ t('view.burstAlgorithmDct') }}</option>
           <option value="embedding">{{ t('view.burstAlgorithmEmbedding') }}</option>
+          <option value="dct">{{ t('view.burstAlgorithmDct') }}</option>
         </select>
 
         <label class="mt-3 block text-xs font-semibold" :class="isDark ? 'text-stone-200' : 'text-stone-700'">
