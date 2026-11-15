@@ -2,13 +2,9 @@ use serde_json::{Value, json};
 
 use super::{Node, NodeParam, clamp_f, object, req_f};
 use crate::grade::buffer::{self, InputDesc, OutputDesc};
-use crate::grade::color::rec2020_to_linear_srgb;
+use crate::grade::color::{MIDDLE_GREY, rec2020_to_linear_srgb};
 use crate::grade::exec::{Frame, Roi, Space, ViewTransform, map_rgb};
 use crate::grade::field::{self, FieldSpec};
-
-/// Scene grey that darktable's sigmoid pins to the same display value.
-/// Contrast only changes the slope there; it does not move this point.
-const MIDDLE_GREY: f32 = 0.1845;
 
 #[derive(Clone, Copy)]
 struct LogLogistic {

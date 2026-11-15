@@ -138,7 +138,9 @@ pub enum RawGradePixels {
         width: u32,
         height: u32,
         samples: Vec<u16>,
-        baseline_ev: f32,
+        /// Camera-recommended baseline exposure, when the file actually carries
+        /// one. `None` means the metadata was absent, not that it recommended 0.
+        baseline_ev: Option<f32>,
         to_working: [f32; 9],
         camera_name: String,
     },
@@ -193,19 +195,30 @@ pub fn decode_raw_for_grade(path: &Path) -> Result<RawGradePixels, DecodeError> 
 }
 
 /// Exposure offset, in stops, that puts this camera's linear raw near the
-/// sigmoid middle-gray pivot. LibRaw records it and does not apply it.
-fn raw_baseline_ev(raw: &rsraw::RawImage) -> f32 {
+/// sigmoid middle-gray pivot. LibRaw records the DNG baseline and the
+/// maker-note calibration shift but does not apply either. `None` means the
+/// file carries no baseline, so the host should fall back to scene metering.
+fn raw_baseline_ev(raw: &rsraw::RawImage) -> Option<f32> {
     let data = raw.as_ref();
-    let mut ev = 0.0;
-    let baseline = data.color.dng_levels.baseline_exposure;
-    if baseline.is_finite() && baseline > -100.0 {
-        ev += baseline;
-    }
-    let shift = data.makernotes.common.ExposureCalibrationShift;
-    if shift.is_finite() {
-        ev += shift;
-    }
-    ev.clamp(-5.0, 5.0)
+    combine_camera_baseline(
+        data.color.dng_levels.baseline_exposure,
+        data.makernotes.common.ExposureCalibrationShift,
+    )
+}
+
+/// LibRaw initializes a missing DNG baseline to `-999`. A zero is therefore a
+/// real recommendation, while `-999` (and any other non-finite value) is not.
+/// The maker-note shift is only a recommendation when it is non-zero.
+fn combine_camera_baseline(baseline: f32, shift: f32) -> Option<f32> {
+    let baseline = (baseline.is_finite() && baseline > -100.0).then_some(baseline);
+    let shift = (shift.is_finite() && shift.abs() > 1e-4).then_some(shift);
+    let ev = match (baseline, shift) {
+        (Some(baseline), Some(shift)) => baseline + shift,
+        (Some(baseline), None) => baseline,
+        (None, Some(shift)) => shift,
+        (None, None) => return None,
+    };
+    Some(ev.clamp(-5.0, 5.0))
 }
 
 fn camera_label(raw: &rsraw::RawImage) -> String {
@@ -388,4 +401,37 @@ fn processed_to_dynamic(
             code: "libraw_rgb_build_failed",
             message: "failed to build RGB image from libraw output".to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combine_camera_baseline;
+
+    #[test]
+    fn a_dng_zero_is_a_real_recommendation() {
+        assert_eq!(combine_camera_baseline(0.0, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn a_missing_baseline_and_zero_shift_are_not_a_recommendation() {
+        assert_eq!(combine_camera_baseline(-999.0, 0.0), None);
+    }
+
+    #[test]
+    fn a_maker_note_shift_alone_is_a_recommendation() {
+        let ev = combine_camera_baseline(-999.0, -0.8).unwrap();
+        assert!((ev + 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn baseline_and_shift_add_and_stay_in_range() {
+        let ev = combine_camera_baseline(0.5, 0.2).unwrap();
+        assert!((ev - 0.7).abs() < 1e-6);
+        assert_eq!(combine_camera_baseline(4.5, 2.0), Some(5.0));
+    }
+
+    #[test]
+    fn non_finite_metadata_is_ignored() {
+        assert_eq!(combine_camera_baseline(f32::NAN, f32::INFINITY), None);
+    }
 }

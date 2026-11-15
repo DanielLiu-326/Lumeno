@@ -178,6 +178,7 @@ grade/
     pipeline.rs            输入输出、执行顺序、环检测
     preset_policy.rs       按照片条件选择缺省预设
     color.rs               矩阵、OETF、亮度系数、色温
+    meter.rs               初始曝光的画面测光
     resource.rs            资源标识、解析缓存、引用计数
     exec.rs                执行器与执行上下文
     cache.rs               渲染缓存键、检查点接口
@@ -225,6 +226,7 @@ grade/
 | `canon` | 稳定字节序列，供哈希 | 不改变内存中的参数精度 |
 | `buffer` | 拥有像素和元数据 | 不含算法 |
 | `color` | 纯函数：矩阵、gamma、色适应 | 不分配整幅图 |
+| `meter` | 从线性画面估计初始曝光 | 不读文件、不写文档 |
 | `nodes::*` | 单节点公式 | 不决定调度 |
 | `exec` | 按 `pipeline` 给出的顺序调用节点，按输出名存结果，响应取消 | 不解释 HTTP |
 | `cache` | 定义渲染缓存键和检查点 trait | 不存放 LUT / 预设 |
@@ -382,7 +384,9 @@ pub struct PhotoFacts {
 | `Raw` | `alias:preset:system-raw` | Input → WhiteBalance(`as_shot`) → Demosaic(`rcd`) → Sigmoid(`contrast = 1.5`) → Export |
 | 其余 | `alias:preset:system-raster` | Input → Exposure(0) → Sigmoid(关闭) → Export |
 
-光栅身份链是 `system-raster`：编码线性化后再编码。曝光为 0、Sigmoid 关闭、无几何和 LUT 时，除 8 位量化外像素应回到原编码。测试允许 ±1 个编码量化级。
+打开照片时，宿主只对 RAW 生成曝光初值：先读相机基准，DNG `BaselineExposure` 加上 LibRaw 的 `ExposureCalibrationShift`。LibRaw 用 `-999` 表示没有 DNG 基准，所以 `0` 是有效推荐，`-999` 才是缺失；maker-note shift 则要非零才算。随后在进入 Exposure 节点的画面（RAW 先经相机矩阵进入工作空间）上测光：亮度中位数对齐场景中灰 `0.1845`；正向曝光最多把 99% 分位推过场景白 `0.5 EV`。有基准时，测光结果夹在基准 `±1 EV` 内；测光失败用基准；没有基准时用测光。最终结果夹到 `[-5, 5]`，四舍五入到 `0.01 EV`，作为这次打开的 `ev` 初值。这个值同时是 Reset 恢复的值，写入文档后不再随节点编辑重算。光栅图不读相机基准、不测光，Exposure 保持关闭，编码像素原样通过。没有有效像素且没有基准时，RAW 曝光保持 0。测光公式在 `src/grade/meter.rs`。
+
+光栅身份链是 `system-raster`：编码线性化后再编码。曝光为 0、Sigmoid 关闭、无几何和 LUT 时，除 8 位量化外像素应回到原编码。测试允许 ±1 个编码量化级。打开照片不会给光栅图自动曝光；用户手动打开 Exposure 并设置非零曝光时，身份链不再成立，这是编辑结果，不是缓存错误。
 
 系统预设随库发布，启动时写入资源库并占住这两个别名。用户规则引用自己的预设别名，这样用户改预设后，尚未编辑的照片下次打开会看到新版本。已经编辑并脱离链接的照片保持脱离时的节点。
 
@@ -743,6 +747,8 @@ out = in * 2^ev - black
 ```
 
 允许负值和大于 1 的值进入后续节点。Sigmoid 或 `display_from_linear` 再负责显示域裁切。
+
+打开照片时，宿主只对 RAW 生成曝光初值：先取相机基准（DNG `BaselineExposure` + LibRaw `ExposureCalibrationShift`，缺失时为 `None`）。有基准时把测光结果夹在基准 `±1 EV` 内，测光失败用基准；没有基准时用测光。测光把亮度中位数对齐 `0.1845`，正向曝光最多把 99% 分位推过场景白 `0.5 EV`。最终初值同时写入 `ev` 和节点的 `home_ev`，Reset 回到它；之后改参数不会自动重测。光栅图不测光，Exposure 保持关闭。
 
 ### 9.7 LocalContrast
 
@@ -1380,6 +1386,8 @@ host::grade_api         校验、预览、导出任务、导入 LUT 与预设
 | 链接展开 | 别名指向新预设后，照片 JSON 不变，展开后的缓存键变化 |
 | 回收 | 没有文档引用的 LUT 出现在 `collect_garbage` 结果里；执行 pin 住的 id 不删除 |
 | 曝光 +1 EV | 线性缓冲精确乘 2（相对误差 1e-6） |
+| 自动曝光（RAW） | 中灰画面得到 0 EV；暗画面为正 EV；亮画面为负 EV；99% 分位限制正向 EV；空画面没有结果；光栅图不测光 |
+| 相机基准 | DNG 的 0 是有效推荐；LibRaw 缺失值 `-999` 且 shift 为 0 时不算基准；有基准时测光被夹在 ±1 EV |
 | 旋转 90 | 角点像素搬到预期位置，无插值 |
 | 裁切 | 整数边界与 floor/ceil 规则一致 |
 | 恒等 LUT | `strength = 0` 或恒等表时缓冲不变 |

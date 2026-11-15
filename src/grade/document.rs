@@ -101,6 +101,17 @@ pub fn document_with_baseline(raw: bool, baseline_ev: f32) -> Document {
 }
 
 pub fn document_with_camera(raw: bool, baseline_ev: f32, camera: Option<CameraColor>) -> Document {
+    document_with_initial_ev(raw, raw.then_some(baseline_ev), camera)
+}
+
+/// `initial_ev` is the exposure the host chose for this RAW open; it becomes
+/// both the current EV and the value Reset restores. Raster files ignore it and
+/// keep Exposure off, so a rendered file still passes through unchanged.
+pub fn document_with_initial_ev(
+    raw: bool,
+    initial_ev: Option<f32>,
+    camera: Option<CameraColor>,
+) -> Document {
     let mut list = Vec::new();
     list.push(vertex("input", nodes::input(raw), true));
     if raw {
@@ -118,8 +129,16 @@ pub fn document_with_camera(raw: bool, baseline_ev: f32, camera: Option<CameraCo
     }
     // JPEG and other rendered files already carry a look. Tone, color, and
     // detail nodes stay in the document so they can be switched on, but they start off.
-    let exposure_ev = if raw { baseline_ev } else { 0.0 };
-    list.push(vertex("exposure", nodes::exposure_at(exposure_ev), raw));
+    let (exposure_ev, exposure_on) = if raw {
+        (initial_ev.unwrap_or(0.0), true)
+    } else {
+        (0.0, false)
+    };
+    list.push(vertex(
+        "exposure",
+        nodes::exposure_at(exposure_ev),
+        exposure_on,
+    ));
     list.push(vertex("local-contrast", nodes::local_contrast(), raw));
     if !raw {
         list.push(vertex("dehaze", nodes::dehaze(), false));
@@ -366,6 +385,44 @@ mod tests {
     }
 
     #[test]
+    fn raw_without_baseline_or_metering_stays_on_at_zero() {
+        let doc = document_with_initial_ev(true, None, None);
+        let exposure = doc.nodes.iter().find(|node| node.id == "exposure").unwrap();
+        assert!(exposure.enabled);
+        assert!(
+            exposure.param.params().to_json()["ev"]
+                .as_f64()
+                .unwrap()
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn raw_initial_exposure_is_current_and_reset() {
+        let doc = document_with_initial_ev(true, Some(1.25), None);
+        let exposure = doc.nodes.iter().find(|node| node.id == "exposure").unwrap();
+        assert!(exposure.enabled);
+        let params = exposure.param.params().to_json();
+        assert!((params["ev"].as_f64().unwrap() - 1.25).abs() < 1e-5);
+        assert!((default_params(exposure)["ev"].as_f64().unwrap() - 1.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn raster_ignores_an_initial_exposure() {
+        let doc = document_with_initial_ev(false, Some(1.25), None);
+        let exposure = doc.nodes.iter().find(|node| node.id == "exposure").unwrap();
+        assert!(!exposure.enabled);
+        assert!(
+            exposure.param.params().to_json()["ev"]
+                .as_f64()
+                .unwrap()
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
     fn always_on_nodes_reject_being_switched_off() {
         let mut doc = default_document(true);
         for id in ["demosaic", "input-color-profile", "export"] {
@@ -414,6 +471,7 @@ mod tests {
             .unwrap();
         assert!((exposure.param.params().to_json()["ev"].as_f64().unwrap() - 1.25).abs() < 1e-4);
         assert!(exposure.enabled);
+        assert!(default_params(exposure)["ev"].as_f64().unwrap().abs() < 1e-5);
     }
 
     #[test]

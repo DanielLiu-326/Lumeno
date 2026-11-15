@@ -2,6 +2,11 @@
 
 pub const LUMA: [f32; 3] = [0.2627, 0.6780, 0.0593];
 
+/// Scene grey that the Sigmoid node pins to display grey, and the value the
+/// initial exposure meter aims for. Contrast changes the slope there but does
+/// not move the point.
+pub const MIDDLE_GREY: f32 = 0.1845;
+
 const SRGB_TO_REC2020: [f32; 9] = [
     0.6274039, 0.3292830, 0.0433131, 0.0690973, 0.9195404, 0.0113623, 0.0163914, 0.0880133,
     0.8955953,

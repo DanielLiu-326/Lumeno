@@ -26,12 +26,17 @@ use crate::backend::common::{
 use crate::backend::i18n::{RequestLocale, tr};
 use crate::grade::{
     CameraColor, CancelFlag, Document, FieldKind, FieldSpec, Frame, GradeNode, NodePatch, Rgba,
-    affected, apply_node_params, apply_saved_document, bake_view, default_params, document_json,
-    document_with_camera, ensure_grade_lut, fields, frame_from_camera_rgb, frame_from_image,
-    params_json, parse_camera_profile, render_cancellable, title_key, user_root_from_photo,
+    affected, apply_node_params, apply_saved_document, auto_exposure_ev, bake_view, default_params,
+    document_json, document_with_initial_ev, ensure_grade_lut, fields, frame_from_camera_rgb,
+    frame_from_image, params_json, parse_camera_profile, render_cancellable, title_key,
+    user_root_from_photo,
 };
 
 const SMALL_EDGE: u32 = 640;
+/// How far scene metering may move away from a camera baseline, in stops. The
+/// baseline is the camera maker's rendering intent, not a measurement of this
+/// scene, so it is a prior rather than the final value.
+const CAMERA_BASELINE_TRUST_EV: f32 = 1.0;
 /// Opens kept across the process. A full-size frame can be hundreds of MB, so
 /// idle sessions are dropped instead of being kept until the cap is hit.
 const SESSION_CAP: usize = 16;
@@ -153,7 +158,18 @@ pub async fn api_grade_open(
     .await?;
     let _permit = cfg.darktable_limiter.acquire().await;
     let opened = tokio::task::spawn_blocking(move || {
-        let (frame, baseline_ev, camera) = load_frame(source.as_path(), raw, SMALL_EDGE)?;
+        let LoadedFrame {
+            frame,
+            baseline_ev,
+            camera,
+            camera_raw,
+        } = load_frame(source.as_path(), raw, SMALL_EDGE)?;
+        let metered_ev = if camera_raw {
+            auto_exposure_ev(&frame, camera.as_ref().map(|color| color.to_working))
+        } else {
+            None
+        };
+        let initial_ev = initial_exposure_ev(baseline_ev, metered_ev);
         Ok(open_session(
             token_key,
             locale_code,
@@ -161,7 +177,7 @@ pub async fn api_grade_open(
             source,
             writable,
             frame,
-            baseline_ev,
+            initial_ev,
             camera,
         ))
     })
@@ -314,10 +330,10 @@ fn open_session(
     path: std::path::PathBuf,
     writable: bool,
     source: Frame,
-    baseline_ev: f32,
+    initial_ev: Option<f32>,
     camera: Option<CameraColor>,
 ) -> Value {
-    let mut doc = document_with_camera(raw, baseline_ev, camera);
+    let mut doc = document_with_initial_ev(raw, initial_ev, camera);
     if let Some(saved) = read_grade_sidecar(&path) {
         let _ = apply_saved_document(&mut doc, &saved);
     }
@@ -659,7 +675,7 @@ fn execute_prepared(mut prepared: Prepared) -> Result<Value, String> {
         {
             let mut guard = slot.lock().unwrap_or_else(|err| err.into_inner());
             if guard.is_none() {
-                *guard = Some(load_frame(path.as_path(), prepared.full_raw, 0)?.0);
+                *guard = Some(load_frame(path.as_path(), prepared.full_raw, 0)?.frame);
             }
         }
         if prepared.job.cancel.is_cancelled() {
@@ -743,11 +759,33 @@ fn view_json(degrees: f32, roi: [f32; 4]) -> Value {
     })
 }
 
-fn load_frame(
-    path: &std::path::Path,
-    raw: bool,
-    max_edge: u32,
-) -> Result<(Frame, f32, Option<CameraColor>), String> {
+/// Pick the EV a newly opened document starts with. A camera baseline is a
+/// prior: metering may correct it by at most one stop. Without a baseline the
+/// scene measurement stands alone; without either, exposure is left at 0.
+fn initial_exposure_ev(baseline: Option<f32>, metered: Option<f32>) -> Option<f32> {
+    let ev = match (baseline, metered) {
+        (Some(base), Some(metered)) => metered.clamp(
+            base - CAMERA_BASELINE_TRUST_EV,
+            base + CAMERA_BASELINE_TRUST_EV,
+        ),
+        (Some(base), None) => base,
+        (None, Some(metered)) => metered,
+        (None, None) => return None,
+    };
+    Some((ev.clamp(-5.0, 5.0) * 100.0).round() / 100.0)
+}
+
+/// One decoded source frame plus what the host may use to seed exposure.
+struct LoadedFrame {
+    frame: Frame,
+    baseline_ev: Option<f32>,
+    camera: Option<CameraColor>,
+    /// True only for linear camera RGB. Raster files and the embedded JPEG
+    /// preview that LibRaw returns for Nikon HE/HE* are never metered.
+    camera_raw: bool,
+}
+
+fn load_frame(path: &std::path::Path, raw: bool, max_edge: u32) -> Result<LoadedFrame, String> {
     if raw {
         return match decode_raw_for_grade(path).map_err(|error| error.message)? {
             RawGradePixels::Camera {
@@ -757,15 +795,21 @@ fn load_frame(
                 baseline_ev,
                 to_working,
                 camera_name,
-            } => Ok((
-                frame_from_camera_rgb(width, height, samples, max_edge),
+            } => Ok(LoadedFrame {
+                frame: frame_from_camera_rgb(width, height, samples, max_edge),
                 baseline_ev,
-                Some(CameraColor {
+                camera: Some(CameraColor {
                     name: camera_name,
                     to_working,
                 }),
-            )),
-            RawGradePixels::Srgb(image) => Ok((frame_from_image(&image, max_edge), 0.0, None)),
+                camera_raw: true,
+            }),
+            RawGradePixels::Srgb(image) => Ok(LoadedFrame {
+                frame: frame_from_image(&image, max_edge),
+                baseline_ev: None,
+                camera: None,
+                camera_raw: false,
+            }),
         };
     }
     let format = format_from_path(path).map_err(|error| error.message)?;
@@ -780,7 +824,12 @@ fn load_frame(
             },
         )
         .map_err(|error| error.message)?;
-    Ok((frame_from_image(&image, max_edge), 0.0, None))
+    Ok(LoadedFrame {
+        frame: frame_from_image(&image, max_edge),
+        baseline_ev: None,
+        camera: None,
+        camera_raw: false,
+    })
 }
 
 /// Render the Lumeno grade document (or the default pipeline when the photo has none) to an
@@ -799,9 +848,19 @@ pub async fn render_grade_export(
     let out_ext = out_ext.to_string();
     let _permit = limiter.acquire().await;
     tokio::task::spawn_blocking(move || {
-        let (frame, baseline_ev, camera) =
-            load_frame(&source, raw, 0).map_err(|error| AppError::Unknown(error))?;
-        let mut doc = document_with_camera(raw, baseline_ev, camera);
+        let LoadedFrame {
+            frame,
+            baseline_ev,
+            camera,
+            camera_raw,
+        } = load_frame(&source, raw, 0).map_err(|error| AppError::Unknown(error))?;
+        let metered_ev = if camera_raw {
+            auto_exposure_ev(&frame, camera.as_ref().map(|color| color.to_working))
+        } else {
+            None
+        };
+        let initial_ev = initial_exposure_ev(baseline_ev, metered_ev);
+        let mut doc = document_with_initial_ev(raw, initial_ev, camera);
         if let Some(saved) = read_grade_sidecar(&source) {
             let _ = apply_saved_document(&mut doc, &saved);
         }
@@ -993,8 +1052,35 @@ async fn resolve_source(
 
 #[cfg(test)]
 mod tests {
-    use super::{RenderKind, grade_sidecar, interrupts};
+    use super::{RenderKind, grade_sidecar, initial_exposure_ev, interrupts};
 
+    #[test]
+    fn a_camera_baseline_holds_when_metering_is_missing() {
+        assert_eq!(initial_exposure_ev(Some(0.4), None), Some(0.4));
+    }
+
+    #[test]
+    fn metering_stays_within_one_stop_of_the_camera_baseline() {
+        assert_eq!(initial_exposure_ev(Some(0.4), Some(3.0)), Some(1.4));
+        assert_eq!(initial_exposure_ev(Some(0.4), Some(-3.0)), Some(-0.6));
+        assert_eq!(initial_exposure_ev(Some(0.4), Some(0.9)), Some(0.9));
+    }
+
+    #[test]
+    fn metering_alone_is_used_without_a_camera_baseline() {
+        assert_eq!(initial_exposure_ev(None, Some(-1.2)), Some(-1.2));
+    }
+
+    #[test]
+    fn no_baseline_and_no_metering_leaves_no_initial_ev() {
+        assert_eq!(initial_exposure_ev(None, None), None);
+    }
+
+    #[test]
+    fn a_dng_zero_baseline_is_not_treated_as_missing() {
+        assert_eq!(initial_exposure_ev(Some(0.0), Some(0.4)), Some(0.4));
+        assert_eq!(initial_exposure_ev(Some(0.0), None), Some(0.0));
+    }
     #[test]
     fn full_render_spares_only_the_small_preview() {
         assert!(!interrupts(RenderKind::Preview, RenderKind::Full));
