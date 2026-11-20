@@ -381,14 +381,6 @@ watch(gradeView, (open) => {
     gradeAlbumPhotos.value = [];
   }
 });
-watch(
-  () => [props.albumPhotos.length, showingDesktopSearch.value],
-  () => {
-    if (gradeView.value && gradeStackPhotos.value.length <= 1) {
-      void prepareGradeAlbumPhotos();
-    }
-  },
-);
 const detailExpanded = ref(false);
 const detailFullscreen = ref(false);
 const detailFullscreenControlsVisible = ref(false);
@@ -860,6 +852,14 @@ const desktopSearchError = ref("");
 let desktopSearchToken = 0;
 
 const showingDesktopSearch = computed(() => desktopSearchPhotos.value !== null);
+watch(
+  () => [props.albumPhotos.length, showingDesktopSearch.value],
+  () => {
+    if (gradeView.value && gradeStackPhotos.value.length <= 1) {
+      void prepareGradeAlbumPhotos();
+    }
+  },
+);
 const desktopSearchBar = computed(() => !inSpecialView.value && !isMobile.value);
 /** Toolbar is too narrow for the full search field beside labeled actions. */
 const desktopSearchCollapsed = ref(false);
