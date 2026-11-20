@@ -1386,6 +1386,18 @@ html.dark .mobile-tabbar,
     transform: scale(1.08);
 }
 
+/* Inactive tab icons must stay legible on the dark frosted bar. Without this
+   the shared stone-500 default is too close to the dark background. */
+html.dark .mobile-tabbar-item,
+.mobile-tabbar-dark .mobile-tabbar-item {
+    color: rgb(168 162 158);
+}
+
+html.dark .mobile-tabbar-item.is-active,
+.mobile-tabbar-dark .mobile-tabbar-item.is-active {
+    color: var(--accent, #f59e0b);
+}
+
 .mobile-icon-btn {
     display: inline-flex;
     height: 2.75rem;
