@@ -312,6 +312,7 @@ Architecture and behavior notes:
 - [docs/color-pipeline.md](docs/color-pipeline.md) — grade pipeline semantics.
 - [docs/burst-stacking.md](docs/burst-stacking.md) — burst stacking design.
 - [docs/photo-evaluator.md](docs/photo-evaluator.md) — duplicate and burst keeper quality evaluator.
+- [docs/recycle-bin.md](docs/recycle-bin.md) — recoverable deletion and recycle bin design.
 - [docs/tune-view.md](docs/tune-view.md) — desktop tune workspace.
 - [docs/mobile-tune-view.md](docs/mobile-tune-view.md) — mobile editor.
 - [docs/ai-models.md](docs/ai-models.md) — model pipeline and licensing.
