@@ -83,7 +83,7 @@ Face clusters, person naming, and similarity search. Local face models are optio
 | macOS arm64 | Yes | Local AI uses Metal; no Vulkan SDK needed. |
 | macOS x86_64 | Untested | Source build may work. |
 | Windows | No | `rsraw-sys` does not support MSVC. |
-| Docker | Not yet | No published image or production Dockerfile; run from source for now. |
+| Docker | Partial | A source `Dockerfile` is included; no published image yet. |
 
 Optional external tools:
 
@@ -116,6 +116,25 @@ Open `http://localhost:3000`.
 If `BOOTSTRAP_ADMIN_PASSWORD` is unset, Lumeno generates a random administrator password and prints it once to stderr. `BOOTSTRAP_ADMIN_USER` defaults to `admin`.
 
 The process reads `./dist/data` and `./dist/resources` relative to the working directory, so run it from the repository root (or set the service `WorkingDirectory` accordingly). It creates `dist/data` on first start if it is missing; `dist/resources` still needs the frontend build.
+
+### Docker
+
+The repository includes a multi-stage `Dockerfile` with Ubuntu 24.04, packaged libheif/`heif-enc`, the AV1 encoder plugin, ffmpeg and ExifTool. It builds the frontend and Rust binary in build stages and keeps only the runtime dependencies in the final image. AI model weights are not bundled.
+
+```bash
+docker build --platform linux/amd64 -t lumeno:local .
+docker run -d --name lumeno -p 3000:3000 \
+  -v lumeno-data:/app/dist/data \
+  -e BOOTSTRAP_ADMIN_USER=admin \
+  -e BOOTSTRAP_ADMIN_PASSWORD='replace-with-a-strong-password' \
+  lumeno:local
+```
+
+Add `--build-arg INSTALL_DARKTABLE=true` if you need `darktable-cli`. Verify HDR support with:
+
+```bash
+docker run --rm lumeno:local heif-enc --list-encoders
+```
 
 ## Installation
 

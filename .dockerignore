@@ -1,0 +1,8 @@
+.git
+.vscode
+.venv-ai
+target
+frontend/node_modules
+dist
+docs/screenshots/Screenshot*.png
+**/*.log

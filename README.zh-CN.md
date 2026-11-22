@@ -83,7 +83,7 @@ Lumeno 是一个自托管的个人照片与文件库。后端使用 Rust/Axum，
 | macOS arm64 | 是 | 本地 AI 使用 Metal，不需要 Vulkan SDK。 |
 | macOS x86_64 | 未测试 | 源码构建可能可用。 |
 | Windows | 否 | `rsraw-sys` 不支持 MSVC。 |
-| Docker | 尚未提供 | 还没有发布镜像或生产 Dockerfile；目前从源码运行。 |
+| Docker | 部分支持 | 仓库包含源码 `Dockerfile`；尚未发布镜像。 |
 
 可选外部程序：
 
@@ -116,6 +116,25 @@ cargo +nightly run
 未设置 `BOOTSTRAP_ADMIN_PASSWORD` 时，Lumeno 会生成随机管理员密码并只打印一次到标准错误；`BOOTSTRAP_ADMIN_USER` 默认是 `admin`。
 
 进程按工作目录读取 `./dist/data` 和 `./dist/resources`，所以请在仓库根目录运行，或把服务的 `WorkingDirectory` 指到根目录。`dist/data` 不存在时首次启动会自动创建；`dist/resources` 仍然需要先构建前端。
+
+### Docker
+
+仓库包含多阶段 `Dockerfile`，基于 Ubuntu 24.04，使用发行版 libheif、`heif-enc`、AV1 编码器插件，并包含 ffmpeg 和 ExifTool。前端与 Rust 二进制在构建阶段生成，最终镜像只保留运行时依赖。镜像不包含 AI 模型权重。
+
+```bash
+docker build --platform linux/amd64 -t lumeno:local .
+docker run -d --name lumeno -p 3000:3000 \
+  -v lumeno-data:/app/dist/data \
+  -e BOOTSTRAP_ADMIN_USER=admin \
+  -e BOOTSTRAP_ADMIN_PASSWORD='replace-with-a-strong-password' \
+  lumeno:local
+```
+
+需要 `darktable-cli` 时增加 `--build-arg INSTALL_DARKTABLE=true`。验证 HDR：
+
+```bash
+docker run --rm lumeno:local heif-enc --list-encoders
+```
 
 ## 安装
 
