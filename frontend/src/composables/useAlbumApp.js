@@ -987,6 +987,7 @@ export function useAlbumApp() {
         }
     }
 
+
     async function setBurstSettings({ algorithm, threshold, embeddingThreshold, timeWindow }) {
         if (!currentAlbum.value) return;
         const nextAlgorithm = algorithm === "embedding" ? "embedding" : "dct";

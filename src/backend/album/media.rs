@@ -25,8 +25,7 @@ use crate::backend::common::{
 };
 use crate::backend::constants::{
     DARKTABLE_PREVIEW_DEFAULT_SIZE, DARKTABLE_PREVIEW_SIZE_MAX, DARKTABLE_PREVIEW_SIZE_MIN,
-    FACE_AVATAR_PAD, PREVIEW_THUMBNAIL_SIZE, THUMBNAIL_SIZE, THUMBNAIL_SIZE_MAX,
-    THUMBNAIL_SIZE_MIN,
+    FACE_AVATAR_PAD, PREVIEW_THUMBNAIL_SIZE, THUMBNAIL_SIZE,
 };
 use crate::backend::files::send_file;
 use crate::backend::grade_api::render_grade_export;
@@ -34,6 +33,7 @@ use crate::backend::i18n::{RequestLocale, tr, trf};
 use crate::backend::tasks::{
     Task, TaskBase, TaskStatus, format_subtask, task_file_name, wait_while_paused,
 };
+use crate::grade::{HdrTransfer, OutputProfile};
 
 use super::decoder::{
     DecodeOptions, DecoderCreateOptions, apply_max_edge, create_decoder, darktable_export,
@@ -199,6 +199,7 @@ pub fn thumbnail_cache_key(
         metadata.len(),
         source_modified_secs(metadata),
         generator,
+        0,
     )
 }
 
@@ -212,6 +213,7 @@ pub fn thumbnail_cache_key_parts(
     src_len: u64,
     src_modified: u64,
     generator: ThumbnailGenerator,
+    original_preview_quality: u8,
 ) -> String {
     let mut hasher = Sha512::new();
     hasher.update(username.as_bytes());
@@ -225,6 +227,10 @@ pub fn thumbnail_cache_key_parts(
     hasher.update(src_modified.to_string().as_bytes());
     hasher.update(b"|v4|");
     hasher.update(generator.as_str().as_bytes());
+    if size == 0 {
+        hasher.update(b"|oq|");
+        hasher.update(original_preview_quality.to_string().as_bytes());
+    }
     let digest = hasher.finalize();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
@@ -257,10 +263,22 @@ fn save_decoded_outputs(
     request_path: PathBuf,
     request_size: u32,
     request_format: image::ImageFormat,
+    quality: u8,
 ) -> Result<(), String> {
     let requested = apply_max_edge(image, request_size);
     if let Some(parent) = request_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create output dir failed: {e}"))?;
+    }
+    if request_format == image::ImageFormat::Jpeg {
+        let mut bytes = Vec::new();
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality.clamp(1, 100));
+        encoder
+            .encode_image(&requested)
+            .map_err(|e| format!("encode decoded JPEG failed: {e}"))?;
+        std::fs::write(&request_path, bytes)
+            .map_err(|e| format!("save decoded output failed: {e}"))?;
+        return Ok(());
     }
     requested
         .save_with_format(&request_path, request_format)
@@ -335,7 +353,123 @@ fn encode_thumbnail(
     Ok(())
 }
 
-fn encode_avif(image: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
+/// Encode a display-referred Rec.2020 RGB buffer as 10-bit HDR AVIF.
+///
+/// The buffer is the output of tone mapping: 1.0 is the HDR reference white
+/// (203 nits, matching darktable's output profile), and values above 1.0 carry
+/// highlight headroom. The 16-bit PNG is only an interchange buffer; no 8-bit
+/// quantization occurs.
+/// Whether the libheif frontend is available for HDR AVIF encoding.
+pub(crate) fn heif_enc_available() -> bool {
+    std::process::Command::new("heif-enc")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+pub(crate) fn encode_avif_hdr(
+    width: u32,
+    height: u32,
+    rgb: &[f32],
+    transfer: HdrTransfer,
+    reference_white_nits: f32,
+    quality: u8,
+) -> Result<Vec<u8>, String> {
+    let expected = width as usize * height as usize * 3;
+    if width == 0 || height == 0 || rgb.len() != expected {
+        return Err("invalid HDR image dimensions".to_string());
+    }
+    let mut image = image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::new(width, height);
+    for (dst, src) in image.pixels_mut().zip(rgb.chunks_exact(3)) {
+        let mut pixel = [0u16; 3];
+        for c in 0..3 {
+            let encoded = match transfer {
+                HdrTransfer::Pq => display_to_pq(src[c], reference_white_nits),
+                HdrTransfer::Hlg => display_to_hlg(src[c], reference_white_nits),
+            };
+            pixel[c] = (encoded.clamp(0.0, 1.0) * 65535.0).round() as u16;
+        }
+        *dst = image::Rgb(pixel);
+    }
+    let stem = format!("lumeno-hdr-{}", uuid::Uuid::new_v4());
+    let dir = std::env::temp_dir();
+    let input = dir.join(format!("{stem}.png"));
+    let output_path = dir.join(format!("{stem}.avif"));
+    image
+        .save_with_format(&input, image::ImageFormat::Png)
+        .map_err(|error| format!("HDR PNG encode failed: {error}"))?;
+    let transfer = match transfer {
+        HdrTransfer::Pq => "16",
+        HdrTransfer::Hlg => "18",
+    };
+    let result = std::process::Command::new("heif-enc")
+        .args([
+            "--avif",
+            "-q",
+            &quality.clamp(1, 100).to_string(),
+            "-b",
+            "10",
+            "--colour_primaries",
+            "9",
+            "--transfer_characteristic",
+            transfer,
+            "--matrix_coefficients",
+            "9",
+        ])
+        .arg(&input)
+        .arg("-o")
+        .arg(&output_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    let bytes = match result {
+        Ok(output) if output.status.success() => {
+            std::fs::read(&output_path).map_err(|error| format!("HDR AVIF read failed: {error}"))
+        }
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "heif-enc failed to encode HDR AVIF: {}",
+                detail.trim()
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("heif-enc is not installed".to_string())
+        }
+        Err(error) => Err(format!("heif-enc failed to start: {error}")),
+    };
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output_path);
+    bytes
+}
+
+fn display_to_pq(value: f32, reference_white_nits: f32) -> f32 {
+    const M1: f32 = 2610.0 / 16384.0;
+    const M2: f32 = 2523.0 / 32.0;
+    const C1: f32 = 3424.0 / 4096.0;
+    const C2: f32 = 2413.0 / 128.0;
+    const C3: f32 = 2392.0 / 128.0;
+    let l = (value.max(0.0) * reference_white_nits / 10000.0).powf(M1);
+    ((C1 + C2 * l) / (1.0 + C3 * l)).powf(M2)
+}
+
+fn display_to_hlg(value: f32, reference_white_nits: f32) -> f32 {
+    const A: f32 = 0.17883277;
+    const B: f32 = 1.0 - 4.0 * A;
+    let c = 0.5 - A * (4.0 * A).ln();
+    let l = (value.max(0.0) * reference_white_nits / 1000.0).min(1.0);
+    if l <= 1.0 / 12.0 {
+        (3.0 * l).sqrt()
+    } else {
+        A * (12.0 * l - B).ln() + c
+    }
+}
+
+pub(crate) fn encode_avif(image: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
     let rgb = image.to_rgb8();
     let (width, height) = rgb.dimensions();
     let mut heif = libheif_rs::Image::new(
@@ -409,6 +543,7 @@ pub(crate) fn darktable_preview_cache_key(
     src_len: u64,
     src_modified: u64,
     xmp_modified: Option<u64>,
+    original_preview_quality: u8,
 ) -> String {
     let mut hasher = Sha512::new();
     hasher.update(username.as_bytes());
@@ -426,6 +561,10 @@ pub(crate) fn darktable_preview_cache_key(
     } else {
         hasher.update(b"|noxmp|");
     }
+    if size == 0 {
+        hasher.update(b"|oq|");
+        hasher.update(original_preview_quality.to_string().as_bytes());
+    }
     let digest = hasher.finalize();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
@@ -438,6 +577,7 @@ fn darktable_preview_cache_path(
     src_len: u64,
     src_modified: u64,
     xmp_modified: Option<u64>,
+    original_preview_quality: u8,
 ) -> PathBuf {
     let cache_key = darktable_preview_cache_key(
         data_path,
@@ -447,6 +587,7 @@ fn darktable_preview_cache_path(
         src_len,
         src_modified,
         xmp_modified,
+        original_preview_quality,
     );
     crate::backend::cache_areas::area("darktable")
         .expect("registered cache area")
@@ -1338,7 +1479,10 @@ pub async fn api_thumbnail(
     // Default matches THUMBNAIL_SIZE / album grid prewarm.
     let size = match query.size {
         Some(0) => 0,
-        Some(s) => s.clamp(THUMBNAIL_SIZE_MIN, THUMBNAIL_SIZE_MAX),
+        // Requesters may ask for any edge. Canonical sizes are the ones the
+        // storage scan attributes; other sizes are allowed but are not part of
+        // that contract and may be evicted as unattributed cache.
+        Some(s) => s,
         None => THUMBNAIL_SIZE,
     };
     // Video posters always use the still-image cache slot. darktable does not apply.
@@ -1355,6 +1499,7 @@ pub async fn api_thumbnail(
         let xmp_path = find_xmp_sidecar(&source);
         let xmp_modified = xmp_modified_secs(xmp_path.as_deref()).await;
         let src_modified = source_modified_secs(&metadata);
+        let original_preview_quality = cfg.settings_manager.original_preview_quality().await;
         let sized = darktable_preview_cache_path(
             cfg.data_path.as_path(),
             &username,
@@ -1363,6 +1508,11 @@ pub async fn api_thumbnail(
             metadata.len(),
             src_modified,
             xmp_modified,
+            if size == 0 {
+                original_preview_quality
+            } else {
+                0
+            },
         );
         let master = darktable_preview_cache_path(
             cfg.data_path.as_path(),
@@ -1372,6 +1522,7 @@ pub async fn api_thumbnail(
             metadata.len(),
             src_modified,
             xmp_modified,
+            original_preview_quality,
         );
         match existing_or_scaled_darktable_preview(&master, &sized, size).await {
             Ok(Some(preview)) => {
@@ -1387,16 +1538,22 @@ pub async fn api_thumbnail(
         }
     }
     let owner_dir = owner_cache_dir(cfg.data_path.as_path(), "thumbnails", cache_owner)?;
-    let key = thumbnail_cache_key(
+    let format = ThumbFormat::preferred(&cfg.settings_manager.thumbnail_format().await);
+    let quality = if !video && size == 0 {
+        cfg.settings_manager.original_preview_quality().await
+    } else {
+        cfg.settings_manager.thumbnail_quality().await
+    };
+    let key = thumbnail_cache_key_parts(
         cache_owner,
         cfg.data_path.as_path(),
         source.as_path(),
         size,
-        &metadata,
+        metadata.len(),
+        source_modified_secs(&metadata),
         ThumbnailGenerator::Lumeno,
+        if !video && size == 0 { quality } else { 0 },
     );
-    let format = ThumbFormat::preferred(&cfg.settings_manager.thumbnail_format().await);
-    let quality = cfg.settings_manager.thumbnail_quality().await;
 
     // Cache hits bypass the limiter inside ensure_thumbnail_cached().
     // A missing darktable preview stays on LibRaw; this request does not start darktable.
@@ -1488,6 +1645,7 @@ pub async fn api_darktable_preview(
         .map_err(|_| AppError::NotFound(source.display().to_string()))?;
     let xmp_modified = xmp_modified_secs(xmp_path.as_deref()).await;
     let src_modified = source_modified_secs(&src_meta);
+    let original_preview_quality = cfg.settings_manager.original_preview_quality().await;
     let sized = darktable_preview_cache_path(
         cfg.data_path.as_path(),
         &username,
@@ -1496,6 +1654,11 @@ pub async fn api_darktable_preview(
         src_meta.len(),
         src_modified,
         xmp_modified,
+        if size == 0 {
+            original_preview_quality
+        } else {
+            0
+        },
     );
     let master = darktable_preview_cache_path(
         cfg.data_path.as_path(),
@@ -1505,6 +1668,7 @@ pub async fn api_darktable_preview(
         src_meta.len(),
         src_modified,
         xmp_modified,
+        original_preview_quality,
     );
 
     if let Some(preview) = existing_or_scaled_darktable_preview(&master, &sized, size)
@@ -1536,8 +1700,14 @@ pub async fn api_darktable_preview(
                     .await
                     .map_err(|error| error.message)?;
                 tokio::task::spawn_blocking(move || {
-                    save_decoded_outputs(image, master_blocking, 0, image::ImageFormat::Jpeg)
-                        .map_err(|e| format!("save darktable preview failed: {e}"))
+                    save_decoded_outputs(
+                        image,
+                        master_blocking,
+                        0,
+                        image::ImageFormat::Jpeg,
+                        original_preview_quality,
+                    )
+                    .map_err(|e| format!("save darktable preview failed: {e}"))
                 })
                 .await
                 .map_err(|e| format!("darktable preview join failed: {e}"))?
@@ -1634,6 +1804,7 @@ pub async fn api_albums_export(
         "png" => ("png", "image/png"),
         "tiff" | "tif" => ("tiff", "image/tiff"),
         "webp" => ("webp", "image/webp"),
+        "avif" => ("avif", "image/avif"),
         _ => {
             return Err(AppError::BadRequest(tr(
                 locale.as_str(),
@@ -1644,7 +1815,6 @@ pub async fn api_albums_export(
 
     let quality = payload.quality.unwrap_or(95).clamp(1, 100);
     let max_width = payload.max_width.unwrap_or(0); // 0 = full size
-
     // Download name from the original file
     let stem = source.file_stem().unwrap_or_default().to_string_lossy();
 
@@ -1660,7 +1830,8 @@ pub async fn api_albums_export(
             ("jpg" | "jpeg", "jpg")
             | ("png", "png")
             | ("tif" | "tiff", "tiff")
-            | ("webp", "webp") => true,
+            | ("webp", "webp")
+            | ("avif", "avif") => true,
             _ => false,
         };
         if same_format && max_width == 0 {
@@ -1890,6 +2061,20 @@ mod tests {
             photo_app.to_string_lossy().as_ref(),
             photo_root.to_string_lossy().as_ref()
         );
+    }
+
+    #[test]
+    #[ignore = "requires the heif-enc command from libheif"]
+    fn hdr_avif_encoder_smoke() {
+        let rgb: Vec<f32> = (0..16 * 16 * 3)
+            .map(|i| ((i % 3) as f32 + 1.0) / 8.0)
+            .collect();
+        let bytes =
+            super::encode_avif_hdr(16, 16, &rgb, crate::grade::HdrTransfer::Pq, 203.0, 90).unwrap();
+        assert!(bytes.starts_with(b"\0\0\0"));
+        let path = std::env::temp_dir().join("lumeno-hdr-smoke.avif");
+        std::fs::write(&path, bytes).unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

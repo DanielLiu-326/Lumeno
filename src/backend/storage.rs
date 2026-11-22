@@ -361,6 +361,8 @@ pub(crate) struct ScanInputs {
     pub user_root: PathBuf,
     pub username: String,
     pub shared_album_count: u64,
+    /// Quality tag used by full-size (size=0) thumbnail cache keys.
+    pub original_preview_quality: u8,
 }
 
 pub(crate) struct ScanProgress<'a> {
@@ -727,7 +729,12 @@ async fn collect_sources(
     sources
 }
 
-fn compute_hit(src: &SourceFile, data_path: &Path, username: &str) -> MediaHit {
+fn compute_hit(
+    src: &SourceFile,
+    data_path: &Path,
+    username: &str,
+    original_preview_quality: u8,
+) -> MediaHit {
     let thumbnails = if src.media {
         THUMBNAIL_CACHE_SIZES
             .iter()
@@ -740,6 +747,11 @@ fn compute_hit(src: &SourceFile, data_path: &Path, username: &str) -> MediaHit {
                     src.len,
                     src.modified,
                     ThumbnailGenerator::Lumeno,
+                    if size == 0 {
+                        original_preview_quality
+                    } else {
+                        0
+                    },
                 );
                 (size, key)
             })
@@ -759,6 +771,11 @@ fn compute_hit(src: &SourceFile, data_path: &Path, username: &str) -> MediaHit {
                     src.len,
                     src.modified,
                     src.xmp_modified,
+                    if size == 0 {
+                        original_preview_quality
+                    } else {
+                        0
+                    },
                 );
                 (size, key)
             })
@@ -1028,7 +1045,14 @@ pub(crate) async fn scan_storage(
         }
         let hits: Vec<MediaHit> = chunk
             .par_iter()
-            .map(|&position| compute_hit(&sources[position], &inputs.data_path, &inputs.username))
+            .map(|&position| {
+                compute_hit(
+                    &sources[position],
+                    &inputs.data_path,
+                    &inputs.username,
+                    inputs.original_preview_quality,
+                )
+            })
             .collect();
         for (&position, hit) in chunk.iter().zip(hits) {
             let source = &sources[position];
@@ -1804,18 +1828,20 @@ async fn scan_inputs(cfg: &AppState, username: &str) -> ScanInputs {
         user_root: cfg.user_root_path(username),
         username: username.to_string(),
         shared_album_count: shared_album_count(&sources, username),
+        original_preview_quality: cfg.settings_manager.original_preview_quality().await,
     }
 }
 
 /// Inputs for work that never reports a shared-album count. Building the full
 /// `scan_inputs` walks every account's album directory, which made a cleanup
 /// click wait on that walk before the task was even queued.
-fn cleanup_inputs(cfg: &AppState, username: &str) -> ScanInputs {
+async fn cleanup_inputs(cfg: &AppState, username: &str) -> ScanInputs {
     ScanInputs {
         data_path: cfg.data_path.clone(),
         user_root: cfg.user_root_path(username),
         username: username.to_string(),
         shared_album_count: 0,
+        original_preview_quality: cfg.settings_manager.original_preview_quality().await,
     }
 }
 
@@ -2180,7 +2206,7 @@ pub async fn api_storage_cleanup(
         return Err(AppError::BadRequest(tr(locale, "error.storage_conflict")));
     }
 
-    let inputs = cleanup_inputs(&cfg, &target);
+    let inputs = cleanup_inputs(&cfg, &target).await;
     let name = match spec.kind {
         CleanupKind::Thumbnails => tr(locale, "task.storage_cleanup_thumbnails"),
         CleanupKind::Transcodes => tr(locale, "task.storage_cleanup_transcodes"),
@@ -2262,6 +2288,7 @@ mod tests {
             user_root: std::path::PathBuf::from("/data/irene"),
             username: "irene".to_string(),
             shared_album_count: 0,
+            original_preview_quality: 98,
         };
         let scan = super::StorageScanTask::new(
             "scan".to_string(),
@@ -2350,6 +2377,7 @@ mod tests {
             user_root: data.join(user),
             username: user.to_string(),
             shared_album_count: 0,
+            original_preview_quality: 98,
         }
     }
 
@@ -2370,6 +2398,7 @@ mod tests {
             meta.len(),
             modified_secs(&meta),
             ThumbnailGenerator::Lumeno,
+            0,
         );
         let dir = cache_area("thumbnails").owner_dir(&data, user);
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -2458,6 +2487,7 @@ mod tests {
             meta.len(),
             modified_secs(&meta),
             None,
+            0,
         );
         tokio::fs::write(dir.join(format!("{key}.jpg")), b"preview")
             .await

@@ -10,8 +10,9 @@ async function postJson(url, body) {
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
-  const data = await res.json().catch(() => ({}));
-  return { res, data };
+  const payload = await res.json().catch(() => ({}));
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : {};
+  return { res, payload, data };
 }
 
 /**
@@ -48,6 +49,8 @@ export function useGradeSession() {
   }
 
   async function open(photoPath) {
+    const previousRev = rev.value;
+    if (previousRev) close();
     path.value = photoPath;
     loading.value = true;
     error.value = "";
@@ -55,8 +58,8 @@ export function useGradeSession() {
     undoStack.length = 0;
     redoStack.length = 0;
     try {
-      const { res, data } = await postJson("/api/grade/open", { path: photoPath });
-      if (!res.ok) throw new Error(data.message || "open failed");
+      const { res, payload, data } = await postJson("/api/grade/open", { path: photoPath });
+      if (!res.ok) throw new Error(payload.message || "open failed");
       rev.value = Number(data.rev) || 0;
       raw.value = Boolean(data.raw);
       nodes.value = Array.isArray(data.nodes) ? data.nodes : [];
@@ -103,19 +106,19 @@ export function useGradeSession() {
     if (!current) return;
     inflight = true;
     try {
-      const { res, data } = await postJson("/api/grade/node", {
+      const { res, payload, data } = await postJson("/api/grade/node", {
         rev: rev.value,
         id,
         enabled: current.enabled !== false,
         params: current.params,
       });
-      const reason = data?.data?.reason;
+      const reason = payload?.data?.reason;
       if (res.status === 409 || reason === "not-open" || reason === "stale") {
         await reopen();
         return;
       }
       if (data?.superseded) return;
-      if (!res.ok) throw new Error(data.message || "patch failed");
+      if (!res.ok) throw new Error(payload.message || "patch failed");
       rev.value = Number(data.rev) || rev.value;
       if (data.node) {
         const index = nodes.value.findIndex((entry) => entry.id === id);
@@ -222,12 +225,21 @@ export function useGradeSession() {
   }
 
   function close() {
+    const currentRev = rev.value;
     clearTimeout(sendTimer);
     queue.clear();
     nodes.value = [];
     preview.value = "";
     before.value = "";
     rev.value = 0;
+    if (currentRev) {
+      void httpFetch("/api/grade/close", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        keepalive: true,
+        body: JSON.stringify({ rev: currentRev }),
+      }).catch(() => {});
+    }
   }
 
   onBeforeUnmount(close);

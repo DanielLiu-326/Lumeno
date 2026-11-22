@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { t } from "../../i18n/index.js";
 import { COLOR_LABELS } from "../../utils/photoCardLayout.js";
 import { downloadFileByUrl, saveBlobResponse } from "../../utils/downloadFile.js";
-import { DEFAULT_THUMBNAIL_SIZE, thumbnailUrl } from "../../utils/thumbnailUrl.js";
+import { DEFAULT_THUMBNAIL_SIZE, DETAIL_PREVIEW_SIZE, thumbnailUrl } from "../../utils/thumbnailUrl.js";
 import { encodePath } from "../../utils/path.js";
 import { httpFetch, httpJson } from "../../utils/http.js";
 import { gradedThumbEpoch, gradedThumbRev, markGradedThumb } from "../../utils/gradedThumb.js";
@@ -382,7 +382,7 @@ function slideFullSrc(item) {
   ) {
     return imageSrc.value;
   }
-  return thumbSrc(item, 1600);
+  return thumbSrc(item, DETAIL_PREVIEW_SIZE);
 }
 
 function slideZoomStyle(index) {
@@ -395,10 +395,10 @@ const imageSrc = computed(() => {
   if (!photo?.path) return "";
   const ownerAmp = ownerAmpFor(photo);
   if (darktablePreview.value && hasXmp.value) {
-    return `/api/albums/darktable_preview/${encodePath(photo.path)}?size=0${ownerAmp}`;
+    return `/api/albums/darktable_preview/${encodePath(photo.path)}?size=${DETAIL_PREVIEW_SIZE}${ownerAmp}`;
   }
   if (imageFallback.value) {
-    return thumbnailUrl(photo.path, { size: 800, owner: photoOwnerFor(photo) });
+    return thumbnailUrl(photo.path, { size: DETAIL_PREVIEW_SIZE, owner: photoOwnerFor(photo) });
   }
   if (viewOriginal.value) {
     const ext = (photo.name || "").split(".").pop().toLowerCase();
@@ -408,7 +408,7 @@ const imageSrc = computed(() => {
     const q = ownerQuery.value ? `?${ownerQuery.value}` : "";
     return `/api/download/${encodePath(photo.path)}${q}`;
   }
-  return thumbnailUrl(photo.path, { size: 1600, owner: photoOwnerFor(photo) });
+  return thumbnailUrl(photo.path, { size: DETAIL_PREVIEW_SIZE, owner: photoOwnerFor(photo) });
 });
 
 const trackStyle = computed(() => ({
@@ -1401,9 +1401,10 @@ function onPickAlbum(action) {
           <option value="png">PNG</option>
           <option value="tiff">TIFF</option>
           <option value="webp">WebP</option>
+          <option value="avif">AVIF</option>
         </select>
       </div>
-      <div v-if="exportForm.format === 'jpeg' || exportForm.format === 'webp'" class="mb-3">
+      <div v-if="exportForm.format === 'jpeg' || exportForm.format === 'webp' || exportForm.format === 'avif'" class="mb-3">
         <label class="mb-1 block text-xs opacity-60">{{ t("detail.exportQuality") }}: {{ exportForm.quality }}</label>
         <AppSlider v-model="exportForm.quality" :min="1" :max="100" :is-dark="isDark" />
       </div>

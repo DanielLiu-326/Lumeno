@@ -1,45 +1,68 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
-use super::{Node, NodeParam, clamp_f, object, req_f, req_str};
-use crate::grade::buffer::{self, InputDesc, OutputDesc};
+use super::{Node, NodeParam, object};
+use crate::grade::buffer::{self, InputDesc, OutputDesc, Value as BufferValue};
+use crate::grade::error::GradeError;
+use crate::grade::exec::ExecCtx;
 use crate::grade::field::{self, FieldSpec};
 
+/// Terminal marker for the grade graph. It owns the output color space and
+/// transfer choice; format, quality and size remain export-request settings.
 #[derive(Clone, Copy)]
-enum Format {
-    Jpeg,
-    Webp,
-    Png,
-    Tiff,
+pub struct Export {
+    rec2020: bool,
+    transfer: Transfer,
 }
 
-#[derive(Clone)]
-pub struct Export {
-    format: Format,
-    quality: u8,
-    long_edge: u32,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Transfer {
+    Srgb,
+    Pq,
+    Hlg,
+}
+
+impl Transfer {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Srgb => "srgb",
+            Self::Pq => "pq",
+            Self::Hlg => "hlg",
+        }
+    }
 }
 
 impl Export {
     pub(crate) fn new() -> Self {
         Self {
-            format: Format::Jpeg,
-            quality: 90,
-            long_edge: 0,
+            rec2020: false,
+            transfer: Transfer::Srgb,
         }
     }
 
-    fn parse(params: &Value) -> Result<Self, String> {
-        let obj = object(params)?;
+    fn parse(value: &Value) -> Result<Self, String> {
+        let obj = object(value)?;
+        let rec2020 = match obj.get("color_space").and_then(Value::as_str) {
+            Some("rec2020") => true,
+            Some("srgb") | None => false,
+            Some(other) => return Err(format!("unknown export color space {other}")),
+        };
+        let transfer = match obj.get("transfer").and_then(Value::as_str) {
+            Some("pq") if rec2020 => Transfer::Pq,
+            Some("hlg") if rec2020 => Transfer::Hlg,
+            Some("srgb") | None => Transfer::Srgb,
+            Some("pq") | Some("hlg") => Transfer::Srgb,
+            Some(other) => return Err(format!("unknown export transfer {other}")),
+        };
         Ok(Self {
-            format: match req_str(obj, "format")? {
-                "jpeg" => Format::Jpeg,
-                "webp" => Format::Webp,
-                "png" => Format::Png,
-                "tiff" => Format::Tiff,
-                other => return Err(format!("unknown export format {other}")),
+            rec2020,
+            transfer: if rec2020 && transfer == Transfer::Srgb {
+                Transfer::Pq
+            } else {
+                transfer
             },
-            quality: clamp_f(req_f(obj, "quality")?, 1.0, 100.0).round() as u8,
-            long_edge: clamp_f(req_f(obj, "long_edge")?, 0.0, 4096.0).round() as u32,
         })
     }
 }
@@ -55,30 +78,55 @@ impl NodeParam for Export {
 
     fn to_json(&self) -> Value {
         json!({
-            "format": match self.format {
-                Format::Jpeg => "jpeg",
-                Format::Webp => "webp",
-                Format::Png => "png",
-                Format::Tiff => "tiff",
-            },
-            "quality": self.quality,
-            "long_edge": self.long_edge,
+            "color_space": if self.rec2020 { "rec2020" } else { "srgb" },
+            "transfer": self.transfer.as_str(),
         })
     }
 
     fn fields(&self) -> Vec<FieldSpec> {
-        self.ui_fields()
+        let mut out = vec![field::choice(
+            "color_space",
+            "grade.field.color_space",
+            if self.rec2020 { 1 } else { 0 },
+            &["srgb", "rec2020"],
+            &["grade.option.srgb", "grade.option.rec2020"],
+        )];
+        if self.rec2020 {
+            out.push(field::choice(
+                "transfer",
+                "grade.field.transfer",
+                match self.transfer {
+                    Transfer::Pq => 0,
+                    Transfer::Hlg => 1,
+                    Transfer::Srgb => 0,
+                },
+                &["pq", "hlg"],
+                &["grade.option.pq", "grade.option.hlg"],
+            ));
+        } else {
+            out.push(field::choice(
+                "transfer",
+                "grade.field.transfer",
+                0,
+                &["srgb"],
+                &["grade.option.srgb"],
+            ));
+        }
+        out
     }
 
     fn from_json(value: &Value) -> Result<Self, String>
     where
         Self: Sized,
     {
+        // Older sidecars carried format/quality/long_edge here. They are now
+        // owned by the export request, so accept and discard them while
+        // preserving the new output profile fields.
         Self::parse(value)
     }
 
     fn set_json(&mut self, value: &Value) -> Result<(), String> {
-        *self = Self::from_json(value)?;
+        *self = Self::parse(value)?;
         Ok(())
     }
 }
@@ -108,13 +156,10 @@ impl Node for Export {
 
     fn run(
         &self,
-        _inputs: &std::collections::BTreeMap<String, std::sync::Arc<crate::grade::buffer::Value>>,
-        _ctx: &crate::grade::exec::ExecCtx,
-    ) -> Result<
-        std::collections::BTreeMap<String, crate::grade::buffer::Value>,
-        crate::grade::error::GradeError,
-    > {
-        Ok(std::collections::BTreeMap::new())
+        _inputs: &BTreeMap<String, Arc<BufferValue>>,
+        _ctx: &ExecCtx,
+    ) -> Result<BTreeMap<String, BufferValue>, GradeError> {
+        Ok(BTreeMap::new())
     }
 
     fn defaults(&self) -> Box<dyn Node> {
@@ -122,46 +167,39 @@ impl Node for Export {
     }
 }
 
-impl Export {
-    pub(super) fn ui_fields(&self) -> Vec<FieldSpec> {
-        vec![
-            field::choice(
-                "format",
-                "grade.field.format",
-                match self.format {
-                    Format::Jpeg => 0,
-                    Format::Webp => 1,
-                    Format::Png => 2,
-                    Format::Tiff => 3,
-                },
-                &["jpeg", "webp", "png", "tiff"],
-                &[
-                    "grade.option.jpeg",
-                    "grade.option.webp",
-                    "grade.option.png",
-                    "grade.option.tiff",
-                ],
-            ),
-            field::slider(
-                "quality",
-                "grade.field.quality",
-                self.quality as f32,
-                1.0,
-                100.0,
-                format!("{}", self.quality),
-            ),
-            field::slider(
-                "long_edge",
-                "grade.field.long_edge",
-                self.long_edge as f32,
-                0.0,
-                4096.0,
-                if self.long_edge == 0 {
-                    "grade.value.full".to_string()
-                } else {
-                    format!("{}px", self.long_edge)
-                },
-            ),
-        ]
+#[cfg(test)]
+mod tests {
+    use super::Export;
+    use crate::grade::nodes::NodeParam;
+    use serde_json::json;
+
+    #[test]
+    fn export_keeps_only_color_space_and_transfer() {
+        let node = Export::from_json(&json!({
+            "format": "png",
+            "quality": 12,
+            "long_edge": 800,
+            "color_space": "rec2020",
+            "transfer": "hlg"
+        }))
+        .unwrap();
+        assert_eq!(
+            node.to_json(),
+            json!({ "color_space": "rec2020", "transfer": "hlg" })
+        );
+    }
+
+    #[test]
+    fn srgb_transfer_is_valid_for_srgb_only() {
+        let node = Export::from_json(&json!({
+            "color_space": "rec2020",
+            "transfer": "srgb"
+        }))
+        .unwrap();
+        assert_eq!(
+            node.to_json()["transfer"].as_str(),
+            Some("pq"),
+            "rec2020 cannot use the sRGB transfer"
+        );
     }
 }

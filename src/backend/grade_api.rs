@@ -8,8 +8,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::Extension;
 use axum::Json;
-use axum::extract::Multipart;
-use base64::Engine;
+use axum::body::{Body, Bytes};
+use axum::extract::{Multipart, Path as AxumPath};
+use axum::http::{HeaderValue, header};
+use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -21,18 +23,18 @@ use crate::backend::album::decoder::{
 };
 use crate::backend::album::media::{is_image_path, resolve_photo_owner_root};
 use crate::backend::common::{
-    AppError, AppState, ConcurrencyLimiter, Ctx, Token, into_host_path_safely,
+    AppError, AppState, ConcurrencyLimiter, Ctx, Token, create_response, into_host_path_safely,
 };
 use crate::backend::i18n::{RequestLocale, tr};
 use crate::grade::{
-    CameraColor, CancelFlag, Document, FieldKind, FieldSpec, Frame, GradeNode, NodePatch, Rgba,
-    affected, apply_node_params, apply_saved_document, auto_exposure_ev, bake_view, default_params,
-    document_json, document_with_initial_ev, ensure_grade_lut, fields, frame_from_camera_rgb,
-    frame_from_image, params_json, parse_camera_profile, render_cancellable, title_key,
-    user_root_from_photo,
+    CameraColor, CancelFlag, Document, FieldKind, FieldSpec, Frame, GradeNode, NodePatch,
+    OutputProfile, Rgba, affected, apply_node_params, apply_saved_document, auto_exposure_ev,
+    bake_view, default_params, document_json, document_with_initial_ev, ensure_grade_lut, fields,
+    frame_from_camera_rgb, frame_from_image, params_json, parse_camera_profile, render_cancellable,
+    title_key, user_root_from_photo,
 };
 
-const SMALL_EDGE: u32 = 640;
+const SMALL_EDGE: u32 = crate::backend::constants::DETAIL_PREVIEW_SIZE;
 /// How far scene metering may move away from a camera baseline, in stops. The
 /// baseline is the camera maker's rendering intent, not a measurement of this
 /// scene, so it is a prior rather than the final value.
@@ -47,6 +49,12 @@ static REVS: AtomicU64 = AtomicU64::new(1);
 static SESSIONS: LazyLock<Mutex<HashMap<u64, Arc<Mutex<GradeSession>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Clone)]
+struct PreviewImage {
+    bytes: Bytes,
+    content_type: &'static str,
+}
+
 struct GradeSession {
     token: String,
     rev: u64,
@@ -58,6 +66,14 @@ struct GradeSession {
     /// Own photos and writable shares may write `{filename}.lumeno.json`. Read-only shares may not.
     writable: bool,
     raw: bool,
+    /// JPEG/AVIF quality for tune-workspace previews. Export has its own setting.
+    preview_quality: u8,
+    /// SDR or HDR target for the tune workspace.
+    preview_profile: OutputProfile,
+    /// Whether this client reported HDR display support.
+    hdr_preview: bool,
+    /// Encoded previews kept until the browser fetches them by URL.
+    preview_images: HashMap<String, PreviewImage>,
     small: Frame,
     small_cache: HashMap<String, std::sync::Arc<Frame>>,
     /// Original working pixels. Filled by the full-size pass, not by the fast open.
@@ -120,6 +136,9 @@ pub struct OpenBody {
     path: String,
     #[serde(default)]
     owner: Option<String>,
+    /// Request a 10-bit PQ preview when the host has HDR display support.
+    #[serde(default)]
+    hdr_preview: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +165,9 @@ pub async fn api_grade_open(
     let raw = format_from_path(source.as_path())
         .ok()
         .is_some_and(|format| format.is_camera_raw());
+    let preview_quality = cfg.settings_manager.original_preview_quality().await;
+    let hdr_preview =
+        body.hdr_preview.unwrap_or(false) && crate::backend::album::media::heif_enc_available();
     let locale_code = ctx.locale.clone();
     let token_key = ctx.token.0.clone();
     let writable = grade_writable(
@@ -179,12 +201,19 @@ pub async fn api_grade_open(
             frame,
             initial_ev,
             camera,
+            preview_quality,
+            hdr_preview,
         ))
     })
     .await
     .map_err(|error| AppError::Unknown(error.to_string()))?
     .map_err(AppError::BadRequest)?;
-    Ok(Json(opened))
+    Ok(create_response(
+        true,
+        &tr(locale.as_str(), "response.ok"),
+        0,
+        Some(opened),
+    ))
 }
 
 pub async fn api_grade_preview(
@@ -332,17 +361,21 @@ fn open_session(
     source: Frame,
     initial_ev: Option<f32>,
     camera: Option<CameraColor>,
+    preview_quality: u8,
+    hdr_preview: bool,
 ) -> Value {
     let mut doc = document_with_initial_ev(raw, initial_ev, camera);
     if let Some(saved) = read_grade_sidecar(&path) {
         let _ = apply_saved_document(&mut doc, &saved);
     }
+    let preview_profile = preview_profile_for(&doc, hdr_preview);
     let rev = REVS.fetch_add(1, Ordering::Relaxed);
     let payload = json!({
         "rev": rev,
         "nodes": nodes_json(&locale, &doc),
         "raw": raw,
         "writable": writable,
+        "hdr_preview": preview_profile.is_hdr(),
     });
     let session = GradeSession {
         last_used: std::time::Instant::now(),
@@ -353,6 +386,10 @@ fn open_session(
         path,
         writable,
         raw,
+        preview_quality,
+        preview_profile,
+        hdr_preview,
+        preview_images: HashMap::new(),
         small: source.duplicate(),
         small_cache: HashMap::new(),
         full: Arc::new(Mutex::new(None)),
@@ -557,7 +594,12 @@ async fn render_claimed(
         .await
         .map_err(|error| AppError::Unknown(error.to_string()))?
         .map_err(|error| grade_error(locale, error))?;
-    Ok(Json(rendered))
+    Ok(create_response(
+        true,
+        &tr(locale, "response.ok"),
+        0,
+        Some(rendered),
+    ))
 }
 
 async fn grade_writable(
@@ -718,8 +760,35 @@ fn execute_prepared(mut prepared: Prepared) -> Result<Value, String> {
     if session.writable {
         let _ = write_grade_sidecar(&session.path, &session.doc);
     }
-    let quality = if kind == RenderKind::Full { 92 } else { 82 };
-    let preview = preview_url(&rendered.preview, quality);
+    let quality = session.preview_quality;
+    let preview_profile = preview_profile_for(&session.doc, session.hdr_preview);
+    session.preview_profile = preview_profile;
+    let Some((bytes, content_type)) =
+        preview_image(&rendered.preview, &rendered.frame, preview_profile, quality)
+    else {
+        return Err("grade preview encode failed".to_string());
+    };
+    let preview_kind = if kind == RenderKind::Full {
+        "full"
+    } else {
+        "small"
+    };
+    let generation = session.edit_gen;
+    let generation_prefix = format!("{generation}:");
+    session
+        .preview_images
+        .retain(|key, _| key.starts_with(&generation_prefix));
+    session.preview_images.insert(
+        format!("{generation}:{preview_kind}"),
+        PreviewImage {
+            bytes: Bytes::from(bytes),
+            content_type,
+        },
+    );
+    let preview = format!(
+        "/api/grade/image/{}/{}/{}",
+        session.rev, generation, preview_kind
+    );
     let view = view_json(rendered.degrees, rendered.roi);
     if kind == RenderKind::Full {
         session.full_cache = cache;
@@ -727,6 +796,7 @@ fn execute_prepared(mut prepared: Prepared) -> Result<Value, String> {
             "rev": session.rev,
             "preview": preview,
             "view": view,
+            "hdr_preview": preview_profile.is_hdr(),
         }));
     }
     session.small_cache = cache;
@@ -743,12 +813,14 @@ fn execute_prepared(mut prepared: Prepared) -> Result<Value, String> {
             "node": node,
             "preview": preview,
             "view": view,
+            "hdr_preview": preview_profile.is_hdr(),
         }));
     }
     Ok(json!({
         "rev": session.rev,
         "preview": preview,
         "view": view,
+        "hdr_preview": preview_profile.is_hdr(),
     }))
 }
 
@@ -832,6 +904,32 @@ fn load_frame(path: &std::path::Path, raw: bool, max_edge: u32) -> Result<Loaded
     })
 }
 
+fn preview_profile_for(doc: &Document, hdr_capable: bool) -> OutputProfile {
+    if !hdr_capable {
+        return OutputProfile::SdrSrgb;
+    }
+    output_profile_for_doc(doc).unwrap_or(OutputProfile::SdrSrgb)
+}
+
+fn output_profile_for_doc(doc: &Document) -> Result<OutputProfile, String> {
+    let node = doc
+        .nodes
+        .iter()
+        .find(|node| node.id == "export")
+        .ok_or_else(|| "export node is missing".to_string())?;
+    let params = params_json(node);
+    let space = params
+        .get("color_space")
+        .and_then(Value::as_str)
+        .unwrap_or("srgb");
+    let transfer = params
+        .get("transfer")
+        .and_then(Value::as_str)
+        .unwrap_or("srgb");
+    crate::grade::output_profile_from_selection(space, transfer)
+        .ok_or_else(|| "unsupported export output profile".to_string())
+}
+
 /// Render the Lumeno grade document (or the default pipeline when the photo has none) to an
 /// encoded image, full size unless `max_width` is set. The original and XMP stay untouched.
 pub async fn render_grade_export(
@@ -864,11 +962,35 @@ pub async fn render_grade_export(
         if let Some(saved) = read_grade_sidecar(&source) {
             let _ = apply_saved_document(&mut doc, &saved);
         }
+        let output = output_profile_for_doc(&doc).map_err(AppError::Unknown)?;
         bind_lut_for_photo(&source, &doc).map_err(AppError::Unknown)?;
         let dirty: HashSet<String> = doc.nodes.iter().map(|node| node.id.clone()).collect();
         let mut cache = HashMap::new();
         let cancel = CancelFlag::new();
         let rendered = render_cancellable(&doc, &frame, &mut cache, &dirty, &cancel);
+        if output.is_hdr() {
+            let Some(transfer) = output.hdr_transfer() else {
+                unreachable!("is_hdr implies a transfer");
+            };
+            if out_ext != "avif" {
+                return Err(AppError::BadRequest(
+                    "HDR export is only available as AVIF".to_string(),
+                ));
+            }
+            let output_frame = crate::grade::resize_frame_to_max_width(
+                &crate::grade::bake_view_frame(&rendered.frame),
+                max_width,
+            );
+            return crate::backend::album::media::encode_avif_hdr(
+                output_frame.width,
+                output_frame.height,
+                output_frame.rgb(),
+                transfer,
+                output.reference_white_nits(),
+                quality.clamp(1, 100) as u8,
+            )
+            .map_err(AppError::Unknown);
+        }
         let preview = bake_view(&rendered.preview, rendered.degrees, rendered.roi);
         encode_rgba(&preview, &out_ext, quality, max_width)
             .map_err(|error| AppError::Unknown(error))
@@ -921,6 +1043,12 @@ fn encode_rgba(
                     image::ImageFormat::WebP,
                 )
                 .map_err(|error| error.to_string())?;
+        }
+        "avif" => {
+            bytes = crate::backend::album::media::encode_avif(
+                &image::DynamicImage::ImageRgba8(img),
+                quality.clamp(1, 100) as u8,
+            )?;
         }
         "tiff" | "tif" => {
             image::DynamicImage::ImageRgba8(img)
@@ -999,28 +1127,116 @@ fn field_json(locale: &str, field: &FieldSpec) -> Value {
     })
 }
 
-fn preview_url(rgba: &Rgba, quality: u8) -> String {
-    let mut rgb = Vec::with_capacity((rgba.width * rgba.height * 3) as usize);
-    for pixel in rgba.pixels.chunks_exact(4) {
-        rgb.extend_from_slice(&pixel[..3]);
+fn preview_image(
+    rgba: &Rgba,
+    frame: &Frame,
+    profile: OutputProfile,
+    quality: u8,
+) -> Option<(Vec<u8>, &'static str)> {
+    if profile.is_hdr() {
+        let transfer = profile.hdr_transfer()?;
+        let bytes = crate::backend::album::media::encode_avif_hdr(
+            frame.width,
+            frame.height,
+            frame.rgb(),
+            transfer,
+            profile.reference_white_nits(),
+            quality.clamp(1, 100),
+        )
+        .ok()?;
+        return Some((bytes, "image/avif"));
     }
+    let image = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.pixels.clone())?;
+    let dynamic = image::DynamicImage::ImageRgba8(image);
+    // AVIF is the preferred preview container. If the local libheif build has
+    // no AV1 encoder, keep the workspace usable with a JPEG fallback.
+    if let Ok(bytes) =
+        crate::backend::album::media::encode_avif(&dynamic, quality.clamp(1, 100) as u8)
+    {
+        return Some((bytes, "image/avif"));
+    }
+    let rgb = dynamic.to_rgb8();
     let mut bytes = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality);
-    if encoder
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality.clamp(1, 100) as u8);
+    encoder
         .encode(
-            &rgb,
-            rgba.width,
-            rgba.height,
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
             image::ExtendedColorType::Rgb8,
         )
-        .is_err()
+        .ok()?;
+    Some((bytes, "image/jpeg"))
+}
+
+pub async fn api_grade_preview_image(
+    locale: RequestLocale,
+    token: Token,
+    AxumPath((rev, generation, kind)): AxumPath<(u64, u64, String)>,
+) -> Result<Response<Body>, AppError> {
+    let session = lock_session(&token.0, rev)
+        .map_err(|_| AppError::NotFound(tr(locale.as_str(), "error.grade_preview_not_found")))?;
+    let image = {
+        let guard = session.lock().unwrap_or_else(|err| err.into_inner());
+        guard
+            .preview_images
+            .get(&format!("{generation}:{kind}"))
+            .cloned()
+    };
+    let Some(image) = image else {
+        return Err(AppError::NotFound(tr(
+            locale.as_str(),
+            "error.grade_preview_not_found",
+        )));
+    };
+    let mut response = Response::new(Body::from(image.bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(image.content_type),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloseBody {
+    rev: u64,
+}
+
+pub async fn api_grade_close(
+    ctx: Ctx,
+    Json(body): Json<CloseBody>,
+) -> Result<Json<Value>, AppError> {
+    let token = ctx.token.0.clone();
+    let mut sessions = SESSIONS.lock().unwrap_or_else(|err| err.into_inner());
+    let Some(session) = sessions.get(&body.rev).cloned() else {
+        return Ok(create_response(
+            true,
+            &tr(ctx.locale.as_str(), "response.ok"),
+            0,
+            None,
+        ));
+    };
     {
-        return String::new();
+        let guard = session.lock().unwrap_or_else(|err| err.into_inner());
+        if guard.token != token {
+            return Err(AppError::NotFound(tr(
+                ctx.locale.as_str(),
+                "error.grade_preview_not_found",
+            )));
+        }
     }
-    format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
+    sessions.remove(&body.rev);
+    Ok(create_response(
+        true,
+        &tr(ctx.locale.as_str(), "response.ok"),
+        0,
+        None,
+    ))
 }
 
 async fn resolve_source(

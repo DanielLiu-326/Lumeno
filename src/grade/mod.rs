@@ -9,6 +9,7 @@ mod exec;
 mod field;
 mod meter;
 mod nodes;
+mod output;
 mod pipeline;
 mod profile;
 mod store;
@@ -21,9 +22,11 @@ pub use document::{
 };
 pub use error::GradeError;
 pub use exec::{
-    CancelFlag, Frame, Rgba, bake_view, frame_from_camera_rgb, frame_from_image, render_cancellable,
+    CancelFlag, Frame, Rgba, bake_view, bake_view_frame, frame_from_camera_rgb, frame_from_image,
+    present_with_profile, render_cancellable, resize_frame_to_max_width,
 };
 pub use meter::auto_exposure_ev;
+pub use output::{HdrTransfer, OutputProfile, output_profile_from_selection};
 pub use pipeline::{CompiledNode, InputPlan, NodeStatus, Pipeline, PipelineProblem};
 pub use profile::parse_camera_profile;
 pub use store::{

@@ -12,18 +12,21 @@ pub const THUMBNAIL_SIZE: u32 = 360;
 /// Large enough for AI scan pHash (needs only 32×32).
 pub const PREVIEW_THUMBNAIL_SIZE: u32 = THUMBNAIL_SIZE;
 
-/// `/api/thumbnail` size bounds when `size` is set and non-zero (`0` = full res).
+/// Default/clamp bounds used by storage cleanup. `/api/thumbnail` itself
+/// accepts any requested edge; only `THUMBNAIL_CACHE_SIZES` are canonical.
 pub const THUMBNAIL_SIZE_MIN: u32 = 64;
-pub const THUMBNAIL_SIZE_MAX: u32 = 1024;
+pub const THUMBNAIL_SIZE_MAX: u32 = 1600;
+
+/// One edge for the desktop/mobile detail preview and the grade workspace's
+/// working preview. The full image remains `size=0`.
+pub const DETAIL_PREVIEW_SIZE: u32 = 1600;
 
 /// Thumbnail edge lengths the clients request. Storage attribution maps cached
 /// files back to their source with exactly this set, so a size missing here only
 /// makes a live thumbnail look unattributed — it is deletable and regenerated on
 /// the next view. `0` is the full-size render. Add a size here when the frontend
 /// starts asking for a new one.
-pub const THUMBNAIL_CACHE_SIZES: &[u32] = &[
-    0, 96, 160, 240, 256, 320, 360, 400, 512, 640, 800, 1024, 1600,
-];
+pub const THUMBNAIL_CACHE_SIZES: &[u32] = &[0, 256, 360, DETAIL_PREVIEW_SIZE];
 
 /// AI face-crop edge length written at detection save time (`face-crops/…webp`).
 pub const FACE_CROP_SIZE: u32 = 256;

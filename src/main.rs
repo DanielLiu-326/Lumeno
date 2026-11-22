@@ -46,7 +46,8 @@ use backend::files::{
     api_new_folder, api_rename_file, api_upload, api_upload_feed, web_egui_file, web_file,
 };
 use backend::grade_api::{
-    api_grade_full, api_grade_node, api_grade_open, api_grade_preview, api_grade_profile,
+    api_grade_close, api_grade_full, api_grade_node, api_grade_open, api_grade_preview,
+    api_grade_preview_image, api_grade_profile,
 };
 use backend::grade_resources::{
     api_grade_resources_delete, api_grade_resources_list, api_grade_resources_lut,
@@ -227,7 +228,12 @@ async fn main() {
             get(api_darktable_preview),
         )
         .route("/api/grade/open", post(api_grade_open))
+        .route("/api/grade/close", post(api_grade_close))
         .route("/api/grade/preview", post(api_grade_preview))
+        .route(
+            "/api/grade/image/{rev}/{generation}/{kind}",
+            get(api_grade_preview_image),
+        )
         .route("/api/grade/node", post(api_grade_node))
         .route("/api/grade/full", post(api_grade_full))
         .route("/api/grade/profile", post(api_grade_profile))

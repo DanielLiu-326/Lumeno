@@ -15,6 +15,7 @@ use super::buffer::{self, DisplayBuffer, ImageSize, LinearBuffer, WorkingSpace};
 use super::color::{self, encode_u8, luma, rec2020_to_linear_srgb, srgb_to_linear};
 use super::document::{self, Document};
 use super::error::GradeError;
+use super::output::OutputProfile;
 use super::pipeline::Pipeline;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +107,9 @@ pub struct ExecCtx<'a> {
 
 pub struct Render {
     pub preview: Rgba,
+    /// Linear Rec.2020 frame after the last node. Kept so the host can run an
+    /// HDR/output-profile encode without rerunning the grade pipeline.
+    pub frame: Frame,
     pub degrees: f32,
     pub roi: [f32; 4],
     pub elapsed_ms: u128,
@@ -307,11 +311,12 @@ fn render_pipeline(
             pixels: Vec::new(),
         }
     } else {
-        present(&current)
+        present_with_profile(&current, OutputProfile::SdrSrgb)
     };
     (
         Render {
             preview,
+            frame: frame.clone_frame(),
             degrees: current.transform.degrees,
             roi: [current.roi.x, current.roi.y, current.roi.w, current.roi.h],
             elapsed_ms: started.elapsed().as_millis(),
@@ -322,10 +327,21 @@ fn render_pipeline(
 }
 
 pub fn original_preview(source: &Frame) -> Rgba {
-    present(source)
+    present_with_profile(source, OutputProfile::SdrSrgb)
 }
 
-fn present(frame: &Frame) -> Rgba {
+/// Final display transform. Scene tone and tone mapping are already baked into
+/// `frame`; this stage only applies the target profile's gamut and transfer.
+pub fn present_with_profile(frame: &Frame, profile: OutputProfile) -> Rgba {
+    match profile {
+        OutputProfile::SdrSrgb => present_sdr_srgb(frame),
+        // The preview host only requests SDR today. HDR variants are consumed
+        // by the final AVIF encoder, not by this 8-bit display path.
+        OutputProfile::HdrRec2020Pq | OutputProfile::HdrRec2020Hlg => present_sdr_srgb(frame),
+    }
+}
+
+fn present_sdr_srgb(frame: &Frame) -> Rgba {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let mut pixels = vec![0u8; w * h * 4];
@@ -426,6 +442,130 @@ pub fn bake_view(rgba: &Rgba, degrees: f32, roi: [f32; 4]) -> Rgba {
         height: out_h,
         pixels: out,
     }
+}
+
+/// Bake the same rotation/ROI into a linear RGB frame. Used by output profiles
+/// that cannot go through the 8-bit SDR `bake_view` path.
+pub fn bake_view_frame(frame: &Frame) -> Frame {
+    let [rx, ry, rw, rh] = [frame.roi.x, frame.roi.y, frame.roi.w, frame.roi.h];
+    let no_geometry = frame.transform.degrees.abs() < 1e-3
+        && rx <= 1e-4
+        && ry <= 1e-4
+        && (rw - 1.0).abs() < 1e-3
+        && (rh - 1.0).abs() < 1e-3;
+    if no_geometry {
+        return frame.clone_frame();
+    }
+    let (w, h) = (frame.width, frame.height);
+    if w == 0 || h == 0 {
+        return Frame {
+            width: 0,
+            height: 0,
+            space: frame.space,
+            rgb: Arc::new(Vec::new()),
+            transform: ViewTransform::default(),
+            roi: Roi::default(),
+        };
+    }
+    let wf = w as f32;
+    let hf = h as f32;
+    let rad = frame.transform.degrees.to_radians();
+    let (sin_a, cos_a) = (rad.sin(), rad.cos());
+    let canvas_w = (wf * cos_a.abs() + hf * sin_a.abs()).round().max(1.0);
+    let canvas_h = (wf * sin_a.abs() + hf * cos_a.abs()).round().max(1.0);
+    let rw = rw.clamp(1e-3, 1.0);
+    let rh = rh.clamp(1e-3, 1.0);
+    let out_w = (rw * canvas_w).round().max(1.0) as u32;
+    let out_h = (rh * canvas_h).round().max(1.0) as u32;
+    let src = &frame.rgb;
+    let src_w = w as usize;
+    let src_h = h as usize;
+    let mut out = vec![0f32; out_w as usize * out_h as usize * 3];
+    let row_len = out_w as usize * 3;
+    for_rows(out_h as usize, row_len, &mut out, |oy, row| {
+        let cy = ry * canvas_h + (oy as f32 + 0.5) * rh * canvas_h / out_h as f32;
+        let dy = cy - canvas_h * 0.5;
+        for ox in 0..out_w as usize {
+            let cx = rx * canvas_w + (ox as f32 + 0.5) * rw * canvas_w / out_w as f32;
+            let dx = cx - canvas_w * 0.5;
+            let lx = dx * cos_a + dy * sin_a;
+            let ly = -dx * sin_a + dy * cos_a;
+            let px = bilinear_rgb_f32(
+                src,
+                src_w,
+                src_h,
+                lx + (wf - 1.0) * 0.5,
+                ly + (hf - 1.0) * 0.5,
+            );
+            let dst = ox * 3;
+            row[dst..dst + 3].copy_from_slice(&px);
+        }
+    });
+    Frame {
+        width: out_w,
+        height: out_h,
+        space: frame.space,
+        rgb: Arc::new(out),
+        transform: ViewTransform::default(),
+        roi: Roi::default(),
+    }
+}
+
+/// Downscale a linear frame to a maximum width without passing through u8.
+pub fn resize_frame_to_max_width(frame: &Frame, max_width: u32) -> Frame {
+    if max_width == 0 || frame.width <= max_width || frame.width == 0 || frame.height == 0 {
+        return frame.clone_frame();
+    }
+    let height = ((frame.height as f32) * (max_width as f32 / frame.width as f32))
+        .round()
+        .max(1.0) as u32;
+    let Some(image) = image::ImageBuffer::<image::Rgb<f32>, Vec<f32>>::from_raw(
+        frame.width,
+        frame.height,
+        frame.rgb.as_ref().clone(),
+    ) else {
+        return frame.clone_frame();
+    };
+    let resized = image::imageops::resize(
+        &image,
+        max_width,
+        height,
+        image::imageops::FilterType::Triangle,
+    );
+    Frame {
+        width: max_width,
+        height,
+        space: frame.space,
+        rgb: Arc::new(resized.into_raw()),
+        transform: frame.transform,
+        roi: frame.roi,
+    }
+}
+
+fn bilinear_rgb_f32(src: &[f32], w: usize, h: usize, sx: f32, sy: f32) -> [f32; 3] {
+    const EPS: f32 = 1e-3;
+    if sx < -EPS || sy < -EPS || sx >= w as f32 + EPS || sy >= h as f32 + EPS {
+        return [0.0; 3];
+    }
+    let x = sx.clamp(0.0, w as f32 - 1.0);
+    let y = sy.clamp(0.0, h as f32 - 1.0);
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(w.saturating_sub(1));
+    let y1 = (y0 + 1).min(h.saturating_sub(1));
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let i00 = (y0 * w + x0) * 3;
+    let i01 = (y0 * w + x1) * 3;
+    let i10 = (y1 * w + x0) * 3;
+    let i11 = (y1 * w + x1) * 3;
+    let mut out = [0.0; 3];
+    for c in 0..3 {
+        let top = src[i00 + c] + (src[i01 + c] - src[i00 + c]) * fx;
+        let bottom = src[i10 + c] + (src[i11 + c] - src[i10 + c]) * fx;
+        out[c] = top + (bottom - top) * fy;
+    }
+    out
 }
 
 fn bilinear_rgba(src: &[u8], w: usize, h: usize, sx: f32, sy: f32) -> [u8; 4] {
@@ -529,6 +669,10 @@ pub(crate) fn frame_from_value(value: &buffer::Value) -> Option<Frame> {
 }
 
 impl Frame {
+    pub(crate) fn rgb(&self) -> &[f32] {
+        &self.rgb
+    }
+
     pub fn duplicate(&self) -> Frame {
         self.clone_frame()
     }
@@ -985,6 +1129,46 @@ mod tests {
             sum(bright) > sum(mid),
             "brightening should raise the yellow, mid={mid:?} bright={bright:?}"
         );
+    }
+
+    fn linear_test_frame(width: u32, height: u32, rgb: Vec<f32>) -> Frame {
+        Frame {
+            width,
+            height,
+            space: Space::Linear,
+            rgb: Arc::new(rgb),
+            transform: ViewTransform::default(),
+            roi: Roi::default(),
+        }
+    }
+
+    #[test]
+    fn linear_bake_preserves_rotation_and_roi() {
+        let mut frame = linear_test_frame(2, 1, vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        frame.transform.degrees = 90.0;
+        let out = bake_view_frame(&frame);
+        assert_eq!((out.width, out.height), (1, 2));
+        assert_eq!(out.rgb[..3], [1.0, 0.0, 0.0]);
+        assert_eq!(out.rgb[3..], [0.0, 0.0, 1.0]);
+
+        let frame = linear_test_frame(4, 4, vec![0.5; 4 * 4 * 3]);
+        let mut cropped = frame;
+        cropped.roi = Roi {
+            x: 0.25,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+        };
+        let out = bake_view_frame(&cropped);
+        assert_eq!((out.width, out.height), (2, 2));
+    }
+
+    #[test]
+    fn linear_resize_keeps_the_aspect_ratio() {
+        let frame = linear_test_frame(4, 2, vec![0.5; 4 * 2 * 3]);
+        let out = resize_frame_to_max_width(&frame, 2);
+        assert_eq!((out.width, out.height), (2, 1));
+        assert_eq!(out.rgb.len(), 2 * 1 * 3);
     }
 
     #[test]

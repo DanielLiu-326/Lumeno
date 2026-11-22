@@ -8,6 +8,9 @@ import { encodePath } from "./path.js";
 /** Shared default edge length. Callers pass a size only when they really differ. */
 export const DEFAULT_THUMBNAIL_SIZE = 360;
 
+/** Detail viewer preview edge; desktop and mobile request the same size. */
+export const DETAIL_PREVIEW_SIZE = 1600;
+
 /**
  * `/api/thumbnail/{path}?size=…&owner=…`
  *

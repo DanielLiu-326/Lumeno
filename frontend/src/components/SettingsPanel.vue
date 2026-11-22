@@ -159,6 +159,7 @@ watch(
       thumbnail_generation_mode: "on_demand",
       thumbnail_scan_interval: "1d",
       thumbnail_quality: 85,
+      original_preview_quality: 98,
       thumbnail_format: "avif",
       ai_enabled: false,
       ai_provider: "local",
@@ -941,6 +942,13 @@ function promptResetPassword(member) {
                 <input v-model.number="localSettings.thumbnail_quality" type="number" min="1" max="100" placeholder="85"
                   class="w-full rounded-lg border px-3 py-2 text-sm"
                   :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+              </div>
+              <div>
+                <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.originalPreviewQuality') }}</label>
+                <input v-model.number="localSettings.original_preview_quality" type="number" min="1" max="100" placeholder="98"
+                  class="w-full rounded-lg border px-3 py-2 text-sm"
+                  :class="isDark ? 'border-stone-700 bg-stone-800 text-stone-100 placeholder:text-stone-500' : 'border-stone-300 bg-white text-stone-900 placeholder:text-stone-400'" />
+                <p class="mt-1 text-xs" :class="isDark ? 'text-stone-500' : 'text-stone-400'">{{ t('settings.originalPreviewQualityHint') }}</p>
               </div>
               <div>
                 <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-300' : 'text-stone-600'">{{ t('settings.thumbnailFormat') }}</label>

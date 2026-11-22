@@ -1197,6 +1197,7 @@ fn export_extension(format: &str) -> Option<&'static str> {
         "png" => Some("png"),
         "tiff" | "tif" => Some("tiff"),
         "webp" => Some("webp"),
+        "avif" => Some("avif"),
         _ => None,
     }
 }
@@ -1209,7 +1210,11 @@ fn same_export_format(path: &Path, out_ext: &str) -> bool {
         .to_ascii_lowercase();
     matches!(
         (src.as_str(), out_ext),
-        ("jpg" | "jpeg", "jpg") | ("png", "png") | ("tif" | "tiff", "tiff") | ("webp", "webp")
+        ("jpg" | "jpeg", "jpg")
+            | ("png", "png")
+            | ("tif" | "tiff", "tiff")
+            | ("webp", "webp")
+            | ("avif", "avif")
     )
 }
 

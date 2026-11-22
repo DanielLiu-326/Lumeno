@@ -226,6 +226,9 @@ pub async fn darktable_export(
     if out_ext == "jpg" {
         cmd.arg("--conf")
             .arg(format!("plugins/imageio/format/jpeg/quality={quality}"));
+    } else if out_ext == "avif" {
+        cmd.arg("--conf")
+            .arg(format!("plugins/imageio/format/avif/quality={quality}"));
     }
     cmd.arg("--library")
         .arg(":memory:")

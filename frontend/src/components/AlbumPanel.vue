@@ -10,7 +10,7 @@ import {
 } from "../utils/icons";
 import { t } from "../i18n/index.js";
 import { albumCoverUrl } from "../utils/albumCover.js";
-import { DEFAULT_THUMBNAIL_SIZE, thumbnailUrl } from "../utils/thumbnailUrl.js";
+import { DEFAULT_THUMBNAIL_SIZE, DETAIL_PREVIEW_SIZE, thumbnailUrl } from "../utils/thumbnailUrl.js";
 import { encodePath } from "../utils/path.js";
 import { httpFetch, httpJson, postJson } from "../utils/http";
 import { downloadFileByUrl, saveBlobResponse } from "../utils/downloadFile.js";
@@ -513,6 +513,7 @@ const exportDirectCopy = computed(() => {
     case "png": return srcExt === "png";
     case "tiff": return srcExt === "tif" || srcExt === "tiff";
     case "webp": return srcExt === "webp";
+    case "avif": return srcExt === "avif";
     default: return false;
   }
 });
@@ -2077,18 +2078,19 @@ const detailPlaybackSrc = computed(() => {
 const detailImageSrc = computed(() => {
   if (!detailPhoto.value) return "";
   if (isDetailVideo.value) {
-    return getThumbnail(detailPhoto.value.path, 800, detailPhoto.value.owner);
+    return getThumbnail(detailPhoto.value.path, DETAIL_PREVIEW_SIZE, detailPhoto.value.owner);
   }
   const isRaw = isRawFile(detailPhoto.value.name);
 
   // Explicit darktable toggle (requires XMP): always use darktable_preview.
   if (darktablePreview.value && hasXmpSidecar.value) {
-    const size = detailFullscreen.value || detailExpanded.value || isMobile.value ? 0 : 1600;
-    return getDarktablePreviewUrl(detailPhoto.value.path, size);
+    return getDarktablePreviewUrl(detailPhoto.value.path, DETAIL_PREVIEW_SIZE);
   }
 
   if (detailImageFallback.value) {
-    return getThumbnail(detailPhoto.value.path, 800, detailPhoto.value.owner);
+    // A failed original should not silently downgrade an opened full-size view
+    // to the small grid preview. Ask for a full render instead.
+    return getThumbnail(detailPhoto.value.path, DETAIL_PREVIEW_SIZE, detailPhoto.value.owner);
   }
 
   // Non-darktable: JPEG/etc can use original; RAW goes through /api/thumbnail (LibRaw/lumeno).
@@ -2100,7 +2102,7 @@ const detailImageSrc = computed(() => {
     return getOriginalUrl(detailPhoto.value.path);
   }
 
-  return getThumbnail(detailPhoto.value.path, isMobile.value ? 1600 : 1200, detailPhoto.value.owner);
+  return getThumbnail(detailPhoto.value.path, DETAIL_PREVIEW_SIZE, detailPhoto.value.owner);
 });
 
 function downloadOriginal() {
@@ -2126,7 +2128,6 @@ function onToggleApplyXmp() {
 function onToggleApplyGrade() {
   if (exportForm.value.applyGrade) exportForm.value.applyXmp = false;
 }
-
 function openExportSelection() {
   if (exportSelectionPending.value || selectedPhotoPaths.value.size === 0) return;
   menuPhoto.value = null;
@@ -3787,11 +3788,12 @@ defineExpose({
               <option value="png">PNG</option>
               <option value="tiff">TIFF</option>
               <option value="webp">WebP</option>
+              <option value="avif">AVIF</option>
             </select>
           </div>
 
           <!-- Quality -->
-          <div class="mb-3" v-if="exportForm.format === 'jpeg' || exportForm.format === 'webp'">
+          <div class="mb-3" v-if="exportForm.format === 'jpeg' || exportForm.format === 'webp' || exportForm.format === 'avif'">
             <label class="mb-1 block text-xs font-medium" :class="isDark ? 'text-stone-400' : 'text-stone-500'">{{ t('detail.exportQuality') }}: {{ exportForm.quality }}</label>
             <AppSlider v-model="exportForm.quality" :min="1" :max="100" :is-dark="isDark" />
           </div>

@@ -172,6 +172,20 @@ impl SettingsManager {
         Self::thumbnail_quality_from(&*self.settings.lock().await)
     }
 
+    /// Quality used when a full-size (size=0) image has to be re-encoded.
+    /// Ordinary originals are streamed untouched and do not use this value.
+    pub fn original_preview_quality_from(settings: &Value) -> u8 {
+        settings
+            .get("original_preview_quality")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as u8).clamp(1, 100))
+            .unwrap_or(98)
+    }
+
+    pub async fn original_preview_quality(&self) -> u8 {
+        Self::original_preview_quality_from(&*self.settings.lock().await)
+    }
+
     pub fn darktable_concurrency_from(settings: &Value) -> usize {
         settings
             .get("darktable_concurrency")

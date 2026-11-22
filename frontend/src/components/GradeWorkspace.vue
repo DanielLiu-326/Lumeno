@@ -40,6 +40,8 @@ const emit = defineEmits([
 
 const nodes = ref([]);
 const preview = ref("");
+const hdrPreview = ref(false);
+let hdrPreviewFallback = false;
 const view = ref({ degrees: 0, roi: { x: 0, y: 0, w: 1, h: 1 } });
 const rev = ref(0);
 const loading = ref(false);
@@ -75,6 +77,13 @@ const naturalSize = ref({ w: 0, h: 0 });
 let panOrigin = null;
 let navDrag = null;
 let viewObserver = null;
+let previewRecovery = 0;
+
+async function readGradeResponse(res) {
+  const payload = await res.json().catch(() => ({}));
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : {};
+  return { payload, data };
+}
 
 let openAbort = null;
 let patchAbort = null;
@@ -97,6 +106,11 @@ function colorLabels(value) {
   const labels = Array.isArray(value) ? value : String(value || "").split(",");
   return labels.map((label) => String(label).trim()).filter(Boolean);
 }
+
+const exportTransfer = computed(() => {
+  const node = nodes.value.find((item) => item.id === "export");
+  return node?.params?.transfer || "srgb";
+});
 
 const dimensions = computed(() => {
   const photo = props.photo;
@@ -174,6 +188,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(patchTimer);
   pendingPatches.clear();
   wantFull = false;
+  closeSession(rev.value);
   endStripDrag();
 });
 
@@ -188,9 +203,30 @@ function syncMeta(photo) {
   editTags.value = (photo.tags || []).map((tag) => String(tag).trim()).filter(Boolean);
 }
 
+function closeSession(revToClose) {
+  if (!revToClose) return;
+  void httpFetch("/api/grade/close", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    keepalive: true,
+    body: JSON.stringify({ rev: revToClose }),
+  }).catch(() => {});
+}
+
+function supportsHdrPreview() {
+  return !hdrPreviewFallback
+    && typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(dynamic-range: high)").matches;
+}
+
 async function openSession() {
   const photo = props.photo;
   if (!photo?.path) return;
+  if (rev.value) {
+    closeSession(rev.value);
+    rev.value = 0;
+  }
   openAbort?.abort();
   previewAbort?.abort();
   patchAbort?.abort();
@@ -207,7 +243,10 @@ async function openSession() {
   error.value = "";
   let opened = false;
   try {
-    const body = { path: photo.path };
+    const body = {
+      path: photo.path,
+      hdr_preview: supportsHdrPreview(),
+    };
     if (photo.owner) body.owner = photo.owner;
     const res = await httpFetch("/api/grade/open", {
       method: "POST",
@@ -215,10 +254,10 @@ async function openSession() {
       signal: ctrl.signal,
       body: JSON.stringify(body),
     });
-    const data = await res.json().catch(() => ({}));
+    const { payload, data } = await readGradeResponse(res);
     if (ctrl.signal.aborted || props.photo?.path !== photo.path) return;
     if (!res.ok) {
-      error.value = data.message || t("grade.failed");
+      error.value = payload.message || t("grade.failed");
       if (openAbort === ctrl) {
         window.clearTimeout(quietTimer);
         wantFull = false;
@@ -226,6 +265,7 @@ async function openSession() {
       return;
     }
     rev.value = data.rev;
+    hdrPreview.value = !!data.hdr_preview;
     nodes.value = data.nodes || [];
     fullReady.value = false;
     opened = true;
@@ -258,9 +298,10 @@ async function requestPreview(revAtStart) {
       signal: ctrl.signal,
       body: JSON.stringify({ rev: revAtStart }),
     });
-    const data = await res.json().catch(() => ({}));
+    const { data } = await readGradeResponse(res);
     if (ctrl.signal.aborted || seq !== previewSeq || rev.value !== revAtStart) return;
     if (!res.ok || !data.preview || data.superseded || fullReady.value) return;
+    hdrPreview.value = !!data.hdr_preview;
     preview.value = data.preview;
     applyView(data);
   } catch (err) {
@@ -402,12 +443,12 @@ async function postNode(node, signal, seq) {
         rev: sentRev,
       }),
     });
-    const data = await res.json().catch(() => ({}));
+    const { payload, data } = await readGradeResponse(res);
     if (signal.aborted || seq !== patchSeq || rev.value !== sentRev || props.photo?.path !== photoPath) return "stale";
     if (data.superseded) return "superseded";
     if (!res.ok) {
-      if (sessionGone(data)) return "reopen";
-      error.value = data.message || t("grade.failed");
+      if (sessionGone(payload)) return "reopen";
+      error.value = payload.message || t("grade.failed");
       return "error";
     }
     const index = nodes.value.findIndex((item) => item.id === node.id);
@@ -415,6 +456,7 @@ async function postNode(node, signal, seq) {
       nodes.value.splice(index, 1, data.node);
     }
     if (data.preview) {
+      hdrPreview.value = !!data.hdr_preview;
       preview.value = data.preview;
       fullReady.value = false;
       applyView(data);
@@ -440,9 +482,10 @@ async function requestFull(revAtStart) {
       signal: ctrl.signal,
       body: JSON.stringify({ rev: revAtStart }),
     });
-    const data = await res.json().catch(() => ({}));
+    const { data } = await readGradeResponse(res);
     if (ctrl.signal.aborted || seq !== refineSeq || rev.value !== revAtStart) return;
     if (!res.ok || !data.preview) return;
+    hdrPreview.value = !!data.hdr_preview;
     preview.value = data.preview;
     fullReady.value = true;
     applyView(data);
@@ -550,15 +593,15 @@ async function importProfile(file) {
       signal: ctrl.signal,
       body,
     });
-    const data = await res.json().catch(() => ({}));
+    const { payload, data } = await readGradeResponse(res);
     if (ctrl.signal.aborted || seq !== patchSeq || rev.value !== sentRev || props.photo?.path !== photoPath) return;
     if (data.superseded) return;
     if (!res.ok) {
-      if (sessionGone(data) && props.photo?.path === photoPath) {
+      if (sessionGone(payload) && props.photo?.path === photoPath) {
         await openSession();
         return;
       }
-      error.value = data.message || t("grade.failed");
+      error.value = payload.message || t("grade.failed");
       return;
     }
     const index = nodes.value.findIndex((item) => item.id === "input-color-profile");
@@ -809,6 +852,7 @@ function measureView() {
 }
 
 function onPreviewLoad(event) {
+  previewRecovery = 0;
   const img = event.target;
   const w = img?.naturalWidth || 0;
   const h = img?.naturalHeight || 0;
@@ -816,6 +860,19 @@ function onPreviewLoad(event) {
     naturalSize.value = { w, h };
   }
   measureView();
+}
+
+function onPreviewError() {
+  if (hdrPreview.value) {
+    hdrPreview.value = false;
+    hdrPreviewFallback = true;
+    void openSession();
+    return;
+  }
+  if (!preview.value || previewRecovery >= 2) return;
+  previewRecovery += 1;
+  if (fullReady.value) void requestFull(rev.value);
+  else void requestPreview(rev.value);
 }
 
 function bindViewObserver() {
@@ -1107,7 +1164,8 @@ defineExpose({ syncMeta });
                 <img ref="previewImgRef" :src="preview" alt="" draggable="false"
                   class="absolute select-none object-fill"
                   :style="bitmapStyle"
-                  @load="onPreviewLoad" />
+                  @load="onPreviewLoad"
+                  @error="onPreviewError" />
               </div>
               <div v-if="placed?.showCanvas" class="pointer-events-none absolute inset-0 overflow-hidden">
                 <div class="absolute border-2 border-white shadow-[0_0_0_999px_rgba(0,0,0,0.55)]"
@@ -1132,7 +1190,7 @@ defineExpose({ syncMeta });
       <aside class="flex w-80 shrink-0 flex-col border-l"
         :class="isDark ? 'border-white/12' : 'border-stone-900/15'"
         @click.stop>
-        <GradeHistogram :src="preview" :caption="caption" :is-dark="isDark" />
+        <GradeHistogram :src="preview" :caption="caption" :is-dark="isDark" :hdr="hdrPreview" :hdr-transfer="exportTransfer" />
         <div class="app-split-b flex shrink-0 gap-1 px-2 py-1.5">
           <button v-for="id in GROUP_ORDER" :key="id" type="button"
             class="flex h-9 flex-1 items-center justify-center rounded-md transition"
@@ -1141,32 +1199,40 @@ defineExpose({ syncMeta });
               : (isDark ? 'text-stone-400 hover:bg-white/8 hover:text-stone-200' : 'text-stone-500 hover:bg-white/70 hover:text-stone-800')"
             :title="groupTitle(id)"
             @click="selectGroup(id)">
-            <svg v-if="id === 'active'" viewBox="0 0 20 20" class="h-5 w-5" fill="currentColor" aria-hidden="true">
-              <path d="M11 2a1 1 0 10-2 0v6a1 1 0 102 0V2z" />
-              <path d="M6.3 3.8a1 1 0 10-1.6-1.2A7 7 0 1015.3 2.6a1 1 0 10-1.6 1.2A5 5 0 116.3 3.8z" />
+            <svg v-if="id === 'active'" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <circle cx="10" cy="10" r="5.6" />
+              <circle cx="10" cy="10" r="2.1" fill="currentColor" stroke="none" />
             </svg>
-            <svg v-else-if="id === 'base'" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-              <circle cx="10" cy="10" r="5.5" />
+            <svg v-else-if="id === 'base'" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M3.2 6h13.6M3.2 10h13.6M3.2 14h13.6" stroke-linecap="round" />
+              <circle cx="7" cy="6" r="1.45" fill="currentColor" stroke="none" />
+              <circle cx="12.8" cy="10" r="1.45" fill="currentColor" stroke="none" />
+              <circle cx="8.2" cy="14" r="1.45" fill="currentColor" stroke="none" />
             </svg>
-            <svg v-else-if="id === 'tone'" viewBox="0 0 20 20" class="h-5 w-5" aria-hidden="true">
-              <circle cx="10" cy="10" r="6" fill="currentColor" />
+            <svg v-else-if="id === 'tone'" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <circle cx="10" cy="10" r="5.6" />
+              <path d="M10 4.4a5.6 5.6 0 010 11.2z" fill="currentColor" stroke="none" />
             </svg>
-            <svg v-else-if="id === 'color'" viewBox="0 0 20 20" class="h-5 w-5" aria-hidden="true">
-              <circle cx="10" cy="10" r="6" fill="url(#grade-wheel)" />
+            <svg v-else-if="id === 'color'" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+              <circle cx="10" cy="10" r="5.7" fill="url(#grade-wheel)" stroke="none" />
+              <path d="M10 4.3a5.7 5.7 0 010 11.4M4.3 10a5.7 5.7 0 0111.4 0" stroke="currentColor" stroke-opacity=".5" />
               <defs>
-                <linearGradient id="grade-wheel" x1="4" y1="4" x2="16" y2="16">
+                <linearGradient id="grade-wheel" x1="4.3" y1="4.3" x2="15.7" y2="15.7">
                   <stop offset="0" stop-color="#f87171" />
-                  <stop offset="0.5" stop-color="#4ade80" />
+                  <stop offset="0.33" stop-color="#facc15" />
+                  <stop offset="0.66" stop-color="#4ade80" />
                   <stop offset="1" stop-color="#60a5fa" />
                 </linearGradient>
               </defs>
             </svg>
-            <svg v-else-if="id === 'correct'" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-              <path d="M14.5 6.5A5 5 0 116.2 13" stroke-linecap="round" />
-              <path d="M14.5 3.5v3h-3" stroke-linecap="round" stroke-linejoin="round" />
+            <svg v-else-if="id === 'correct'" viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M16 8.2A6.3 6.3 0 104.4 13" stroke-linecap="round" />
+              <path d="M16 4.4v3.8h-3.8" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M7.1 10.2l1.9 1.9 4-4.2" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
-            <svg v-else viewBox="0 0 20 20" class="h-5 w-5" fill="currentColor" aria-hidden="true">
-              <path d="M10 2.5l1.2 3.6 3.8.1-3 2.3 1.1 3.6L10 10.4 6.9 12.1 8 8.5 5 6.2l3.8-.1L10 2.5z" />
+            <svg v-else viewBox="0 0 20 20" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M10 3.1l1.15 3.75L14.9 8l-3.75 1.15L10 12.9 8.85 9.15 5.1 8l3.75-1.15L10 3.1z" stroke-linejoin="round" />
+              <path d="M15.2 12.4l.45 1.45 1.45.45-1.45.45-.45 1.45-.45-1.45-1.45-.45 1.45-.45.45-1.45z" fill="currentColor" stroke="none" />
             </svg>
           </button>
         </div>

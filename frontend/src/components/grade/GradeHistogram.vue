@@ -5,24 +5,37 @@ const props = defineProps({
   src: { type: String, default: "" },
   caption: { type: String, default: "" },
   isDark: { type: Boolean, default: false },
+  hdr: { type: Boolean, default: false },
+  hdrTransfer: { type: String, default: "pq" },
 });
 
 const canvas = ref(null);
 let token = 0;
+let loaded = null;
 
-watch(() => props.src, (src) => {
-  if (!src) {
-    clear();
-    return;
-  }
-  const current = ++token;
-  const image = new Image();
-  image.onload = () => {
-    if (current !== token) return;
-    draw(image);
-  };
-  image.src = src;
-}, { immediate: true });
+watch(
+  () => [props.src, props.hdr, props.hdrTransfer],
+  ([src]) => {
+    if (!src) {
+      loaded = null;
+      clear();
+      return;
+    }
+    if (loaded && loaded.src === src) {
+      draw(loaded);
+      return;
+    }
+    const current = ++token;
+    const image = new Image();
+    image.onload = () => {
+      if (current !== token) return;
+      loaded = image;
+      draw(image);
+    };
+    image.src = src;
+  },
+  { immediate: true },
+);
 
 function clear() {
   const el = canvas.value;
@@ -72,6 +85,24 @@ function draw(image) {
     ctx.fillStyle = colors[index];
     ctx.fill();
   });
+  if (props.hdr) {
+    const marker = props.hdrTransfer === "hlg" ? 0.6969 : 0.5807;
+    const x = marker * width;
+    ctx.fillStyle = isDark ? "rgba(251, 191, 36, 0.10)" : "rgba(180, 83, 9, 0.08)";
+    ctx.fillRect(x, 0, width - x, height);
+    ctx.save();
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = isDark ? "rgba(251, 191, 36, 0.9)" : "rgba(180, 83, 9, 0.8)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = isDark ? "rgba(251, 191, 36, 0.95)" : "rgba(146, 64, 14, 0.95)";
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillText("HDR", Math.min(x + 4, width - 24), 11);
+  }
 }
 
 function smooth(values) {
