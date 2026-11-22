@@ -4,7 +4,7 @@ import FileBrowserPanel from "../../components/FileBrowserPanel.vue";
 import { t } from "../../i18n/index.js";
 import { prettyPath } from "../../utils/path";
 import {
-  IconCheck, IconChevronLeft, IconChevronRight, IconClipboardCopy, IconClose, IconDots,
+  IconCheck, IconChevronLeft, IconChevronRight, IconChevronUp, IconClipboardCopy, IconClose, IconDots,
   IconFolderAdd, IconGrid, IconHome, IconList, IconPencil, IconRefresh, IconScissors, IconTrash, IconUpload,
 } from "../../utils/icons";
 import { ALBUM_APP_KEY, MOBILE_UI_KEY } from "../context.js";
@@ -127,6 +127,16 @@ onMounted(() => {
       class="flex shrink-0 items-center gap-1 border-b px-3 py-2"
       :class="ui.isDark ? 'border-stone-700' : 'border-stone-200'"
     >
+      <button
+        type="button"
+        class="mobile-icon-btn shrink-0"
+        :disabled="!app.canGoUp || app.busy.list"
+        :title="t('files.goUp')"
+        :aria-label="t('files.goUp')"
+        @click="app.goUp()"
+      >
+        <IconChevronUp class="h-5 w-5" />
+      </button>
       <button
         type="button"
         class="mobile-icon-btn shrink-0"

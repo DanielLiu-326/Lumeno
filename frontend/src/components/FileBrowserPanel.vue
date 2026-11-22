@@ -4,7 +4,7 @@ import { prettyPath } from "../utils/path";
 import { hasThumbnail, thumbnailUrl } from "../utils/fileBrowser";
 import { t } from "../i18n/index.js";
 import {
-  IconArrowLeft, IconChevronLeft, IconChevronRight, IconClipboardCopy, IconClipboardPaste,
+  IconArrowLeft, IconChevronLeft, IconChevronRight, IconChevronUp, IconClipboardCopy, IconClipboardPaste,
   IconClose, IconDownload, IconFile, IconFolder, IconFolderAdd, IconHome,
   IconPencil, IconRefresh, IconTrash, IconUpload, IconList, IconGrid, IconScissors,
 } from "../utils/icons";
@@ -489,6 +489,17 @@ defineExpose({ openUpload, closeActionMenu });
 
     <!-- Breadcrumbs -->
     <div v-if="!embedded" class="mb-4 flex flex-wrap items-center gap-2 rounded-2xl px-3 py-2.5 app-frost app-card">
+      <button
+        type="button"
+        class="file-path-nav"
+        :class="props.isDark ? 'text-stone-200 hover:bg-stone-800' : 'text-stone-700 hover:bg-stone-200'"
+        :disabled="!canGoUp || busyList"
+        :title="t('files.goUp')"
+        :aria-label="t('files.goUp')"
+        @click="emit('go-up')"
+      >
+        <IconChevronUp class="h-5 w-5" />
+      </button>
       <button
         type="button"
         class="file-path-nav"
