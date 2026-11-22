@@ -371,6 +371,7 @@ const detailClosing = ref(false);
 const detailNavPhotos = ref(null);
 /** path → the stack member list that contains it, for the active viewer session. */
 const detailStackByPath = ref(new Map());
+let detailBurstToken = 0;
 const gradeStackPhotos = ref([]);
 const gradeAlbumPhotos = ref([]);
 let gradeExpandToken = 0;
@@ -1256,20 +1257,30 @@ async function prepareGradeAlbumPhotos() {
   if (token === gradeExpandToken) gradeAlbumPhotos.value = photos;
 }
 
-async function openBurstStack(photo) {
+async function hydrateBurstStack(photo, token) {
   try {
     const { photos, stackByPath } = await expandPhotoList(gridPhotos.value);
+    if (token !== detailBurstToken || detailPhoto.value?.path !== photo.path) return;
     const members = stackByPath.get(photo.path) || await fetchStackMembers(photo);
-    if (!members.length) throw new Error(t('albums.burstOpenFailed'));
-    const target = members.find((member) => member.path === photo.path) || members[0];
+    if (!members.length) return;
     if (!stackByPath.has(photo.path)) {
       for (const member of members) stackByPath.set(member.path, members);
     }
+    if (token !== detailBurstToken || detailPhoto.value?.path !== photo.path) return;
     detailStackByPath.value = stackByPath;
-    await openPhotoDetail(target, { navPhotos: photos, stackPhotos: members });
-  } catch (error) {
-    window.alert(error?.message || t('albums.burstOpenFailed'));
+    detailNavPhotos.value = photos;
+  } catch {
+    /* The cover is already open; a failed stack lookup only leaves album nav. */
   }
+}
+
+function openBurstStack(photo) {
+  if (!photo?.path) return;
+  // Paint the dialog with the grid cover first. Expanding the stack and
+  // assembling the full navigation list happens after this frame.
+  const token = ++detailBurstToken;
+  openDetail(photo, detailOriginalPreference.value, { fromStackOpen: true });
+  void hydrateBurstStack(photo, token);
 }
 
 async function toggleStackSelect(photo) {
@@ -1756,6 +1767,7 @@ function openDetail(photo, expanded = detailOriginalPreference.value, options = 
   detailClosing.value = false;
   videoUnplayable.value = false;
   if (!options.fromNav) {
+    if (!options.fromStackOpen) detailBurstToken += 1;
     detailNavPhotos.value = options.navPhotos ?? null;
     if (!options.stackPhotos) detailStackByPath.value = new Map();
     const fullscreen = options.fullscreen ?? detailFullscreenPreference.value;
@@ -1827,6 +1839,7 @@ function closeDetail(options = {}) {
 
 function finishCloseDetail() {
   if (!detailClosing.value) return;
+  detailBurstToken += 1;
   detailPhoto.value = null;
   detailNavPhotos.value = null;
   detailStackByPath.value = new Map();
