@@ -24,15 +24,18 @@ The same library has a desktop shell and a mobile web shell, backed by the same 
 - Browse, upload, download, copy, move, rename, and delete files and folders.
 - Resumable chunked uploads with background task progress.
 - Albums with covers, imports/exports, read-only shares, and per-album permissions.
+- Export to JPEG, PNG, TIFF, WebP, or AVIF, with optional XMP or `.lumeno.json` grading.
 - JPEG, PNG, GIF, BMP, WebP, TIFF, HEIC/AVIF (via `libheif`), and RAW (via LibRaw or `darktable-cli`).
 - EXIF capture details; tags, ratings, and color labels written to XMP sidecars.
 - Filter by date, camera, lens, tag, rating, color label, and format; timeline and virtual scrolling.
 - “On this day” and daily picks.
 - MP4/M4V/MOV/WebM import, cover extraction, playback, and cached transcoding with `ffmpeg`.
+- File-level burst stacking with DCT pHash or AI embedding similarity, a per-album time window, and stack-aware viewer navigation.
+- Exact/near duplicate detection with a quality-ranked recommended keeper.
 - Non-destructive grade documents (`.lumeno.json` next to the original) with a desktop tune workspace and a mobile editor.
 - Multi-user administration, album roles, WebDAV shares, storage reports, and cache cleanup.
 - English and Chinese UI, light and dark themes.
-- Optional AI: text search, similar-photo search, face detection/embedding and clustering. Local models are opt-in; a remote provider is also supported.
+- Optional AI: text search, similar-photo search, face detection/embedding, clustering, and embedding-based similarity. Local models are opt-in; a remote provider is also supported.
 
 ## Current limitations
 
@@ -43,10 +46,11 @@ The same library has a desktop shell and a mobile web shell, backed by the same 
 | Live Photos / Motion Photo | Not yet. |
 | GPS and map view | Not yet. |
 | Object tags and semantic object search | Not yet. |
-| Burst stacking | Not yet. |
 | Archive/favorites library | Partial: ratings and color labels only. |
-| Duplicate prevention on import | Partial: similar-photo search exists; import does not skip duplicates automatically. |
+| Duplicate prevention on import | Partial: exact/near duplicate detection and a recommended keeper exist; import still does not skip duplicates automatically. |
+| Recycle bin | Not yet; deletion is currently permanent. Design is in [docs/recycle-bin.md](docs/recycle-bin.md). |
 | Offline mode | Not yet. |
+| HDR output | Rec.2020 PQ/HLG AVIF via `heif-enc`; set color space/transfer on the Export node; format/quality/size in the export dialog; Lumeno grade only. |
 | Native mobile app | Not yet; the mobile shell is a responsive web/PWA surface. |
 | Windows | Not supported; LibRaw through `rsraw-sys` does not support MSVC. |
 
@@ -88,6 +92,7 @@ Optional external tools:
 | `darktable-cli` | RAW thumbnails, previews, and exports | Optional |
 | `exiftool` | RAW/video capture details | Optional |
 | `ffmpeg`, `ffprobe` | Video covers, transcoding, source probing | Optional |
+| `heif-enc` | HDR AVIF export | Optional |
 
 ## Quick start
 

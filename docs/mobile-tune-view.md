@@ -98,7 +98,7 @@
 ## 与桌面共用
 
 - **文档与节点**：同一份 `Document`，同一个 `param_from_json`。手机端不重新定义节点参数。
-- **会话**：`/api/grade/open` 返回 `rev`、节点、直方图所需的原图预览；`/api/grade/node` 打补丁；`/api/grade/preview` 取当前 `rev` 的预览；`/api/grade/full` 给放大后的清晰图。桌面现有的补丁队列（去抖、`AbortController`、丢弃过期 `rev`）抽成 `composables/useGradeSession.js`，两个壳共用。
+- **会话**：`/api/grade/open` 返回 `rev` 和节点；`/api/grade/node` 打补丁；`/api/grade/preview` 取当前 `rev` 的预览 URL；`/api/grade/full` 给放大后的清晰图 URL。桌面现有的补丁队列（去抖、`AbortController`、丢弃过期 `rev`）抽成 `composables/useGradeSession.js`，两个壳共用。
 - **撤销 / 重做**：客户端保存有上限的节点参数快照（约 30 步），撤销就是把上一份参数再打一次补丁。桌面现在没有这个功能，顺手补上，两端共用同一套历史。
 - **对比**：进入会话时的第一帧预览留在内存里，长按显示它，不额外请求。
 
@@ -106,7 +106,7 @@
 
 ```text
 打开详情 ── 调色 ── POST /api/grade/open { path }
-                        │  rev, nodes[], preview(640), writable
+                        │  data.rev, data.nodes[], data.writable
                         ▼
                  渲染预览（object URL）
                         │

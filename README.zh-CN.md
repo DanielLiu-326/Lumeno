@@ -24,15 +24,18 @@ Lumeno 是一个自托管的个人照片与文件库。后端使用 Rust/Axum，
 - 浏览、上传、下载、复制、移动、重命名和删除文件与目录。
 - 断点分块上传，后台任务显示进度。
 - 相册封面、导入导出、只读分享和按相册授权。
+- 支持导出 JPEG、PNG、TIFF、WebP 或 AVIF，可选择应用 XMP 或 `.lumeno.json` 调色。
 - JPEG、PNG、GIF、BMP、WebP、TIFF、HEIC/AVIF（经 `libheif`）和 RAW（LibRaw 或 `darktable-cli`）。
 - 读取 EXIF；标签、评分、色标写入 XMP sidecar。
 - 按日期、相机、镜头、标签、评分、色标和格式筛选；时间轴与虚拟滚动。
 - “那年今日”和每日精选。
 - MP4/M4V/MOV/WebM 导入、封面、播放，以及用 `ffmpeg` 转码并缓存。
+- 文件级连拍折叠：DCT pHash 或 AI embedding 相似度、相册级时间窗口，以及查看器内的组成员导航。
+- 完全/近似重复图像检测，并推荐质量最高的保留项。
 - 非破坏调色：原片旁的 `.lumeno.json`，桌面调色工作区与手机编辑器。
 - 多用户管理、相册角色、WebDAV 共享、存储统计和缓存清理。
 - 中英文界面，明暗主题。
-- 可选 AI：文字搜索、相似照片、人脸检测/嵌入与聚类。本地模型需要显式安装，也支持远程 provider。
+- 可选 AI：文字搜索、相似照片、人脸检测/嵌入、聚类和 embedding 相似度。本地模型需要显式安装，也支持远程 provider。
 
 ## 当前限制
 
@@ -43,10 +46,11 @@ Lumeno 是一个自托管的个人照片与文件库。后端使用 Rust/Axum，
 | 实况照片 / Motion Photo | 未做。 |
 | GPS 与地图 | 未做。 |
 | 物体标签与语义物体搜索 | 未做。 |
-| 连拍堆叠 | 未做。 |
 | 归档/收藏库 | 部分：只有评分和色标。 |
-| 导入时去重 | 部分：可找相似照片，但导入不会自动跳过重复。 |
+| 导入时去重 | 部分：已有完全/近似重复检测和推荐保留项，但导入不会自动跳过重复。 |
+| 回收站 | 未做；当前删除仍是永久删除。设计见 [docs/recycle-bin.md](docs/recycle-bin.md)。 |
 | 离线模式 | 未做。 |
+| HDR 输出 | 通过 `heif-enc` 输出 Rec.2020 PQ/HLG AVIF；色彩空间/曲线在 Export 节点设置，格式/质量/尺寸在导出对话框选择；仅 Lumeno 调色。 |
 | 原生手机 App | 未做；手机壳是响应式 Web/PWA 界面。 |
 | Windows | 不支持；`rsraw-sys` 不支持 MSVC。 |
 
@@ -88,6 +92,7 @@ Lumeno 是一个自托管的个人照片与文件库。后端使用 Rust/Axum，
 | `darktable-cli` | RAW 缩略图、预览与导出 | 可选 |
 | `exiftool` | RAW/视频拍摄信息 | 可选 |
 | `ffmpeg`、`ffprobe` | 视频封面、转码、源编码探测 | 可选 |
+| `heif-enc` | HDR AVIF 导出 | 可选 |
 
 ## 快速开始
 

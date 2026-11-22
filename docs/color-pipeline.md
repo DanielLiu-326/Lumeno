@@ -488,14 +488,22 @@ pub enum Value {
 
 布局固定为交错 RGB，便于点运算一次扫描。邻域算法内部可以临时拆平面，节点返回前再打包。
 
+归一化约定之前，先分清三层职责：
+
+- **Scene tone**：曝光、局部对比等，始终在工作空间的线性光上。
+- **Tone mapping**：sigmoid 等显示映射，负责把场景范围压到显示范围；它不负责输出 primaries/transfer。
+- **Output profile**：最终把 tone mapping 后的帧按目标 gamut、transfer、bit depth 输出。SDR 走 `SdrSrgb`；HDR 走 Rec.2020 PQ/HLG（1.0 对应 203 nits）并写入 nclx。
+- **HDR 预览**：调色工作区的预览 profile 跟随 `export` 节点；浏览器报告 HDR 显示支持时使用节点的 HDR profile，否则回退 `SdrSrgb`。导出格式/质量/尺寸仍由导出对话框选择。
+
 归一化约定：
 
 - 白平衡把码值减黑电平后除以 `(white_level - black_level)`，再乘通道系数，得到线性 RAW。高光重建之前允许大于 1。
 - 工作空间里的值是场景线性，中灰不强制映射；曝光节点以 2 的幂作用在当前值上。
-- 显示缓冲在 Sigmoid 输出处裁切到 `[0, 1]`。Export 再做 sRGB OETF。
+- tone mapping 缓冲在 Sigmoid 输出处裁切到 `[0, 1]`。
+- Output profile 是独立的最终阶段：`SdrSrgb` 做线性 Rec.2020 → linear sRGB → sRGB OETF。HDR 不复用这个 SDR OETF，而是把 tone mapping 后的显示参考值按 203 nits 参考白编码为 10-bit PQ AVIF；sigmoid 的 `white` 可以高于 100% 以保留 HDR 头room。
 - 掩码在消费前夹到 `[0, 1]`。`NaN` 和无穷当成 `0`。
 
-内存：图像一层 `f32×3`，2400 万像素约 288MB。掩码一层约 96MB。每个输出上的值放进 `Arc`，下游只克隆指针。某个输出的全部下游都完成后，执行器丢掉这个 `Arc`。首版因此要求宿主对全尺寸导出做全局并发 1。预览长边默认 1600。
+内存：图像一层 `f32×3`，2400 万像素约 288MB。掩码一层约 96MB。每个输出上的值放进 `Arc`，下游只克隆指针。某个输出的全部下游都完成后，执行器丢掉这个 `Arc`。首版因此要求宿主对全尺寸导出做全局并发 1。调色工作区快速预览与详情预览同为 `1600` 长边；全图预览按原尺寸渲染。
 
 ## 8. 执行器
 
@@ -1085,16 +1093,9 @@ m = clamp(0.5 + contrast * (m - 0.5), 0, 1)
 
 ### 9.18 Export
 
-输入 `DisplayRgb`，无像素输出。`image` 有值时产生 `EncodedImage`。没有这条边，或上游没写出值时，本节点不编码，`execute` 返回 `Inactive`。
+输入 `DisplayRgb`，无像素输出，是调色图的终点。它保存输出色彩空间和曲线（sRGB + sRGB、Rec.2020 + PQ、Rec.2020 + HLG）；格式、质量和长边仍属于实际导出请求，由导出按钮弹出的窗口选择。旧 sidecar 中可能带有 `format`、`quality`、`long_edge`，读取时忽略。
 
-| 字段 | 类型 | 范围 | 默认 |
-| --- | --- | --- | --- |
-| `format` | `jpeg` \| `webp` \| `png` \| `tiff` | — | `jpeg` |
-| `quality` | u8 | 1–100 | 90 |
-| `long_edge` | u32 | 0–16384 | 0 |
-| `bit_depth` | 8 \| 16 | png/tiff 可用 16 | 8 |
-
-`long_edge = 0` 表示保持当前尺寸。大于 0 时在 OETF 之前用面积平均缩小。JPEG/WebP 固定 8 位。PNG/TIFF 的 16 位走线性量化：先 OETF 再乘以 65535。
+预览只使用自己的预览尺寸和质量设置，忽略导出参数；导出时由服务端按请求重新渲染完整帧。
 
 sRGB OETF：
 
@@ -1102,8 +1103,6 @@ sRGB OETF：
 若 L <= 0.0031308：  c = 12.92 * L
 否则：              c = 1.055 * L^(1/2.4) - 0.055
 ```
-
-预览目标忽略本节点的 `format` 和 `quality`，固定 WebP、质量 80、长边为 `ExecTarget::Preview.max_edge`。预览仍然遵守几何和调色，这样屏幕上的构图和导出一致。
 
 ```rust
 pub struct EncodedImage {
